@@ -1051,12 +1051,13 @@ def _chatgpt_code_step(ws, a, log, upstream, should_stop=None):
                         saw_code = True
                         break
                     if not pg.query_selector(_PWD):
-                        # 无码框也无密码框: 见过码框后消失 = 人工已越过
+                        # 无码框也无密码框:
+                        #  见过码框后消失 = 人工已越过
                         if saw_code:
                             return "ok_passed"
-                        if "about-you" in url or (
-                                "chatgpt.com" in url
-                                and "auth" not in url):
+                        #  已登录主界面 (有聊天输入框) = 无需填码
+                        if pg.query_selector(
+                                "#prompt-textarea,textarea"):
                             return "ok_passed"
                 except Exception:
                     pass
