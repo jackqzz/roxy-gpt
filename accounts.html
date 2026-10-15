@@ -247,6 +247,7 @@
       <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--text-dim);cursor:pointer" title="只开窗定位到 chatgpt.com, 登录注册全程手动">半自动<input type="checkbox" id="semiauto"></label>
       <label class="semi-opt" style="display:flex;align-items:center;gap:4px;font-size:12px;color:var(--text-dim);cursor:pointer" title="开窗后后台盯接码接口, 出码显示在下方接码面板">📨接码<input type="checkbox" id="semi-watch" checked></label>
       <label class="semi-opt" style="display:flex;align-items:center;gap:4px;font-size:12px;color:var(--text-dim);cursor:pointer" title="开窗时调 AI 模型按邮箱生成姓名+年龄, 面板可复制">🤖资料<input type="checkbox" id="semi-prof" checked></label>
+      <label class="semi-opt" style="display:flex;align-items:center;gap:4px;font-size:12px;color:var(--text-dim);cursor:pointer" title="自动点 Log in 并填入邮箱提交, 密码/验证码/资料页仍手动">✉️邮箱<input type="checkbox" id="semi-email" checked></label>
       <button class="btn btn-outline btn-sm" id="pat-sel">🧪 PAT检验选中</button>
       <button class="btn btn-outline btn-sm btn-danger" id="del-sel">删除选中</button>
       <button class="btn btn-ghost btn-sm" id="reload" title="刷新">⟳</button>
@@ -401,7 +402,8 @@ function startOpen(ids, btn) {
   post("/api/accounts/open",
        { ids, semiauto: $("semiauto").checked,
          watch_code: $("semi-watch").checked,
-         gen_profile: $("semi-prof").checked }).then(r => {
+         gen_profile: $("semi-prof").checked,
+         auto_email: $("semi-email").checked }).then(r => {
     btn.disabled = false;
     if (r.error) return toast("✗ " + r.error);
     toast(`开窗任务启动: ${r.count} 个账号`);

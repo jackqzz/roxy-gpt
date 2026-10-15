@@ -877,6 +877,59 @@ def _looks_verify(pg):
                           r"checking your|验证你是", _page_text(pg), re.I))
 
 
+def _email_fill_step(pg, email, log, hdelay, tdelay, stopped=None):
+    """chatgpt 落地页 -> 点 Log in -> 等邮箱框 -> 拟人填邮箱。
+    不提交 (提交前调用方可能要先做接码基线)。返回 None=ok 或错误串。"""
+    def _stopped():
+        return bool(stopped and stopped())
+    _em = pg.query_selector(EMAIL_INPUT)
+    if not (_em and _em.is_visible()):
+        # 真实鼠标点击 (JS click 无 pointer 事件, isTrusted=false)
+        clicked = False
+        for sel in ('button:has-text("Log in")',
+                    'a:has-text("Log in")',
+                    'text=/^\\s*Log in\\s*$/i'):
+            try:
+                pg.click(sel, timeout=3000)
+                clicked = True
+                break
+            except Exception:
+                continue
+        if not clicked:
+            clicked = pg.evaluate("""() => {
+                const els=[...document.querySelectorAll(
+                    'button,a,[role=button]')];
+                const b=els.find(e=>/^\\s*(log\\s*in|sign\\s*in|登录|登入)\\s*$/i
+                                  .test((e.innerText||'').trim()));
+                if(b){b.click();return (b.innerText||'').trim()}
+                return null;
+            }""")
+        if clicked:
+            log("  已点登录按钮 (%s)" % str(clicked)[:20])
+    try:
+        pg.wait_for_selector(EMAIL_INPUT, timeout=20000)
+    except Exception:
+        if _stopped():
+            return "stopped"
+        if _looks_verify(pg):
+            log("  ⚠ 人机验证 —— 请在窗口里手动完成, 流程继续等")
+            pg.wait_for_selector(EMAIL_INPUT, timeout=120000)
+        else:
+            return "没等到邮箱输入框: " + _page_text(pg)[:80]
+    if _stopped():
+        return "stopped"
+    hdelay()
+    try:
+        pg.fill(EMAIL_INPUT, "")
+    except Exception:
+        pass
+    pg.click(EMAIL_INPUT)
+    pg.type(EMAIL_INPUT, email, delay=tdelay())
+    log("  已填入邮箱 %s" % email)
+    hdelay()
+    return None
+
+
 def _chatgpt_goto(ws):
     """半自动: 只把窗口导航到 chatgpt.com 就交还人工。"""
     from playwright.sync_api import sync_playwright
@@ -891,6 +944,50 @@ def _chatgpt_goto(ws):
             if "chatgpt.com" not in (pg.url or ""):
                 pg.goto(TARGET_URL, wait_until="domcontentloaded",
                         timeout=60000)
+            return "ok"
+        finally:
+            br.close()
+
+
+def _chatgpt_email_step(ws, a, log, should_stop=None):
+    """半自动·自动输入邮箱: 点 Log in -> 填邮箱 -> 提交, 之后交还人工。"""
+    import random
+    from playwright.sync_api import sync_playwright
+    _st = _settings()
+    _smin = float(_st.get("pace_step_min") or 2.0)
+    _smax = float(_st.get("pace_step_max") or 6.0)
+    _tmin = int(_st.get("pace_type_min") or 90)
+    _tmax = int(_st.get("pace_type_max") or 240)
+    _loadms = int(_st.get("pace_load_ms") or 5000)
+
+    def hdelay(lo=None, hi=None):
+        time.sleep(random.uniform(
+            lo if lo is not None else _smin,
+            hi if hi is not None else _smax))
+
+    def tdelay():
+        return random.randint(_tmin, _tmax)
+
+    with sync_playwright() as pw:
+        br = pw.chromium.connect_over_cdp(ws)
+        try:
+            ctx = br.contexts[0] if br.contexts else None
+            pg = (ctx.pages[0] if ctx and ctx.pages
+                  else (ctx.new_page() if ctx else None))
+            if pg is None:
+                return "拿不到页面"
+            if "chatgpt.com" not in (pg.url or ""):
+                pg.goto(TARGET_URL, wait_until="domcontentloaded",
+                        timeout=60000)
+            pg.wait_for_timeout(_loadms)
+            hdelay()
+            err = _email_fill_step(pg, a["email"], log,
+                                   hdelay, tdelay, should_stop)
+            if err:
+                return err
+            if not _real_continue(pg):
+                return "提交按钮点不动"
+            log("  ✉ 邮箱已提交 —— 密码/验证码/资料页交给你 ✋")
             return "ok"
         finally:
             br.close()
@@ -935,56 +1032,11 @@ def _chatgpt_login(ws, a, log, upstream, should_stop=None):
                         timeout=60000)
             pg.wait_for_timeout(_loadms)
             hdelay()
-            # 1) 点 Log in 打开登录弹层 (此步 JS click 可用)
-            # 注意: login_hint 落地页就在 DOM 里但隐藏, 必须判可见性
-            _em = pg.query_selector(EMAIL_INPUT)
-            if not (_em and _em.is_visible()):
-                # 真实鼠标点击 (JS click 无 pointer 事件, isTrusted=false)
-                clicked = False
-                for sel in ('button:has-text("Log in")',
-                            'a:has-text("Log in")',
-                            'text=/^\\s*Log in\\s*$/i'):
-                    try:
-                        pg.click(sel, timeout=3000)
-                        clicked = True
-                        break
-                    except Exception:
-                        continue
-                if not clicked:
-                    clicked = pg.evaluate("""() => {
-                        const els=[...document.querySelectorAll(
-                            'button,a,[role=button]')];
-                        const b=els.find(e=>/^\\s*(log\\s*in|sign\\s*in|登录|登入)\\s*$/i
-                                          .test((e.innerText||'').trim()));
-                        if(b){b.click();return (b.innerText||'').trim()}
-                        return null;
-                    }""")
-                if clicked:
-                    log("  已点登录按钮 (%s)" % str(clicked)[:20])
-            # 2) 等邮箱框 (人机验证兜底等人工)
-            try:
-                pg.wait_for_selector(EMAIL_INPUT, timeout=20000)
-            except Exception:
-                if stopped():
-                    return "stopped"
-                if _looks_verify(pg):
-                    log("  ⚠ 人机验证 —— 请在窗口里手动完成, 流程继续等")
-                    pg.wait_for_selector(EMAIL_INPUT, timeout=120000)
-                else:
-                    return "没等到邮箱输入框: " + _page_text(pg)[:80]
-            if stopped():
-                return "stopped"
-            hdelay()
-            # 3) 清空后拟人填邮箱
-            try:
-                pg.fill(EMAIL_INPUT, "")
-            except Exception:
-                pass
-            pg.click(EMAIL_INPUT)
-            pg.type(EMAIL_INPUT, email,
-                    delay=tdelay())
-            log("  已填入邮箱 %s" % email)
-            hdelay()
+            # 1-3) 点 Log in -> 等邮箱框 -> 拟人填邮箱 (与半自动共用)
+            err = _email_fill_step(pg, email, log,
+                                   hdelay, tdelay, stopped)
+            if err:
+                return err
             # 3.5) 提交前记旧码基线 —— 供应商接码接口有缓存滞后,
             # 新邮件落地前会再把上一次的旧码返回一阵, 得排除
             stale = set()
@@ -1195,7 +1247,7 @@ _WS_TOKEN_JS = """async (wsid) => {
     return j.accessToken || null;
 }"""
 
-_INVITE_JS = """async ({ws, email, fid, sid}) => {
+_INVITE_JS = """async ({ws, emails, fid, sid}) => {
     const s = await fetch('/api/auth/session?exchange_workspace_token=true'
         + '&workspace_id=' + ws + '&reason=setCurrentAccount',
         {credentials: 'include'});
@@ -1207,7 +1259,7 @@ _INVITE_JS = """async ({ws, email, fid, sid}) => {
                   'chatgpt-account-id': ws,
                   'content-type': 'application/json'},
         body: JSON.stringify({
-            email_addresses: [email], flow_id: fid,
+            email_addresses: emails, flow_id: fid,
             role: 'standard-user', seat_type: 'usage_based',
             resend_emails: true, submission_id: sid})});
     const body = await r.text();
@@ -1337,6 +1389,55 @@ def _pat_worker(ids):
                 mpg.goto("https://chatgpt.com",
                          wait_until="domcontentloaded", timeout=60000)
                 mpg.wait_for_timeout(4000)
+            # 2) 母号批量邀请 —— 一次请求拉全部子号进空间
+            #    (email_addresses 本就是数组; 401/token过期 →
+            #    刷新母号页重取 at, 最多 3 次)
+            emails = {}
+            for aid in ids:
+                a = next((x for x in _load_accounts()
+                          if x["id"] == aid), None)
+                if a:
+                    emails[aid] = a["email"]
+            r = {}
+            for att in range(3):
+                r = mpg.evaluate(_INVITE_JS, {
+                    "ws": ws_id, "emails": list(emails.values()),
+                    "fid": str(uuid.uuid4()),
+                    "sid": str(uuid.uuid4())})
+                if r.get("status") == 401 \
+                        or "token_expired" in (r.get("body") or ""):
+                    log(f"  母号 token 过期, 刷新页面重取 ({att + 1}/3)")
+                    try:
+                        mpg.goto(TARGET_URL,
+                                 wait_until="domcontentloaded",
+                                 timeout=60000)
+                        mpg.wait_for_timeout(4000)
+                    except Exception:
+                        pass
+                    continue
+                break
+            if r.get("status") == 401 \
+                    or "token_expired" in (r.get("body") or "") \
+                    or r.get("code") == "no_token":
+                log("✗ 母号会话已失效 —— 请在母号窗口重新登录后再跑")
+                for i2 in ids:
+                    PAT_JOB["results"][i2] = "母号未登录"
+                return
+            if r.get("status") != 200:
+                log(f"✗ 批量邀请失败 {r.get('status')} "
+                    f"{(r.get('body') or '')[:150]}")
+                for i2 in ids:
+                    PAT_JOB["results"][i2] = \
+                        "邀请失败 %s" % r.get("status")
+                return
+            try:
+                bj = json.loads(r.get("body") or "{}")
+            except Exception:
+                bj = {}
+            already = set(bj.get("already_member_emails") or [])
+            new_cnt = len(emails) - len(already & set(emails.values()))
+            log(f"→ 批量邀请完成: 新发 {new_cnt} 个, "
+                f"已是成员 {len(emails) - new_cnt} 个")
             for aid in ids:
                 if PAT_JOB["stop"]:
                     log("⏹ 已手动停止")
@@ -1347,55 +1448,6 @@ def _pat_worker(ids):
                     continue
                 email = a["email"]
                 try:
-                    # 2) 母号发邀请 —— token_expired/401: 刷新母号页
-                    # 让 web 应用续签会话后重取 at, 最多 3 次
-                    r = {}
-                    for att in range(3):
-                        r = mpg.evaluate(_INVITE_JS, {
-                            "ws": ws_id, "email": email,
-                            "fid": str(uuid.uuid4()),
-                            "sid": str(uuid.uuid4())})
-                        if r.get("status") == 401 \
-                                or "token_expired" \
-                                in (r.get("body") or ""):
-                            log(f"  母号 token 过期, 刷新页面重取 "
-                                f"({att + 1}/3)")
-                            try:
-                                mpg.goto(TARGET_URL,
-                                         wait_until="domcontentloaded",
-                                         timeout=60000)
-                                mpg.wait_for_timeout(4000)
-                            except Exception:
-                                pass
-                            continue
-                        break
-                    if r.get("status") == 401 \
-                            or "token_expired" in (r.get("body") or ""):
-                        log("✗ 母号会话已失效 —— "
-                            "请在母号窗口重新登录后再跑")
-                        for i2 in ids:
-                            PAT_JOB["results"][i2] = "母号未登录"
-                        return
-                    if r.get("status") == 200:
-                        try:
-                            bj = json.loads(r.get("body") or "{}")
-                        except Exception:
-                            bj = {}
-                        if email in (bj.get("already_member_emails")
-                                     or []):
-                            log(f"→ {email}: 已是成员, 跳过邀请")
-                        else:
-                            log(f"→ {email}: 已邀请进空间")
-                    elif r.get("code") == "no_token":
-                        log(f"✗ {email}: 母号会话失效 —— 请重新登录母号窗口")
-                        PAT_JOB["results"][aid] = "母号未登录"
-                        break
-                    else:
-                        PAT_JOB["results"][aid] = \
-                            "邀请失败 %s" % r.get("status")
-                        log(f"✗ {email}: 邀请失败 "
-                            f"{r.get('status')} {(r.get('body') or '')[:120]}")
-                        continue
                     # 3) 子号窗口: 保证绑了代理并打开
                     px = _load_proxies()
                     p = next((x for x in px
@@ -1499,10 +1551,11 @@ OPEN_WORKERS = 3          # 并行开窗/注册并发数 (每个窗口是一个�
 
 
 def _open_worker(accs, semiauto=False, watch_code=False,
-                 gen_profile=False):
+                 gen_profile=False, auto_email=False):
     """并行: 选代理 -> 绑定 -> Roxy 开窗 -> 跳 chatgpt.com (注册)
     semiauto=True 时定位到主站即停, 登录注册全程人工;
-    watch_code/gen_profile 是半自动可选附加项 (接码监听/AI资料)。
+    watch_code/gen_profile/auto_email 是半自动可选附加项
+    (接码监听 / AI资料 / 自动填邮箱提交)。
     db_lock 保护代理选取/绑定和 JSON 落盘 —— 避免并发抢同一代理
     或互相覆盖写文件。"""
     OPEN_JOB["running"] = True
@@ -1577,6 +1630,15 @@ def _open_worker(accs, semiauto=False, watch_code=False,
                     if gen_profile:
                         _prof_gen_start(a)
                         log(f"  [{email}] 🤖 资料生成中 …")
+                    if auto_email:
+                        r2 = _chatgpt_email_step(
+                            ws, a, lambda m: log(f"  [{email}] {m}"),
+                            should_stop=_stopped)
+                        if r2 == "ok":
+                            log(f"  [{email}] ✉ 自动输入邮箱完成")
+                        else:
+                            log(f"  [{email}] ✉ 自动输入邮箱失败: {r2}"
+                                f" —— 请手动继续")
                 else:
                     a["status"] = "login_failed"
                     OPEN_JOB["results"][a["id"]] = r
@@ -2019,7 +2081,8 @@ class H(BaseHTTPRequestHandler):
                 target=_open_worker,
                 args=(accs, bool(req.get("semiauto")),
                       bool(req.get("watch_code", True)),
-                      bool(req.get("gen_profile", True))),
+                      bool(req.get("gen_profile", True)),
+                      bool(req.get("auto_email", True))),
                 daemon=True).start()
             return self._json({"ok": True, "count": len(accs)})
         if self.path == "/api/accounts/open/stop":
