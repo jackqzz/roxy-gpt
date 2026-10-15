@@ -1,0 +1,7 @@
+{
+  "host": "http://127.0.0.1:50000",
+  "api_key": "<roxy api key>",
+  "workspace_id": "<workspace id>",
+  "os": "macOS",
+  "os_version": "15.3.2"
+}

@@ -1,0 +1,13 @@
+# 密钥与本地数据 —— 不进仓库
+roxy.json
+proxies.json
+accounts.json
+settings.json
+server.log
+*.tmp
+
+# 环境
+.venv/
+__pycache__/
+*.pyc
+.DS_Store

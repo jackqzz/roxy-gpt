@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>代理池 · roxy-accounts</title>
+<style>
+  :root {
+    --bg-page: #f8fafc;
+    --surface: #ffffff;
+    --surface-hover: #f1f5f9;
+    --border: #e2e8f0;
+    --border-strong: #cbd5e1;
+    --text-main: #0f172a;
+    --text-muted: #64748b;
+    --text-dim: #94a3b8;
+    --primary: #2563eb;
+    --primary-hover: #1d4ed8;
+    --primary-soft: #eff6ff;
+    --success: #10b981;
+    --success-soft: #ecfdf5;
+    --warning: #f59e0b;
+    --warning-soft: #fffbeb;
+    --danger: #ef4444;
+    --danger-soft: #fef2f2;
+    --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+  }
+
+  * { box-sizing: border-box; }
+  .nav-tabs { display: flex; gap: 8px; margin-bottom: 18px; }
+  .nav-tabs a {
+    padding: 6px 16px; border-radius: 8px; font-size: 13px; font-weight: 500;
+    color: var(--text-muted); text-decoration: none; border: 1px solid var(--border);
+    background: var(--surface);
+  }
+  .nav-tabs a.on { background: var(--primary); color: #fff; border-color: var(--primary); }
+  body {
+    margin: 0; padding: 24px 32px 80px; background: var(--bg-page); color: var(--text-main);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .page-container { max-width: 1360px; margin: 0 auto; }
+
+  .page-header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 20px; flex-wrap: wrap; gap: 12px;
+  }
+  .title-group { display: flex; flex-direction: column; gap: 4px; }
+  h1 { font-size: 20px; font-weight: 700; margin: 0; letter-spacing: -0.3px; }
+  .subtitle { font-size: 13px; color: var(--text-muted); }
+
+  .header-actions { display: flex; align-items: center; gap: 10px; }
+
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    padding: 7px 14px; border-radius: 8px; font-size: 13px; font-weight: 500;
+    cursor: pointer; transition: all 0.15s ease; border: 1px solid transparent;
+    user-select: none; text-decoration: none; line-height: 1.4;
+  }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-primary { background: var(--primary); color: #fff; }
+  .btn-primary:hover:not(:disabled) { background: var(--primary-hover); }
+  .btn-outline {
+    background: var(--surface); color: var(--text-main); border-color: var(--border);
+    box-shadow: var(--shadow-sm);
+  }
+  .btn-outline:hover:not(:disabled) { background: var(--surface-hover); border-color: var(--border-strong); }
+  .btn-ghost { background: transparent; color: var(--text-muted); border-color: transparent; }
+  .btn-ghost:hover:not(:disabled) { background: var(--surface-hover); color: var(--text-main); }
+  .btn-sm { padding: 4px 10px; font-size: 12px; border-radius: 6px; }
+  .btn-danger { color: var(--danger); }
+  .btn-danger:hover:not(:disabled) { background: var(--danger-soft); }
+
+  .stats-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px; margin-bottom: 16px;
+  }
+  .stat-card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    padding: 14px 16px; box-shadow: var(--shadow-sm);
+  }
+  .stat-label { font-size: 12px; font-weight: 500; color: var(--text-muted); margin-bottom: 4px; }
+  .stat-val { font-size: 22px; font-weight: 700; font-feature-settings: "tnum"; }
+  .stat-foot { font-size: 11px; color: var(--text-dim); margin-top: 4px; }
+
+  .drawer-card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    padding: 18px; margin-bottom: 16px; box-shadow: var(--shadow-sm);
+  }
+  .drawer-title { font-size: 14px; font-weight: 600; margin-bottom: 8px; display: flex; align-items: center; justify-content: space-between; }
+  textarea.import-textarea {
+    width: 100%; height: 120px; resize: vertical; font-size: 12px;
+    font-family: ui-monospace, Menlo, Monaco, monospace;
+    border: 1px solid var(--border); border-radius: 8px; padding: 10px;
+    background: #f8fafc; color: var(--text-main); outline: none;
+  }
+  textarea.import-textarea:focus { border-color: var(--primary); background: #fff; }
+
+  .toolbar {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px 12px 0 0; padding: 12px 16px;
+    display: flex; align-items: center; justify-content: space-between;
+    flex-wrap: wrap; gap: 10px; border-bottom: none;
+  }
+  .toolbar-left { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .form-select, .form-input {
+    padding: 6px 10px; border: 1px solid var(--border); border-radius: 7px;
+    font-size: 13px; background: var(--surface); color: var(--text-main); outline: none;
+  }
+  .form-input:focus, .form-select:focus { border-color: var(--primary); }
+
+  .table-card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 0 0 12px 12px;
+    box-shadow: var(--shadow-sm); overflow: hidden;
+  }
+  table.data-table {
+    width: 100%; border-collapse: collapse; font-size: 13px; text-align: left;
+  }
+  table.data-table th {
+    background: #f8fafc; color: var(--text-muted); font-size: 11px;
+    font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;
+    padding: 10px 12px; border-bottom: 1px solid var(--border);
+  }
+  table.data-table td {
+    padding: 10px 12px; border-bottom: 1px solid #f1f5f9;
+    vertical-align: middle;
+  }
+  table.data-table tbody tr:hover { background: #f8fafc; }
+  table.data-table tbody tr:last-child td { border-bottom: none; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace; font-size: 12px; }
+  .copyable { cursor: pointer; }
+  .copyable:hover { color: var(--primary); }
+
+  .pill {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600;
+  }
+  .pill-ok { background: var(--success-soft); color: #047857; border: 1px solid #a7f3d0; }
+  .pill-warn { background: var(--warning-soft); color: #b45309; border: 1px solid #fde68a; }
+  .pill-bad { background: var(--danger-soft); color: #b91c1c; border: 1px solid #fecaca; }
+  .pill-dim { background: #f1f5f9; color: #475569; border: 1px solid #e2e8f0; }
+
+  .pager-footer {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 16px; border-top: 1px solid var(--border);
+    background: var(--surface); font-size: 13px; color: var(--text-muted);
+  }
+  .toast {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+    background: #0f172a; color: #fff; padding: 8px 16px; border-radius: 8px;
+    font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 99;
+  }
+</style>
+</head>
+<body>
+<div class="page-container">
+  <div class="nav-tabs">
+    <a href="/" class="on">代理池</a>
+    <a href="/accounts">账号</a>
+  </div>
+  <div class="page-header">
+    <div class="title-group">
+      <h1>代理池</h1>
+      <div class="subtitle">自管理 socks5 静态代理 · 无下层同步 · 绑定/封禁为后面账号模块预留</div>
+    </div>
+    <div class="header-actions">
+      <div style="display:flex;align-items:center;gap:6px;background:var(--surface);
+           border:1px solid var(--border);border-radius:8px;padding:5px 10px;
+           box-shadow:var(--shadow-sm)">
+        <span class="subtitle" style="font-size:12px;white-space:nowrap">⚙ 上级代理</span>
+        <input class="form-input" id="up-in" placeholder="http://127.0.0.1:7897"
+               style="width:190px;font-size:12px;border:none;background:transparent;padding:2px">
+        <button class="btn btn-ghost btn-sm" id="up-save">存</button>
+        <button class="btn btn-ghost btn-sm" id="up-test">测</button>
+        <span class="subtitle" id="up-msg" style="font-size:11px"></span>
+      </div>
+      <button class="btn btn-primary" id="btn-import">+ 导入代理</button>
+    </div>
+  </div>
+
+  <div class="stats-grid">
+    <div class="stat-card">
+      <div class="stat-label">总代理数</div>
+      <div class="stat-val" id="st-total">0</div>
+      <div class="stat-foot">池内全部</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">可用代理</div>
+      <div class="stat-val" id="st-avail" style="color:#059669">0</div>
+      <div class="stat-foot">未标记封禁</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">测活通过</div>
+      <div class="stat-val" id="st-alive" style="color:#2563eb">0</div>
+      <div class="stat-foot">socks5 握手+出口IP</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">已封禁</div>
+      <div class="stat-val" id="st-banned" style="color:#dc2626">0</div>
+      <div class="stat-foot">不再参与选取</div>
+    </div>
+  </div>
+
+  <!-- 导入抽屉 -->
+  <div class="drawer-card" id="import-box" style="display:none">
+    <div class="drawer-title">
+      <span>批量导入代理</span>
+      <button class="btn btn-ghost btn-sm" id="import-close">✕ 关闭</button>
+    </div>
+    <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">
+      每行一条，支持：<code>socks5://user:pass@host:port</code> ·
+      <code>host:port:user:pass</code> · <code>host:port</code> ·
+      <code>user:pass@host:port</code>（密码可含冒号，重复条目自动去重）
+    </div>
+    <textarea class="import-textarea" id="import-text"
+      placeholder="38.15.28.178:42635:user:pass&#10;socks5://user:pass@154.64.133.60:39935"></textarea>
+    <div style="display:flex;align-items:center;gap:10px;margin-top:10px;flex-wrap:wrap">
+      <button class="btn btn-primary btn-sm" id="do-import">确认导入</button>
+      <select id="import-scheme" class="form-select" style="font-size:12px">
+        <option value="socks5" selected>无前缀行按 socks5</option>
+        <option value="http">无前缀行按 http</option>
+      </select>
+      <span class="subtitle" id="import-msg"></span>
+    </div>
+  </div>
+
+  <!-- 工具栏 -->
+  <div class="toolbar">
+    <div class="toolbar-left">
+      <input class="form-input" id="q" placeholder="搜索 host / 账密 / 备注" style="width:200px">
+      <button class="btn btn-outline btn-sm" id="check-sel">⚡ 测活选中</button>
+      <button class="btn btn-outline btn-sm" id="check-all">⚡ 测活全部</button>
+      <span class="subtitle" id="up-hint" style="font-size:11px"></span>
+      <select id="exp-fmt" class="form-select" style="font-size:12px">
+        <option value="colon">host:port:user:pass</option>
+        <option value="url">socks5://user:pass@host:port</option>
+        <option value="json">完整 JSON (备份)</option>
+      </select>
+      <button class="btn btn-outline btn-sm" id="exp-sel">⬇ 导出选中</button>
+      <button class="btn btn-outline btn-sm" id="exp-all">⬇ 导出全部</button>
+      <button class="btn btn-outline btn-sm btn-danger" id="del-sel">删除选中</button>
+      <button class="btn btn-ghost btn-sm" id="reload" title="刷新">⟳</button>
+    </div>
+    <span class="subtitle" id="sel-hint" style="font-size:12px"></span>
+  </div>
+
+  <div class="table-card">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th style="width:36px"><input type="checkbox" id="ck-all"></th>
+          <th style="width:44px">#</th>
+          <th>代理地址</th>
+          <th style="width:130px">认证</th>
+          <th style="width:120px">测活</th>
+          <th style="width:120px">出口 IP</th>
+          <th style="width:80px">封禁</th>
+          <th style="width:70px">绑定</th>
+          <th>备注</th>
+          <th style="width:170px;text-align:right">操作</th>
+        </tr>
+      </thead>
+      <tbody id="tbody"></tbody>
+    </table>
+    <div class="pager-footer" id="pager" style="display:none">
+      <span id="pg-info"></span>
+      <div style="display:flex;gap:6px">
+        <button class="btn btn-outline btn-sm" id="pg-prev">‹ 上一页</button>
+        <button class="btn btn-outline btn-sm" id="pg-next">下一页 ›</button>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+let proxies = [];
+let page = 1;
+const SIZE = 20;
+const sel = new Set();
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g,
+    c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function toast(msg) {
+  const t = $("toast"); t.textContent = msg; t.style.opacity = 1;
+  clearTimeout(t._h); t._h = setTimeout(() => t.style.opacity = 0, 1800);
+}
+async function post(path, body) {
+  const r = await fetch(path, { method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body) });
+  return r.json();
+}
+function urlOf(p) {
+  const auth = p.username ? `${p.username}:***@` : "";
+  return `${p.scheme}://${auth}${p.host}:${p.port}`;
+}
+function filtered() {
+  const q = $("q").value.trim().toLowerCase();
+  if (!q) return proxies;
+  return proxies.filter(p =>
+    (p.host + ":" + p.port).includes(q) ||
+    (p.username || "").toLowerCase().includes(q) ||
+    (p.note || "").toLowerCase().includes(q) ||
+    (p.exit_ip || "").includes(q));
+}
+
+async function load() {
+  const r = await fetch("/api/proxies").then(r => r.json());
+  proxies = r.proxies || [];
+  const s = r.stats || {};
+  $("st-total").textContent = s.total ?? 0;
+  $("st-avail").textContent = s.avail ?? 0;
+  $("st-alive").textContent = s.alive ?? 0;
+  $("st-banned").textContent = s.banned ?? 0;
+  if (document.activeElement !== $("up-in"))
+    $("up-in").value = r.upstream || "";
+  $("up-hint").textContent = r.upstream
+    ? `测活经上级 ${r.upstream}` : "测活直连 (本机无外网时全失败)";
+  sel.clear();
+  render();
+}
+
+function render() {
+  const list = filtered();
+  const pages = Math.max(1, Math.ceil(list.length / SIZE));
+  if (page > pages) page = pages;
+  const rows = list.slice((page - 1) * SIZE, page * SIZE);
+  $("tbody").innerHTML = rows.map((p, i) => {
+    const idx = (page - 1) * SIZE + i + 1;
+    let health;
+    if (p.alive === true)
+      health = `<span class="pill pill-ok">存活 ${p.latency_ms ?? "?"}ms</span>`;
+    else if (p.alive === false)
+      health = `<span class="pill pill-bad">失效</span>`;
+    else
+      health = `<span class="pill pill-dim">未测</span>`;
+    const ban = p.banned
+      ? `<span class="pill pill-bad">已封禁</span>`
+      : `<span class="pill pill-dim">—</span>`;
+    const bound = (p.bound || []).length;
+    return `<tr>
+      <td><input type="checkbox" class="ck" data-id="${p.id}" ${sel.has(p.id) ? "checked" : ""}></td>
+      <td class="mono" style="color:var(--text-dim)">${idx}</td>
+      <td class="mono copyable" data-c="${esc(p.scheme)}://${p.host}:${p.port}" title="点击复制">${esc(p.scheme)}://${esc(p.host)}:${p.port}</td>
+      <td class="mono">${esc(p.username || "—")}</td>
+      <td>${health}</td>
+      <td class="mono">${esc(p.exit_ip || "—")}</td>
+      <td>${ban}</td>
+      <td class="mono">${bound || "—"}</td>
+      <td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(p.note || "")}">${esc(p.note || "")}</td>
+      <td style="text-align:right;white-space:nowrap">
+        <button class="btn btn-ghost btn-sm" data-act="check" data-id="${p.id}">测活</button>
+        <button class="btn btn-ghost btn-sm" data-act="note" data-id="${p.id}">备注</button>
+        <button class="btn btn-ghost btn-sm" data-act="ban" data-id="${p.id}">${p.banned ? "解封" : "封禁"}</button>
+        <button class="btn btn-ghost btn-sm btn-danger" data-act="del" data-id="${p.id}">删</button>
+      </td>
+    </tr>`;
+  }).join("") || `<tr><td colspan="10" style="text-align:center;color:var(--text-dim);padding:32px">暂无代理 —— 点右上角「导入代理」</td></tr>`;
+  $("pager").style.display = list.length > SIZE ? "flex" : "none";
+  $("pg-info").textContent = `第 ${page} / ${pages} 页 · 共 ${list.length} 条`;
+  $("sel-hint").textContent = sel.size ? `已选 ${sel.size} 条` : "";
+}
+
+// ---- 事件 ----
+$("btn-import").onclick = () => $("import-box").style.display = "block";
+$("import-close").onclick = () => $("import-box").style.display = "none";
+$("reload").onclick = load;
+$("q").oninput = () => { page = 1; render(); };
+$("pg-prev").onclick = () => { if (page > 1) { page--; render(); } };
+$("pg-next").onclick = () => {
+  const pages = Math.ceil(filtered().length / SIZE);
+  if (page < pages) { page++; render(); }
+};
+$("ck-all").onchange = e => {
+  filtered().slice((page - 1) * SIZE, page * SIZE)
+    .forEach(p => e.target.checked ? sel.add(p.id) : sel.delete(p.id));
+  render();
+};
+$("tbody").addEventListener("change", e => {
+  if (e.target.classList.contains("ck")) {
+    e.target.checked ? sel.add(e.target.dataset.id) : sel.delete(e.target.dataset.id);
+    $("sel-hint").textContent = sel.size ? `已选 ${sel.size} 条` : "";
+  }
+});
+$("tbody").addEventListener("click", async e => {
+  const cp = e.target.closest(".copyable");
+  if (cp) { navigator.clipboard.writeText(cp.dataset.c); toast("已复制 " + cp.dataset.c); return; }
+  const b = e.target.closest("button[data-act]");
+  if (!b) return;
+  const id = b.dataset.id, act = b.dataset.act;
+  const p = proxies.find(x => x.id === id);
+  if (act === "check") {
+    b.disabled = true; b.textContent = "测中…";
+    const r = await post("/api/proxies/check", { ids: [id] });
+    if (r.error) toast("失败: " + r.error);
+    await load();
+  } else if (act === "note") {
+    const v = prompt("备注", p.note || "");
+    if (v === null) return;
+    await post("/api/proxies/update", { id, note: v });
+    await load();
+  } else if (act === "ban") {
+    await post("/api/proxies/update", { id, banned: !p.banned });
+    await load();
+  } else if (act === "del") {
+    if (!confirm(`删除代理 ${p.host}:${p.port} ?`)) return;
+    await post("/api/proxies/delete", { ids: [id] });
+    sel.delete(id);
+    await load();
+  }
+});
+
+$("up-save").onclick = async () => {
+  const r = await post("/api/settings",
+    { upstream_proxy: $("up-in").value.trim() });
+  if (r.error) { $("up-msg").textContent = "✗ " + r.error; return; }
+  $("up-msg").textContent = r.upstream_proxy ? "已存" : "已清空(直连)";
+  toast("上级代理已保存");
+  await load();
+};
+$("up-test").onclick = async () => {
+  $("up-msg").textContent = "测中…";
+  const r = await post("/api/settings/test-upstream", {});
+  $("up-msg").textContent = r.error
+    ? "✗ " + r.error
+    : `✓ 上级可达 ${r.ms}ms (${r.scheme})`;
+};
+
+$("do-import").onclick = async () => {
+  const text = $("import-text").value;
+  if (!text.trim()) return;
+  const r = await post("/api/proxies/import",
+    { text, scheme: $("import-scheme").value });
+  if (r.error) { $("import-msg").textContent = "✗ " + r.error; return; }
+  let msg = `✓ 导入 ${r.added} 条` +
+    (r.dup ? ` · 跳过重复 ${r.dup}` : "") +
+    (r.bad.length ? ` · ${r.bad.length} 行无法解析` : "");
+  $("import-msg").textContent = msg;
+  if (r.bad.length)
+    console.warn("解析失败行:", r.bad);
+  $("import-text").value = "";
+  await load();
+};
+
+async function check(ids, btn) {
+  btn.disabled = true;
+  const old = btn.textContent;
+  btn.textContent = "测活中…";
+  const r = await post("/api/proxies/check", { ids: ids.length ? ids : undefined });
+  btn.disabled = false; btn.textContent = old;
+  if (r.error) { toast("✗ " + r.error); return; }
+  toast(`测活完成: ${r.passed}/${r.tested} 存活`);
+  await load();
+}
+$("check-sel").onclick = e => {
+  if (!sel.size) return toast("先勾选要测的代理");
+  check([...sel], e.target);
+};
+$("check-all").onclick = e => check([], e.target);
+
+function doExport(ids) {
+  const fmt = $("exp-fmt").value;
+  const q = ids.length ? "&ids=" + ids.join(",") : "";
+  location.href = `/api/proxies/export?fmt=${fmt}${q}`;
+}
+$("exp-sel").onclick = () => {
+  if (!sel.size) return toast("先勾选要导出的代理");
+  doExport([...sel]);
+};
+$("exp-all").onclick = () => doExport([]);
+$("del-sel").onclick = async () => {
+  if (!sel.size) return toast("先勾选要删除的代理");
+  if (!confirm(`删除选中的 ${sel.size} 条代理?`)) return;
+  await post("/api/proxies/delete", { ids: [...sel] });
+  sel.clear();
+  await load();
+};
+
+load();
+</script>
+</body>
+</html>
