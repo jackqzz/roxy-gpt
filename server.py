@@ -749,6 +749,90 @@ def _fetch_mail_code(mail_url, upstream, log,
     return last_seen       # 兜底: 到超时仍只有旧码也返回, 让页面判定
 
 
+# ---------------- 接码监听 (半自动模式用) ----------------
+# 人工在窗口里注册时, 后台替用户盯接码接口, 出码写到 MAIL_WATCH
+# 供前端展示+复制。启动时快照现存的码做基线, 只报新码。
+MAIL_WATCH = {}
+MAIL_WATCH_TTL = 600      # 监听最长 10 分钟
+
+
+def _mail_watch(a):
+    aid, murl = a["id"], a.get("mail_url")
+    up = _upstream()
+    seen = set()
+    try:
+        c0, e0 = _mail_code_once(murl, up)
+        if e0 == "dead":
+            MAIL_WATCH[aid].update(running=False, dead=True,
+                                   ts_done=time.time())
+            return
+        if c0:
+            seen.add(c0)
+    except Exception:
+        pass
+    deadline = time.time() + MAIL_WATCH_TTL
+    while time.time() < deadline \
+            and not MAIL_WATCH.get(aid, {}).get("stop"):
+        try:
+            c, e = _mail_code_once(murl, up)
+            if e == "dead":
+                MAIL_WATCH[aid].update(running=False, dead=True,
+                                       ts_done=time.time())
+                return
+            if c and c not in seen:
+                seen.add(c)
+                MAIL_WATCH[aid].update(code=c, at=_now())
+        except Exception:
+            pass
+        time.sleep(4)
+    MAIL_WATCH.get(aid, {}).update(running=False,
+                                   ts_done=time.time())
+
+
+def _mail_watch_start(a):
+    if not a.get("mail_url"):
+        return False
+    w = MAIL_WATCH.get(a["id"])
+    if w and w.get("running"):
+        return True
+    MAIL_WATCH[a["id"]] = {"email": a["email"], "running": True,
+                           "code": None, "at": None,
+                           "dead": False, "stop": False}
+    threading.Thread(target=_mail_watch, args=(dict(a),),
+                     daemon=True).start()
+    return True
+
+
+# 半自动资料预生成: 开窗时后台调 AI 模型生成 姓名+年龄, 面板可复制
+PROF_WATCH = {}
+
+
+def _prof_gen_start(a):
+    aid = a["id"]
+    PROF_WATCH[aid] = {"email": a["email"], "name": None,
+                       "age": None, "at": None, "err": None,
+                       "ts": time.time()}
+
+    def _bg():
+        import random as _r
+        try:
+            g = _gen_profile(a["email"], lambda m: None)
+            if g:
+                PROF_WATCH[aid].update(name=g[0], age=g[1],
+                                       at=_now())
+            else:
+                nm = re.sub(r"[^A-Za-z]", "",
+                            a["email"].split("@")[0]).capitalize() \
+                    or "User"
+                PROF_WATCH[aid].update(
+                    name=nm, age=_r.randint(22, 38), at=_now(),
+                    err="模型失败, 兜底值")
+        except Exception as e:
+            PROF_WATCH[aid]["err"] = str(e)[:80]
+    threading.Thread(target=_bg, daemon=True).start()
+    return True
+
+
 # ---------------- ChatGPT 登录驱动 ----------------
 # 实测 (auth.openai.com 流程):
 #   chatgpt.com 点 Log in -> 内嵌弹层 input[name=login_hint]
@@ -1414,9 +1498,11 @@ TARGET_URL = "https://chatgpt.com"
 OPEN_WORKERS = 3          # 并行开窗/注册并发数 (每个窗口是一个真 Chromium)
 
 
-def _open_worker(accs, semiauto=False):
+def _open_worker(accs, semiauto=False, watch_code=False,
+                 gen_profile=False):
     """并行: 选代理 -> 绑定 -> Roxy 开窗 -> 跳 chatgpt.com (注册)
-    semiauto=True 时定位到主站即停, 登录注册全程人工。
+    semiauto=True 时定位到主站即停, 登录注册全程人工;
+    watch_code/gen_profile 是半自动可选附加项 (接码监听/AI资料)。
     db_lock 保护代理选取/绑定和 JSON 落盘 —— 避免并发抢同一代理
     或互相覆盖写文件。"""
     OPEN_JOB["running"] = True
@@ -1486,6 +1572,11 @@ def _open_worker(accs, semiauto=False):
                     OPEN_JOB["results"][a["id"]] = "已定位, 请手动操作"
                     log(f"✓ {email}: 已开到 chatgpt.com "
                         f"(半自动, 请手动注册)")
+                    if watch_code and _mail_watch_start(a):
+                        log(f"  [{email}] 📨 接码监听已开 (10min)")
+                    if gen_profile:
+                        _prof_gen_start(a)
+                        log(f"  [{email}] 🤖 资料生成中 …")
                 else:
                     a["status"] = "login_failed"
                     OPEN_JOB["results"][a["id"]] = r
@@ -1629,6 +1720,23 @@ class H(BaseHTTPRequestHandler):
             return self._json({"running": PAT_JOB["running"],
                                "log": PAT_JOB["log"][-80:],
                                "results": PAT_JOB["results"]})
+        if self.path == "/api/mail-codes":
+            # 接码监听列表 (清掉 30min 前的死条目)
+            now = time.time()
+            for aid in [k for k, v in MAIL_WATCH.items()
+                        if not v.get("running") and v.get("ts_done")
+                        and now - v["ts_done"] > 1800]:
+                MAIL_WATCH.pop(aid, None)
+            for aid in [k for k, v in PROF_WATCH.items()
+                        if now - v.get("ts", 0) > 3600]:
+                PROF_WATCH.pop(aid, None)
+            return self._json({"watch": [
+                {"id": k, **{x: v[x] for x in
+                             ("email", "running", "code", "at", "dead")
+                             if x in v}}
+                for k, v in MAIL_WATCH.items()],
+                "profiles": [
+                    {"id": k, **v} for k, v in PROF_WATCH.items()]})
         if self.path == "/api/mother":
             s = _settings()
             return self._json({"mother_window":
@@ -1909,11 +2017,27 @@ class H(BaseHTTPRequestHandler):
                 return self._json({"error": "单次最多 50 个"}, 400)
             threading.Thread(
                 target=_open_worker,
-                args=(accs, bool(req.get("semiauto"))),
+                args=(accs, bool(req.get("semiauto")),
+                      bool(req.get("watch_code", True)),
+                      bool(req.get("gen_profile", True))),
                 daemon=True).start()
             return self._json({"ok": True, "count": len(accs)})
         if self.path == "/api/accounts/open/stop":
             OPEN_JOB["stop"] = True
+            return self._json({"ok": True})
+        if self.path == "/api/mail-codes/start":
+            req = self._body()
+            a = next((x for x in _load_accounts()
+                      if x["id"] == req.get("id")), None)
+            if not a or not a.get("mail_url"):
+                return self._json({"error": "该账号没有接码链接"}, 400)
+            _mail_watch_start(a)
+            return self._json({"ok": True})
+        if self.path == "/api/mail-codes/stop":
+            req = self._body()
+            w = MAIL_WATCH.get(req.get("id"))
+            if w:
+                w["stop"] = True
             return self._json({"ok": True})
         if self.path == "/api/accounts/pat-check/stop":
             PAT_JOB["stop"] = True

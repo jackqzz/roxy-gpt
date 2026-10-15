@@ -218,6 +218,11 @@
     </div>
   </div>
 
+  <div class="drawer-card" id="mailwatch-box" style="display:none">
+    <div class="drawer-title"><span>📨 半自动助手 (接码监听 + 资料生成 —— 出结果自动出现在这里, 点击可复制)</span></div>
+    <div id="mailwatch-list" style="font-size:13px"></div>
+  </div>
+
   <div class="log-card" id="open-log">
     <div class="log-title"><span>开窗任务日志</span>
       <span style="display:flex;align-items:center;gap:8px">
@@ -240,6 +245,8 @@
       <button class="btn btn-primary btn-sm" id="open-sel">🚀 开窗选中 → chatgpt.com</button>
       <button class="btn btn-outline btn-sm" id="open-all">🚀 全部开窗</button>
       <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--text-dim);cursor:pointer" title="只开窗定位到 chatgpt.com, 登录注册全程手动">半自动<input type="checkbox" id="semiauto"></label>
+      <label class="semi-opt" style="display:flex;align-items:center;gap:4px;font-size:12px;color:var(--text-dim);cursor:pointer" title="开窗后后台盯接码接口, 出码显示在下方接码面板">📨接码<input type="checkbox" id="semi-watch" checked></label>
+      <label class="semi-opt" style="display:flex;align-items:center;gap:4px;font-size:12px;color:var(--text-dim);cursor:pointer" title="开窗时调 AI 模型按邮箱生成姓名+年龄, 面板可复制">🤖资料<input type="checkbox" id="semi-prof" checked></label>
       <button class="btn btn-outline btn-sm" id="pat-sel">🧪 PAT检验选中</button>
       <button class="btn btn-outline btn-sm btn-danger" id="del-sel">删除选中</button>
       <button class="btn btn-ghost btn-sm" id="reload" title="刷新">⟳</button>
@@ -362,6 +369,7 @@ function render() {
       <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(a.note || a.extra || "")}">${esc(a.note || a.extra || "")}</td>
       <td style="text-align:right;white-space:nowrap">
         <button class="btn btn-ghost btn-sm" data-act="open" data-id="${a.id}">开窗</button>
+        ${a.mail_url ? `<button class="btn btn-ghost btn-sm" data-act="watch" data-id="${a.id}" title="开接码监听">📨</button>` : ""}
         ${a.proxy_id ? `<button class="btn btn-ghost btn-sm" data-act="unbind" data-id="${a.id}">解绑</button>` : ""}
         <button class="btn btn-ghost btn-sm btn-danger" data-act="del" data-id="${a.id}">删</button>
       </td>
@@ -391,7 +399,9 @@ async function pollOpen() {
 function startOpen(ids, btn) {
   btn.disabled = true;
   post("/api/accounts/open",
-       { ids, semiauto: $("semiauto").checked }).then(r => {
+       { ids, semiauto: $("semiauto").checked,
+         watch_code: $("semi-watch").checked,
+         gen_profile: $("semi-prof").checked }).then(r => {
     btn.disabled = false;
     if (r.error) return toast("✗ " + r.error);
     toast(`开窗任务启动: ${r.count} 个账号`);
@@ -431,6 +441,11 @@ $("tbody").addEventListener("click", async e => {
   const a = accounts.find(x => x.id === id);
   if (act === "open") {
     startOpen([id], b);
+  } else if (act === "watch") {
+    const r = await post("/api/mail-codes/start", { id });
+    if (r.error) return toast("✗ " + r.error);
+    toast("📨 接码监听已开");
+    pollMailWatch();
   } else if (act === "unbind") {
     await post("/api/accounts/unbind", { id });
     await load();
@@ -548,6 +563,54 @@ $("ng-test").onclick = async e => {
     ? `✓ ${r.name}, ${r.age} 岁` + (r.logs && r.logs.length ? " · " + r.logs[0] : "")
     : "✗ " + ((r && r.error) || "请求失败");
 };
+
+// ---- 接码监听面板 ----
+async function pollMailWatch() {
+  const r = await fetch("/api/mail-codes").then(r => r.json())
+    .catch(() => null);
+  const byId = {};
+  for (const w of (r && r.watch) || [])
+    byId[w.id] = { ...(byId[w.id] || {}), w };
+  for (const p of (r && r.profiles) || [])
+    byId[p.id] = { ...(byId[p.id] || {}), p };
+  const ids = Object.keys(byId);
+  const box = $("mailwatch-box");
+  if (!ids.length) { box.style.display = "none"; return; }
+  box.style.display = "block";
+  $("mailwatch-list").innerHTML = ids.map(id => {
+    const { w, p } = byId[id];
+    const email = (w && w.email) || (p && p.email) || id;
+    const code = !w ? "" : w.dead
+      ? `<span class="pill pill-bad">邮箱已失效</span>`
+      : w.code
+        ? `<span class="copyable" data-c="${esc(w.code)}" title="点击复制验证码"
+             style="font-size:20px;font-weight:700;color:#059669;letter-spacing:2px;cursor:pointer">${esc(w.code)}</span>
+           <span class="subtitle" style="font-size:11px">${esc(w.at||"")}</span>`
+        : `<span class="pill pill-dim">等待验证码 …</span>`;
+    const prof = !p ? "" : p.name
+      ? `<span class="copyable" data-c="${esc(p.name)}" title="点击复制姓名"
+           style="font-weight:600;cursor:pointer">${esc(p.name)}</span>
+         <span class="copyable" data-c="${p.age}" title="点击复制年龄"
+           style="font-weight:600;color:#7c3aed;cursor:pointer">${p.age} 岁</span>`
+         + (p.err ? ` <span class="subtitle" style="font-size:11px">(${esc(p.err)})</span>` : "")
+      : p.err ? `<span class="pill pill-bad">${esc(p.err)}</span>`
+              : `<span class="pill pill-dim">资料生成中 …</span>`;
+    const st = w && w.running ? "" : `<span class="subtitle">(已停)</span>`;
+    return `<div style="display:flex;align-items:center;gap:14px;padding:8px 0;border-bottom:1px solid var(--border)">
+      <span class="mono" style="min-width:230px">${esc(email)}</span>
+      ${code} ${prof} ${st}
+      ${w ? `<button class="btn btn-ghost btn-sm btn-danger" data-mw-stop="${w.id}" style="margin-left:auto">✕</button>` : ""}
+    </div>`;
+  }).join("");
+}
+$("mailwatch-list").addEventListener("click", async e => {
+  const cp = e.target.closest(".copyable");
+  if (cp) { navigator.clipboard.writeText(cp.dataset.c); toast("已复制验证码 " + cp.dataset.c); return; }
+  const b = e.target.closest("[data-mw-stop]");
+  if (b) { await post("/api/mail-codes/stop", { id: b.dataset.mwStop }); pollMailWatch(); }
+});
+setInterval(pollMailWatch, 3000);
+pollMailWatch();
 
 // ---- 注册节奏配置 ----
 async function loadPace() {
