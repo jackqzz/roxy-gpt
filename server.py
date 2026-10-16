@@ -1165,6 +1165,9 @@ def _chatgpt_profile_step(ws, a, log, should_stop=None):
             while time.time() < deadline:
                 if stopped():
                     return "stopped"
+                # 接码监听发现邮箱死了 -> 收不到码走不到资料页, 提前退
+                if (MAIL_WATCH.get(a["id"]) or {}).get("dead"):
+                    return "email_dead"
                 try:
                     nm = pg.query_selector("input[name=name]")
                     if nm and nm.is_visible():
@@ -1888,13 +1891,15 @@ def _open_worker(accs, semiauto=False, watch_code=False,
                             log(f"  [{email}] 验证码页已被人工越过")
                         elif r3 == "email_dead":
                             a["status"] = "email_dead"
-                            log(f"  [{email}] ✗ 邮箱不可用 (602)")
+                            a["email_dead"] = True
+                            log(f"  [{email}] ✗ 邮箱不可用 (602)"
+                                f" —— 后续步骤全部跳过")
                         elif r3 == "no_mail":
                             log(f"  [{email}] 🔢 无接码链接, 跳过自动填码")
                         elif r3 != "stopped":
                             log(f"  [{email}] 🔢 自动填码失败: {r3}"
                                 f" —— 请手动继续")
-                    if auto_profile:
+                    if auto_profile and not a.get("email_dead"):
                         r4 = _chatgpt_profile_step(
                             ws, a, lambda m: log(f"  [{email}] {m}"),
                             should_stop=_stopped)
@@ -1934,6 +1939,7 @@ def _open_worker(accs, semiauto=False, watch_code=False,
                 log(f"✓ {email}: 窗口已就绪 (缺接码链接, 手动收码)")
             elif r == "email_dead":
                 a["status"] = "email_dead"
+                a["email_dead"] = True
                 OPEN_JOB["results"][a["id"]] = "邮箱不可用 (602)"
                 log(f"✗ {email}: 邮箱账号已失效 — 跳过")
             else:
@@ -2029,9 +2035,15 @@ class H(BaseHTTPRequestHandler):
             out = []
             for a in accs:
                 p = pmap.get(a.get("proxy_id") or "")
-                out.append({**a, "proxy":
-                            (f"{p['scheme']}://{p['host']}:{p['port']}"
-                             if p else None)})
+                out.append({**a,
+                            "email_dead":
+                                a.get("email_dead")
+                                or a.get("status") == "email_dead"
+                                or (MAIL_WATCH.get(a["id"]) or {})
+                                      .get("dead", False),
+                            "proxy":
+                                (f"{p['scheme']}://{p['host']}:{p['port']}"
+                                 if p else None)})
             stats = {"total": len(accs),
                      "bound": sum(1 for a in accs if a.get("proxy_id")),
                      "opened": sum(1 for a in accs if a.get("win")),

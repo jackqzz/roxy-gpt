@@ -343,11 +343,13 @@ function render() {
     const win = a.win
       ? `<span class="pill pill-ok">已开</span>`
       : `<span class="pill pill-dim">—</span>`;
-    const reg = a.reg === "new"
-      ? `<span class="pill" style="background:#f5f3ff;color:#6d28d9;border:1px solid #ddd6fe" title="本次流程新注册 ${esc(a.reg_at||"")}">新注册</span>`
-      : a.reg === "yes"
-        ? `<span class="pill pill-ok" title="已注册老号, 登录验证通过 ${esc(a.reg_at||"")}">已注册</span>`
-        : `<span class="pill pill-dim">未注册</span>`;
+    const reg = a.email_dead
+      ? `<span class="pill pill-bad" title="接码接口返回 602 邮箱不可用">📪邮箱失效</span>`
+      : a.reg === "new"
+        ? `<span class="pill" style="background:#f5f3ff;color:#6d28d9;border:1px solid #ddd6fe" title="本次流程新注册 ${esc(a.reg_at||"")}">新注册</span>`
+        : a.reg === "yes"
+          ? `<span class="pill pill-ok" title="已注册老号, 登录验证通过 ${esc(a.reg_at||"")}">已注册</span>`
+          : `<span class="pill pill-dim">未注册</span>`;
     const pat = a.pat === "good"
       ? `<span class="pill pill-ok" title="建 PAT 跳身份验证 = 良好 ${esc(a.pat_at||"")}">良好</span>`
       : a.pat === "low"
