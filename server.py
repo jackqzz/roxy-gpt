@@ -1127,6 +1127,102 @@ def _chatgpt_code_step(ws, a, log, upstream, should_stop=None):
             br.close()
 
 
+def _chatgpt_profile_step(ws, a, log, should_stop=None):
+    """半自动·自动填资料: 等 about-you 姓名/年龄页 -> 填 -> 提交。
+    数据优先取 🤖资料预生成结果 (PROF_WATCH), 其次现场 AI 生成,
+    最后邮箱前缀兜底。人工先越过则自动退出。
+    返回 ok|ok_passed|stopped|err。"""
+    import random
+    from playwright.sync_api import sync_playwright
+    _st = _settings()
+    _tmin = int(_st.get("pace_type_min") or 90)
+    _tmax = int(_st.get("pace_type_max") or 240)
+    _smin = float(_st.get("pace_step_min") or 2.0)
+    _smax = float(_st.get("pace_step_max") or 6.0)
+
+    def hdelay(lo=None, hi=None):
+        time.sleep(random.uniform(
+            lo if lo is not None else _smin,
+            hi if hi is not None else _smax))
+
+    def tdelay():
+        return random.randint(_tmin, _tmax)
+
+    def stopped():
+        return bool(should_stop and should_stop())
+
+    with sync_playwright() as pw:
+        br = pw.chromium.connect_over_cdp(ws)
+        try:
+            ctx = br.contexts[0] if br.contexts else None
+            pg = (ctx.pages[0] if ctx and ctx.pages
+                  else (ctx.new_page() if ctx else None))
+            if pg is None:
+                return "拿不到页面"
+            # 等 about-you 姓名框 (人工可能在过密码/验证码页), 最长10min
+            deadline = time.time() + 600
+            saw_name = False
+            while time.time() < deadline:
+                if stopped():
+                    return "stopped"
+                try:
+                    nm = pg.query_selector("input[name=name]")
+                    if nm and nm.is_visible():
+                        saw_name = True
+                        break
+                    # 姓名框出现后消失 / 回到主站 = 人工已越过
+                    if saw_name:
+                        return "ok_passed"
+                    if pg.query_selector("#prompt-textarea,textarea"):
+                        return "ok_passed"
+                except Exception:
+                    pass
+                time.sleep(2)
+            else:
+                return "没等到资料页 (超时10min)"
+            # 姓名/年龄: extra > PROF_WATCH 预生成 > 现场AI > 邮箱前缀
+            # PROF_WATCH 可能还在生成中, 最多等 15s 拿结果
+            name, age, src = None, None, None
+            for _ in range(8):
+                pv = PROF_WATCH.get(a["id"]) or {}
+                if pv.get("name"):
+                    name, age = pv["name"], str(pv["age"])
+                    src = "AI预生成"
+                    break
+                if pv.get("err"):
+                    break
+                time.sleep(2)
+            if not name:
+                gen = _gen_profile(a["email"], log)
+                if gen:
+                    name, age, src = gen[0], str(gen[1]), "AI现场生成"
+            if not name:
+                name = re.sub(r"[^A-Za-z]", "",
+                              a["email"].split("@")[0]).capitalize() \
+                    or "User"
+                age = str(random.randint(22, 38))
+                src = "邮箱兜底"
+            if (a.get("extra") or "").strip():
+                name = a["extra"].strip()
+                src += "+extra"
+            hdelay()
+            pg.click("input[name=name]")
+            pg.type("input[name=name]", name, delay=tdelay())
+            hdelay(1.0, 3.0)
+            try:
+                pg.click("input[name=age]", timeout=5000)
+                pg.type("input[name=age]", str(age), delay=tdelay())
+            except Exception:
+                pass   # 有的 about-you 只有生日下拉, 输不进就留人工
+            hdelay()
+            if not _real_continue(pg):
+                return "资料页提交按钮点不动"
+            log(f"  📝 资料已填并提交 ({name}, {age}) ← {src}")
+            return "ok"
+        finally:
+            br.close()
+
+
 def _chatgpt_login(ws, a, log, upstream, should_stop=None):
     """开窗后: Log in -> 填邮箱 -> Continue -> 等码 -> 填码 -> Continue
     -> (新号) about-you 填姓名年龄 -> Continue。返回 ok|ok_new|no_mail|stopped|err。"""
@@ -1691,11 +1787,13 @@ OPEN_WORKERS = 3          # 并行开窗/注册并发数 (每个窗口是一个�
 
 
 def _open_worker(accs, semiauto=False, watch_code=False,
-                 gen_profile=False, auto_email=False, auto_code=False):
+                 gen_profile=False, auto_email=False, auto_code=False,
+                 auto_profile=False):
     """并行: 选代理 -> 绑定 -> Roxy 开窗 -> 跳 chatgpt.com (注册)
     semiauto=True 时定位到主站即停, 登录注册全程人工;
-    watch_code/gen_profile/auto_email/auto_code 是半自动可选附加项
-    (接码监听 / AI资料 / 自动填邮箱 / 自动填验证码)。
+    watch_code/gen_profile/auto_email/auto_code/auto_profile
+    是半自动可选附加项
+    (接码监听 / AI资料 / 自动填邮箱 / 自动填码 / 自动填资料)。
     db_lock 保护代理选取/绑定和 JSON 落盘 —— 避免并发抢同一代理
     或互相覆盖写文件。"""
     OPEN_JOB["running"] = True
@@ -1795,6 +1893,18 @@ def _open_worker(accs, semiauto=False, watch_code=False,
                             log(f"  [{email}] 🔢 无接码链接, 跳过自动填码")
                         elif r3 != "stopped":
                             log(f"  [{email}] 🔢 自动填码失败: {r3}"
+                                f" —— 请手动继续")
+                    if auto_profile:
+                        r4 = _chatgpt_profile_step(
+                            ws, a, lambda m: log(f"  [{email}] {m}"),
+                            should_stop=_stopped)
+                        if r4 == "ok":
+                            log(f"  [{email}] 📝 自动填资料完成"
+                                f" —— 注册应已落地")
+                        elif r4 == "ok_passed":
+                            log(f"  [{email}] 资料页已被人工越过")
+                        elif r4 != "stopped":
+                            log(f"  [{email}] 📝 自动填资料失败: {r4}"
                                 f" —— 请手动继续")
                 else:
                     a["status"] = "login_failed"
@@ -2240,7 +2350,8 @@ class H(BaseHTTPRequestHandler):
                       bool(req.get("watch_code", True)),
                       bool(req.get("gen_profile", True)),
                       bool(req.get("auto_email", True)),
-                      bool(req.get("auto_code", True))),
+                      bool(req.get("auto_code", True)),
+                      bool(req.get("auto_profile", True))),
                 daemon=True).start()
             return self._json({"ok": True, "count": len(accs)})
         if self.path == "/api/accounts/open/stop":
