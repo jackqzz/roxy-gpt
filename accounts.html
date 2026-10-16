@@ -458,8 +458,9 @@ $("tbody").addEventListener("click", async e => {
     await post("/api/accounts/unbind", { id });
     await load();
   } else if (act === "del") {
-    if (!confirm(`删除账号 ${a.email} ? (同时解绑其代理)`)) return;
-    await post("/api/accounts/delete", { ids: [id] });
+    if (!confirm(`删除账号 ${a.email} ? (同时解绑代理${a.win ? "并删除其 Roxy 窗口" : ""})`)) return;
+    const r = await post("/api/accounts/delete", { ids: [id] });
+    if (r.windows_deleted) toast(`已删账号 + ${r.windows_deleted} 个窗口`);
     sel.delete(id);
     await load();
   }
@@ -490,8 +491,9 @@ $("open-all").onclick = e => {
 };
 $("del-sel").onclick = async () => {
   if (!sel.size) return toast("先勾选账号");
-  if (!confirm(`删除选中 ${sel.size} 个账号? (同时解绑代理)`)) return;
-  await post("/api/accounts/delete", { ids: [...sel] });
+  if (!confirm(`删除选中 ${sel.size} 个账号? (同时解绑代理并删除其 Roxy 窗口)`)) return;
+  const r = await post("/api/accounts/delete", { ids: [...sel] });
+  if (r.windows_deleted) toast(`已删账号 + ${r.windows_deleted} 个窗口`);
   sel.clear();
   await load();
 };

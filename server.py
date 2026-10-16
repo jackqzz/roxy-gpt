@@ -1780,6 +1780,22 @@ def _pat_worker(ids):
             + (" (手动停止)" if PAT_JOB["stop"] else ""))
 
 
+def _roxy_delete_window(dir_id):
+    """关+删一个 Roxy 窗口 (先 close 再 delete, dirIds 是数组)。
+    返回 err|None —— 尽力而为, 调用方不因此中断。"""
+    cfg = _roxy_cfg()
+    _roxy_call("/browser/close",
+               {"workspaceId": cfg["workspace_id"], "dirId": dir_id},
+               timeout=30)
+    r = _roxy_call("/browser/delete",
+                   {"workspaceId": cfg["workspace_id"],
+                    "dirIds": [dir_id]}, timeout=30)
+    err = r.get("error")
+    if err and "不存在" in err:
+        return None          # 已经没了 = 目标达成, 不算失败
+    return err
+
+
 # ---------------- 开窗任务 ----------------
 OPEN_JOB = {"running": False, "log": [], "results": {},
             "stop": False}
@@ -2308,16 +2324,26 @@ class H(BaseHTTPRequestHandler):
             accs = _load_accounts()
             doomed = [a for a in accs if a["id"] in ids]
             px = _load_proxies()
+            win_ok, win_err = 0, []
             for a in doomed:
                 p = next((x for x in px
                           if x["id"] == a.get("proxy_id")), None)
                 if p:
                     _unbind_proxy(p, a["email"])
+                # 联动删 Roxy 窗口 (账号绑过 auto- 窗的 dirId)
+                if a.get("win"):
+                    e = _roxy_delete_window(a["win"])
+                    if e:
+                        win_err.append(f"{a['email']}: {e}")
+                    else:
+                        win_ok += 1
             _save_proxies(px)
             keep = [a for a in accs if a["id"] not in ids]
             _save_accounts(keep)
             return self._json({"ok": True,
-                               "deleted": len(accs) - len(keep)})
+                               "deleted": len(accs) - len(keep),
+                               "windows_deleted": win_ok,
+                               "window_errors": win_err})
         if self.path == "/api/accounts/update":
             req = self._body()
             accs = _load_accounts()
