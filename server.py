@@ -1635,6 +1635,12 @@ def _pat_worker(ids):
                         a["pat"] = verdict
                         a["pat_at"] = _now()
                         a["ws_id"] = ws_id
+                        # 能探到 verdict = 号存在且窗口已登录
+                        # = 注册已成功, 回填 reg
+                        if verdict != "窗口未登录" \
+                                and not a.get("reg"):
+                            a["reg"] = "yes"
+                            a["reg_at"] = a.get("reg_at") or _now()
                         PAT_JOB["results"][aid] = verdict
                         tag = {"good": "✓ 良好", "low": "✗ 低级"}\
                             .get(verdict, "? " + verdict)
