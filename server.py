@@ -346,13 +346,22 @@ def _roxy_proxyinfo(p):
 
 
 def _roxy_find_window(name):
+    """按名字查窗口 -> (window|None, api_err|None)。
+    (None,None)=真不存在; (None,err)=API 调用失败 ——
+    调用方据此区分"该建新窗"和"查询挂了"。"""
     cfg = _roxy_cfg()
     r = _roxy_call(f"/browser/list_v3?page_index=1&page_size=100"
                    f"&workspaceId={cfg['workspace_id']}")
+    if r.get("error"):
+        time.sleep(2)   # API 瞬断兜底重试一次
+        r = _roxy_call(f"/browser/list_v3?page_index=1&page_size=100"
+                       f"&workspaceId={cfg['workspace_id']}")
+    if r.get("error"):
+        return None, "Roxy 查询失败: " + r["error"]
     for w in (r.get("data") or {}).get("rows") or []:
         if w.get("windowName") == name:
-            return w
-    return None
+            return w, None
+    return None, None
 
 
 # 不同窗口不同指纹: 按邮箱哈希在平台池里确定性分配 ——
@@ -376,7 +385,9 @@ def _roxy_open_for(email, proxy, kernel="Chrome"):
     kernel 只在新建窗口时生效; 已有窗口沿用自己的内核。"""
     cfg = _roxy_cfg()
     name = f"auto-{email}"
-    w = _roxy_find_window(name)
+    w, werr = _roxy_find_window(name)
+    if werr:
+        return None, None, werr
     if w:
         dir_id = w["dirId"]
         pi = (w.get("proxyInfo") or {})
@@ -1464,9 +1475,9 @@ def _mother_open():
     name = (st.get("mother_window") or "").strip()
     if not name:
         return None, "未配置母号窗口名"
-    w = _roxy_find_window(name)
+    w, werr = _roxy_find_window(name)
     if not w:
-        return None, "Roxy 里找不到窗口 " + name
+        return None, werr or ("Roxy 里找不到窗口 " + name)
     o = _roxy_call("/browser/open",
                    {"workspaceId": _roxy_cfg()["workspace_id"],
                     "dirId": w["dirId"]}, timeout=120)
