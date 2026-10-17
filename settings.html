@@ -3,97 +3,21 @@
 <head>
 <meta charset="utf-8">
 <title>设置 · roxy-accounts</title>
+<link rel="stylesheet" href="/ui.css">
+<script src="/ui.js"></script>
 <style>
-  :root {
-    --bg-page: #f8fafc;
-    --surface: #ffffff;
-    --surface-hover: #f1f5f9;
-    --border: #e2e8f0;
-    --border-strong: #cbd5e1;
-    --text-main: #0f172a;
-    --text-muted: #64748b;
-    --text-dim: #94a3b8;
-    --primary: #2563eb;
-    --primary-hover: #1d4ed8;
-    --success-soft: #ecfdf5;
-    --warning-soft: #fffbeb;
-    --danger: #ef4444;
-    --danger-soft: #fef2f2;
-    --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0; background: var(--bg-page); color: var(--text-main);
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
-    -webkit-font-smoothing: antialiased;
-  }
-  /* ---- 左侧导航 ---- */
-  .sidebar {
-    position: fixed; left: 0; top: 0; bottom: 0; width: 176px;
-    background: var(--surface); border-right: 1px solid var(--border);
-    padding: 20px 10px; display: flex; flex-direction: column; gap: 4px;
-  }
-  .sidebar .brand { font-size: 13px; font-weight: 700; padding: 4px 12px 16px; color: var(--text-main); }
-  .sidebar a {
-    display: flex; align-items: center; gap: 9px;
-    padding: 8px 12px; border-radius: 8px; font-size: 13px; font-weight: 500;
-    color: var(--text-muted); text-decoration: none;
-  }
-  .sidebar a:hover { background: var(--surface-hover); color: var(--text-main); }
-  .sidebar a.on { background: var(--primary); color: #fff; }
-  .main { margin-left: 176px; padding: 24px 32px 80px; }
   .page-container { max-width: 960px; }
-
-  h1 { font-size: 20px; font-weight: 700; margin: 0; letter-spacing: -0.3px; }
-  .subtitle { font-size: 13px; color: var(--text-muted); }
-  .page-header { margin-bottom: 20px; }
-
-  .btn {
-    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
-    padding: 7px 14px; border-radius: 8px; font-size: 13px; font-weight: 500;
-    cursor: pointer; transition: all 0.15s ease; border: 1px solid transparent;
-    user-select: none; text-decoration: none; line-height: 1.4;
-  }
-  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-  .btn-primary { background: var(--primary); color: #fff; }
-  .btn-primary:hover:not(:disabled) { background: var(--primary-hover); }
-  .btn-outline { background: var(--surface); color: var(--text-main); border-color: var(--border); box-shadow: var(--shadow-sm); }
-  .btn-outline:hover:not(:disabled) { background: var(--surface-hover); border-color: var(--border-strong); }
-  .btn-ghost { background: transparent; color: var(--text-muted); border-color: transparent; }
-  .btn-ghost:hover:not(:disabled) { background: var(--surface-hover); color: var(--text-main); }
-  .btn-sm { padding: 4px 10px; font-size: 12px; border-radius: 6px; }
-
-  .card {
-    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
-    padding: 18px; margin-bottom: 16px; box-shadow: var(--shadow-sm);
-  }
-  .card-title { font-size: 14px; font-weight: 600; margin-bottom: 12px; }
-  .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-  .form-input, .form-select {
-    padding: 6px 10px; border: 1px solid var(--border); border-radius: 7px;
-    font-size: 13px; background: var(--surface); color: var(--text-main); outline: none;
-  }
-  .form-input:focus, .form-select:focus { border-color: var(--primary); }
   textarea.import-textarea {
     width: 100%; min-height: 90px; resize: vertical; font-size: 12px;
     font-family: ui-monospace, Menlo, Monaco, monospace;
-    border: 1px solid var(--border); border-radius: 8px; padding: 10px;
+    border: 1px solid var(--border); border-radius: var(--radius); padding: 10px;
     background: #f8fafc; color: var(--text-main); outline: none;
   }
   textarea.import-textarea:focus { border-color: var(--primary); background: #fff; }
-  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace; font-size: 12px; }
-  .hint { font-size: 12px; color: var(--text-dim); margin-top: 8px; }
-  .toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: #0f172a; color: #fff; padding: 8px 16px; border-radius: 8px; font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 99; }
 </style>
 </head>
 <body>
-<nav class="sidebar">
-  <div class="brand">roxy-accounts</div>
-  <a href="/accounts">👤 账号</a>
-  <a href="/">🌐 代理</a>
-  <a href="/mothers">👑 空间母号</a>
-  <a href="/settings" class="on">⚙️ 设置</a>
-</nav>
+<nav class="sidebar" data-nav="settings"></nav>
 <div class="main">
 <div class="page-container">
   <div class="page-header">
@@ -103,7 +27,7 @@
 
   <!-- CPA 号池 (CLIProxyAPI) -->
   <div class="card">
-    <div class="card-title">🔗 CPA 号池 (CLIProxyAPI —— 子号凭证的下游池)</div>
+    <div class="card-title"><i data-ic="link"></i>CPA 号池（CLIProxyAPI —— 子号凭证的下游池）</div>
     <div class="row">
       <input class="form-input" id="cpa-url" placeholder="CPA 地址, 如 http://127.0.0.1:8317" style="width:280px">
       <input class="form-input" id="cpa-key" type="password" placeholder="管理 Key (management key)" style="width:220px">
@@ -113,13 +37,13 @@
     </div>
     <div class="hint">
       连通测试打 <code>/v8/management/credentials</code>（v8 不在自动降 v0，顺带验证管理 key）。
-      OAuth 授权/换token 全在本地完成（账号页「🔗OAuth授权」），凭证 JSON 备好后再「📤推入池」上传到这里。
+      OAuth 授权/换token 全在本地完成（账号页「OAuth授权」），凭证 JSON 备好后再「推入池」上传到这里。
     </div>
   </div>
 
   <!-- 上级代理 -->
   <div class="card">
-    <div class="card-title">⚙ 上级代理 (本机出网隧道 —— 测活/接码请求经它转发)</div>
+    <div class="card-title"><i data-ic="settings"></i>上级代理（本机出网隧道 —— 测活/接码请求经它转发）</div>
     <div class="row">
       <input class="form-input" id="up-in" placeholder="http://127.0.0.1:7897" style="width:260px">
       <button class="btn btn-primary btn-sm" id="up-save">保存</button>
@@ -131,7 +55,7 @@
 
   <!-- 母号配置 -->
   <div class="card">
-    <div class="card-title">👑 Pat测试母号 (PAT 检验专用 —— 批量邀请子号入队探权限, 与空间母号页互不相干)</div>
+    <div class="card-title"><i data-ic="crown"></i>Pat测试母号（PAT 检验专用 —— 批量邀请子号入队探权限, 与空间母号页互不相干）</div>
     <div class="row">
       <input class="form-input" id="mother-window" placeholder="Roxy 窗口名, 如 youngj111" style="width:220px">
       <button class="btn btn-outline btn-sm" id="mother-list">列出空间</button>
@@ -144,7 +68,7 @@
 
   <!-- AI 资料生成 -->
   <div class="card">
-    <div class="card-title">🤖 AI 资料生成 (注册页姓名+年龄 —— OpenAI 兼容接口)</div>
+    <div class="card-title"><i data-ic="sparkle"></i>AI 资料生成（注册页姓名+年龄 —— OpenAI 兼容接口）</div>
     <div class="row" style="margin-bottom:8px">
       <label style="display:flex;align-items:center;gap:6px;font-size:13px">
         <input type="checkbox" id="ng-enabled"> 启用
@@ -152,7 +76,7 @@
       <input class="form-input" id="ng-url" placeholder="接口地址, 如 http://127.0.0.1:11434/v1" style="width:300px">
       <input class="form-input" id="ng-model" list="ng-models" placeholder="模型名, 点右侧拉列表" style="width:170px">
       <datalist id="ng-models"></datalist>
-      <button class="btn btn-outline btn-sm" id="ng-models-btn" title="GET <base>/models 拉取可用模型到下拉">📋 拉模型</button>
+      <button class="btn btn-outline btn-sm" id="ng-models-btn" title="GET <base>/models 拉取可用模型到下拉"><i data-ic="list"></i>拉模型</button>
       <input class="form-input" id="ng-key" type="password" placeholder="API Key (本地可留空)" style="width:160px">
     </div>
     <textarea class="import-textarea" id="ng-prompt" placeholder="系统提示词"></textarea>
@@ -170,7 +94,7 @@
 
   <!-- 注册节奏 -->
   <div class="card">
-    <div class="card-title">⏱ 注册拟人节奏 (自动注册的等待/击键速度)</div>
+    <div class="card-title"><i data-ic="timer"></i>注册拟人节奏（自动注册的等待/击键速度）</div>
     <div class="row">
       <span class="subtitle">步骤间隔(秒)</span>
       <input class="form-input" id="pc-step-min" type="number" step="0.5" min="0" style="width:80px"> ~

@@ -3143,6 +3143,8 @@ PAGES = {"/": "index.html", "/index.html": "index.html",
          "/mothers": "mothers.html", "/mothers.html": "mothers.html",
          "/accounts": "accounts.html", "/accounts.html": "accounts.html",
          "/settings": "settings.html", "/settings.html": "settings.html"}
+STATICS = {"/ui.css": ("ui.css", "text/css; charset=utf-8"),
+           "/ui.js": ("ui.js", "application/javascript; charset=utf-8")}
 
 
 class H(BaseHTTPRequestHandler):
@@ -3175,6 +3177,9 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path in PAGES:
             return self._file(PAGES[self.path])
+        if self.path in STATICS:
+            f, ct = STATICS[self.path]
+            return self._file(f, ct)
         if self.path == "/api/proxies":
             px = _load_proxies()
             stats = {"total": len(px),

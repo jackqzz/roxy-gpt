@@ -3,114 +3,21 @@
 <head>
 <meta charset="utf-8">
 <title>空间母号 · roxy-accounts</title>
+<link rel="stylesheet" href="/ui.css">
+<script src="/ui.js"></script>
 <style>
-  :root {
-    --bg-page: #f8fafc;
-    --surface: #ffffff;
-    --surface-hover: #f1f5f9;
-    --border: #e2e8f0;
-    --border-strong: #cbd5e1;
-    --text-main: #0f172a;
-    --text-muted: #64748b;
-    --text-dim: #94a3b8;
-    --primary: #2563eb;
-    --primary-hover: #1d4ed8;
-    --success-soft: #ecfdf5;
-    --warning-soft: #fffbeb;
-    --danger: #ef4444;
-    --danger-soft: #fef2f2;
-    --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0; background: var(--bg-page); color: var(--text-main);
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
-    -webkit-font-smoothing: antialiased;
-  }
-  /* ---- 左侧导航 ---- */
-  .sidebar {
-    position: fixed; left: 0; top: 0; bottom: 0; width: 176px;
-    background: var(--surface); border-right: 1px solid var(--border);
-    padding: 20px 10px; display: flex; flex-direction: column; gap: 4px;
-  }
-  .sidebar .brand { font-size: 13px; font-weight: 700; padding: 4px 12px 16px; color: var(--text-main); }
-  .sidebar a {
-    display: flex; align-items: center; gap: 9px;
-    padding: 8px 12px; border-radius: 8px; font-size: 13px; font-weight: 500;
-    color: var(--text-muted); text-decoration: none;
-  }
-  .sidebar a:hover { background: var(--surface-hover); color: var(--text-main); }
-  .sidebar a.on { background: var(--primary); color: #fff; }
-  .main { margin-left: 176px; padding: 24px 32px 80px; }
   .page-container { max-width: 960px; }
-
-  h1 { font-size: 20px; font-weight: 700; margin: 0; letter-spacing: -0.3px; }
-  .subtitle { font-size: 13px; color: var(--text-muted); }
-  .page-header {
-    display: flex; align-items: center; justify-content: space-between;
-    margin-bottom: 20px; flex-wrap: wrap; gap: 12px;
-  }
-  .title-group { display: flex; flex-direction: column; gap: 4px; }
-
-  .btn {
-    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
-    padding: 7px 14px; border-radius: 8px; font-size: 13px; font-weight: 500;
-    cursor: pointer; transition: all 0.15s ease; border: 1px solid transparent;
-    user-select: none; text-decoration: none; line-height: 1.4;
-  }
-  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-  .btn-primary { background: var(--primary); color: #fff; }
-  .btn-primary:hover:not(:disabled) { background: var(--primary-hover); }
-  .btn-outline { background: var(--surface); color: var(--text-main); border-color: var(--border); box-shadow: var(--shadow-sm); }
-  .btn-outline:hover:not(:disabled) { background: var(--surface-hover); border-color: var(--border-strong); }
-  .btn-ghost { background: transparent; color: var(--text-muted); border-color: transparent; }
-  .btn-ghost:hover:not(:disabled) { background: var(--surface-hover); color: var(--text-main); }
-  .btn-sm { padding: 4px 10px; font-size: 12px; border-radius: 6px; }
-  .btn-danger { color: var(--danger); }
-  .btn-danger:hover:not(:disabled) { background: var(--danger-soft); }
-
-  .card {
-    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
-    padding: 18px; margin-bottom: 16px; box-shadow: var(--shadow-sm);
-  }
-  .card-title { font-size: 14px; font-weight: 600; margin-bottom: 12px; }
-  .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-  .form-input, .form-select {
-    padding: 6px 10px; border: 1px solid var(--border); border-radius: 7px;
-    font-size: 13px; background: var(--surface); color: var(--text-main); outline: none;
-  }
-  .form-input:focus, .form-select:focus { border-color: var(--primary); }
   textarea.import-textarea {
     width: 100%; min-height: 90px; resize: vertical; font-size: 12px;
     font-family: ui-monospace, Menlo, Monaco, monospace;
-    border: 1px solid var(--border); border-radius: 8px; padding: 10px;
+    border: 1px solid var(--border); border-radius: var(--radius); padding: 10px;
     background: #f8fafc; color: var(--text-main); outline: none;
   }
   textarea.import-textarea:focus { border-color: var(--primary); background: #fff; }
-
-  table.data-table { width: 100%; border-collapse: collapse; font-size: 13px; text-align: left; }
-  table.data-table th { background: #f8fafc; color: var(--text-muted); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; padding: 10px 12px; border-bottom: 1px solid var(--border); }
-  table.data-table td { padding: 10px 12px; border-bottom: 1px solid #f1f5f9; vertical-align: middle; }
-  table.data-table tbody tr:hover { background: #f8fafc; }
-  table.data-table tbody tr:last-child td { border-bottom: none; }
-  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace; font-size: 12px; }
-
-  .pill { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; }
-  .pill-ok { background: var(--success-soft); color: #047857; border: 1px solid #a7f3d0; }
-  .pill-warn { background: var(--warning-soft); color: #b45309; border: 1px solid #fde68a; }
-  .pill-dim { background: #f1f5f9; color: var(--text-dim); border: 1px solid var(--border); }
-  .hint { font-size: 12px; color: var(--text-dim); margin-top: 8px; }
-  .toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: #0f172a; color: #fff; padding: 8px 16px; border-radius: 8px; font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 99; }
 </style>
 </head>
 <body>
-<nav class="sidebar">
-  <div class="brand">roxy-accounts</div>
-  <a href="/accounts">👤 账号</a>
-  <a href="/">🌐 代理</a>
-  <a href="/mothers" class="on">👑 空间母号</a>
-  <a href="/settings">⚙️ 设置</a>
-</nav>
+<nav class="sidebar" data-nav="mothers"></nav>
 <div class="main">
 <div class="page-container">
   <div class="page-header">
@@ -121,7 +28,7 @@
   </div>
 
   <div class="card">
-    <div class="card-title">+ 导入母号 (Roxy 窗口名 —— 每行一个)</div>
+    <div class="card-title"><i data-ic="plus"></i>导入母号（Roxy 窗口名 —— 每行一个）</div>
     <textarea class="import-textarea" id="imp-text" placeholder="youngj111&#10;mother02&#10;mother03"></textarea>
     <div class="row" style="margin-top:10px">
       <button class="btn btn-primary btn-sm" id="imp-btn">导入</button>
@@ -131,7 +38,7 @@
   </div>
 
   <div class="card">
-    <div class="card-title">母号列表 <span class="subtitle" id="m-count" style="font-weight:400"></span></div>
+    <div class="card-title"><i data-ic="crown"></i>母号列表 <span class="subtitle" id="m-count" style="font-weight:400"></span></div>
     <table class="data-table">
       <thead>
         <tr>
@@ -145,7 +52,7 @@
       <tbody id="tbody"></tbody>
     </table>
     <div class="row" style="margin-top:10px">
-      <button class="btn btn-outline btn-sm btn-danger" id="del-sel">删除选中</button>
+      <button class="btn btn-outline btn-sm btn-danger" id="del-sel"><i data-ic="trash-2"></i>删除选中</button>
       <span class="hint" style="margin-top:0">「列空间」连母号窗口拉她拥有的空间 → 选一个保存, 之后「加入空间」就往这个空间拉人。不选则自动取她 owner 的第一个。</span>
     </div>
   </div>

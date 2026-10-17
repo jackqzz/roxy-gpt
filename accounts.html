@@ -3,139 +3,24 @@
 <head>
 <meta charset="utf-8">
 <title>账号 · roxy-accounts</title>
+<link rel="stylesheet" href="/ui.css">
+<script src="/ui.js"></script>
 <style>
-  :root {
-    --bg-page: #f8fafc;
-    --surface: #ffffff;
-    --surface-hover: #f1f5f9;
-    --border: #e2e8f0;
-    --border-strong: #cbd5e1;
-    --text-main: #0f172a;
-    --text-muted: #64748b;
-    --text-dim: #94a3b8;
-    --primary: #2563eb;
-    --primary-hover: #1d4ed8;
-    --primary-soft: #eff6ff;
-    --success: #10b981;
-    --success-soft: #ecfdf5;
-    --warning: #f59e0b;
-    --warning-soft: #fffbeb;
-    --danger: #ef4444;
-    --danger-soft: #fef2f2;
-    --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0; background: var(--bg-page); color: var(--text-main);
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
-    -webkit-font-smoothing: antialiased;
-  }
-  /* ---- 左侧导航 ---- */
-  .sidebar {
-    position: fixed; left: 0; top: 0; bottom: 0; width: 176px;
-    background: var(--surface); border-right: 1px solid var(--border);
-    padding: 20px 10px; display: flex; flex-direction: column; gap: 4px;
-  }
-  .sidebar .brand { font-size: 13px; font-weight: 700; padding: 4px 12px 16px; color: var(--text-main); }
-  .sidebar a {
-    display: flex; align-items: center; gap: 9px;
-    padding: 8px 12px; border-radius: 8px; font-size: 13px; font-weight: 500;
-    color: var(--text-muted); text-decoration: none;
-  }
-  .sidebar a:hover { background: var(--surface-hover); color: var(--text-main); }
-  .sidebar a.on { background: var(--primary); color: #fff; }
-  .main { margin-left: 176px; padding: 24px 32px 80px; }
-  .page-container { max-width: 1360px; margin: 0 auto; }
-
-  .page-header {
-    display: flex; align-items: center; justify-content: space-between;
-    margin-bottom: 20px; flex-wrap: wrap; gap: 12px;
-  }
-  .title-group { display: flex; flex-direction: column; gap: 4px; }
-  h1 { font-size: 20px; font-weight: 700; margin: 0; letter-spacing: -0.3px; }
-  .subtitle { font-size: 13px; color: var(--text-muted); }
-  .header-actions { display: flex; align-items: center; gap: 10px; }
-
-  .btn {
-    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
-    padding: 7px 14px; border-radius: 8px; font-size: 13px; font-weight: 500;
-    cursor: pointer; transition: all 0.15s ease; border: 1px solid transparent;
-    user-select: none; text-decoration: none; line-height: 1.4;
-  }
-  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-  .btn-primary { background: var(--primary); color: #fff; }
-  .btn-primary:hover:not(:disabled) { background: var(--primary-hover); }
-  .btn-outline { background: var(--surface); color: var(--text-main); border-color: var(--border); box-shadow: var(--shadow-sm); }
-  .btn-outline:hover:not(:disabled) { background: var(--surface-hover); border-color: var(--border-strong); }
-  .btn-ghost { background: transparent; color: var(--text-muted); border-color: transparent; }
-  .btn-ghost:hover:not(:disabled) { background: var(--surface-hover); color: var(--text-main); }
-  .btn-sm { padding: 4px 10px; font-size: 12px; border-radius: 6px; }
-  .btn-danger { color: var(--danger); }
-  .btn-danger:hover:not(:disabled) { background: var(--danger-soft); }
-
-  .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 16px; }
-  .stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; box-shadow: var(--shadow-sm); }
-  .stat-label { font-size: 12px; font-weight: 500; color: var(--text-muted); margin-bottom: 4px; }
-  .stat-val { font-size: 22px; font-weight: 700; font-feature-settings: "tnum"; }
-  .stat-foot { font-size: 11px; color: var(--text-dim); margin-top: 4px; }
-
-  .drawer-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 18px; margin-bottom: 16px; box-shadow: var(--shadow-sm); }
-  .drawer-title { font-size: 14px; font-weight: 600; margin-bottom: 8px; display: flex; align-items: center; justify-content: space-between; }
+  /* 页面专属 */
   textarea.import-textarea {
     width: 100%; height: 120px; resize: vertical; font-size: 12px;
     font-family: ui-monospace, Menlo, Monaco, monospace;
-    border: 1px solid var(--border); border-radius: 8px; padding: 10px;
+    border: 1px solid var(--border); border-radius: var(--radius); padding: 10px;
     background: #f8fafc; color: var(--text-main); outline: none;
   }
   textarea.import-textarea:focus { border-color: var(--primary); background: #fff; }
-
-  .log-card { background: #0f172a; border-radius: 12px; padding: 14px 16px; margin-bottom: 16px; display: none; }
-  .log-card .log-title { color: #94a3b8; font-size: 12px; margin-bottom: 8px; display: flex; justify-content: space-between; }
-  .lv-mask { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: flex; align-items: center; justify-content: center; z-index: 60; }
-  .lv-box { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px; width: 520px; max-width: 92vw; }
   .lv-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
   .lv-row:last-child { border-bottom: none; }
   .lv-row label { display: inline-flex; gap: 4px; align-items: center; margin: 0 10px 0 0; cursor: pointer; white-space: nowrap; }
-  .log-card pre { margin: 0; color: #e2e8f0; font-size: 12px; font-family: ui-monospace, Menlo, monospace; max-height: 180px; overflow-y: auto; white-space: pre-wrap; }
-  .job-tabs { display: flex; gap: 6px; }
-  .job-tab { background: none; border: 1px solid #334155; color: #94a3b8; padding: 3px 10px; border-radius: 6px; font-size: 12px; cursor: pointer; display: flex; align-items: center; gap: 4px; }
-  .job-tab.on { background: #1d4ed8; color: #fff; border-color: #1d4ed8; }
-  .job-tab .dot { width: 6px; height: 6px; border-radius: 50%; background: #34d399; display: inline-block; animation: jk 1s infinite; }
-  @keyframes jk { 50% { opacity: .25 } }
-
-  .toolbar { background: var(--surface); border: 1px solid var(--border); border-radius: 12px 12px 0 0; padding: 12px 16px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; border-bottom: none; }
-  .toolbar-left { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-  .form-select, .form-input { padding: 6px 10px; border: 1px solid var(--border); border-radius: 7px; font-size: 13px; background: var(--surface); color: var(--text-main); outline: none; }
-  .form-input:focus { border-color: var(--primary); }
-
-  .table-card { background: var(--surface); border: 1px solid var(--border); border-radius: 0 0 12px 12px; box-shadow: var(--shadow-sm); overflow: hidden; }
-  table.data-table { width: 100%; border-collapse: collapse; font-size: 13px; text-align: left; }
-  table.data-table th { background: #f8fafc; color: var(--text-muted); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; padding: 10px 12px; border-bottom: 1px solid var(--border); }
-  table.data-table td { padding: 10px 12px; border-bottom: 1px solid #f1f5f9; vertical-align: middle; }
-  table.data-table tbody tr:hover { background: #f8fafc; }
-  table.data-table tbody tr:last-child td { border-bottom: none; }
-  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace; font-size: 12px; }
-  .copyable { cursor: pointer; }
-  .copyable:hover { color: var(--primary); }
-
-  .pill { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; }
-  .pill-ok { background: var(--success-soft); color: #047857; border: 1px solid #a7f3d0; }
-  .pill-warn { background: var(--warning-soft); color: #b45309; border: 1px solid #fde68a; }
-  .pill-bad { background: var(--danger-soft); color: #b91c1c; border: 1px solid #fecaca; }
-  .pill-dim { background: #f1f5f9; color: #475569; border: 1px solid #e2e8f0; }
-
-  .pager-footer { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border-top: 1px solid var(--border); background: var(--surface); font-size: 13px; color: var(--text-muted); }
-  .toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: #0f172a; color: #fff; padding: 8px 16px; border-radius: 8px; font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 99; }
 </style>
 </head>
 <body>
-<nav class="sidebar">
-  <div class="brand">roxy-accounts</div>
-  <a href="/accounts" class="on">👤 账号</a>
-  <a href="/">🌐 代理</a>
-  <a href="/mothers">👑 空间母号</a>
-  <a href="/settings">⚙️ 设置</a>
-</nav>
+<nav class="sidebar" data-nav="accounts"></nav>
 <div class="main">
 <div class="page-container">
   <div class="page-header">
@@ -144,7 +29,7 @@
       <div class="subtitle">自动选绑定数最少的代理 → Roxy 开窗 (auto-邮箱) → 打开 <span id="target-url">chatgpt.com</span> · 母号/资料/节奏在设置页</div>
     </div>
     <div class="header-actions">
-      <button class="btn btn-primary" id="btn-import">+ 导入账号</button>
+      <button class="btn btn-primary" id="btn-import"><i data-ic="plus"></i>导入账号</button>
     </div>
   </div>
 
@@ -159,7 +44,7 @@
   <div class="drawer-card" id="import-box" style="display:none">
     <div class="drawer-title">
       <span>批量导入账号</span>
-      <button class="btn btn-ghost btn-sm" id="import-close">✕ 关闭</button>
+      <button class="btn btn-ghost btn-sm" id="import-close"><i data-ic="x"></i>关闭</button>
     </div>
     <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">
       每行一个：<code>email----接码链接</code> · <code>email----密码</code> · <code>email:密码</code> · <code>email</code>
@@ -174,7 +59,7 @@
   </div>
 
   <div class="drawer-card" id="mailwatch-box" style="display:none">
-    <div class="drawer-title"><span>📨 半自动助手 (接码监听 + 资料生成 —— 出结果自动出现在这里, 点击可复制)</span></div>
+    <div class="drawer-title"><i data-ic="mail"></i><span>半自动助手 · 接码监听 + 资料生成（出结果自动出现在这里, 点击可复制）</span></div>
     <div id="mailwatch-list" style="font-size:13px"></div>
   </div>
 
@@ -183,7 +68,7 @@
     <div class="log-title">
       <span class="job-tabs" id="job-tabs"></span>
       <span style="display:flex;align-items:center;gap:8px">
-        <button class="btn btn-outline btn-sm btn-danger" id="job-stop" style="display:none">⏹ 停止</button>
+        <button class="btn btn-outline btn-sm btn-danger" id="job-stop" style="display:none"><i data-ic="square"></i>停止</button>
         <span id="job-log-state"></span></span></div>
     <pre id="job-log-pre"></pre>
     <div id="oauth-cb-row" style="display:none;gap:8px;margin-top:8px;align-items:center">
@@ -193,33 +78,40 @@
   </div>
 
   <div class="toolbar">
-    <div class="toolbar-left">
+    <div class="toolbar-row">
       <input class="form-input" id="q" placeholder="搜索邮箱 / 代理 / 备注" style="width:200px">
       <select class="form-select" id="f-space" style="font-size:12px" title="按已加入的空间筛选"></select>
-      <button class="btn btn-primary btn-sm" id="open-sel">🚀 开窗选中 → chatgpt.com</button>
-      <button class="btn btn-outline btn-sm" id="open-all">🚀 全部开窗</button>
-      <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--text-dim);cursor:pointer" title="只开窗定位到 chatgpt.com, 登录注册全程手动">半自动<input type="checkbox" id="semiauto" checked></label>
-      <label class="semi-opt" style="display:flex;align-items:center;gap:4px;font-size:12px;color:var(--text-dim);cursor:pointer" title="开窗后后台盯接码接口, 出码显示在下方接码面板">📨接码<input type="checkbox" id="semi-watch" checked></label>
-      <label class="semi-opt" style="display:flex;align-items:center;gap:4px;font-size:12px;color:var(--text-dim);cursor:pointer" title="开窗时调 AI 模型按邮箱生成姓名+年龄, 面板可复制">🤖资料<input type="checkbox" id="semi-prof" checked></label>
-      <label class="semi-opt" style="display:flex;align-items:center;gap:4px;font-size:12px;color:var(--text-dim);cursor:pointer" title="自动点 Log in 并填入邮箱提交, 密码/验证码/资料页仍手动">✉️邮箱<input type="checkbox" id="semi-email" checked></label>
-      <label class="semi-opt" style="display:flex;align-items:center;gap:4px;font-size:12px;color:var(--text-dim);cursor:pointer" title="等验证码框出现后自动轮询接码接口取新码填入并提交, 创建密码页仍手动">🔢填码<input type="checkbox" id="semi-code" checked></label>
-      <label class="semi-opt" style="display:flex;align-items:center;gap:4px;font-size:12px;color:var(--text-dim);cursor:pointer" title="等 about-you 资料页出现后自动填姓名+年龄并提交, 数据取🤖资料生成结果">📝填资料<input type="checkbox" id="semi-prof2" checked></label>
-      <button class="btn btn-outline btn-sm" id="pat-sel">🧪 PAT检验选中</button>
+      <span class="tb-sep"></span>
+      <button class="btn btn-primary btn-sm" id="open-sel"><i data-ic="app-window"></i>开窗选中</button>
+      <button class="btn btn-outline btn-sm" id="open-all"><i data-ic="layout-grid"></i>全部开窗</button>
+      <label class="semi-opt" title="只开窗定位到 chatgpt.com, 登录注册全程手动" style="font-weight:600"><i data-ic="settings"></i>半自动<input type="checkbox" id="semiauto" checked></label>
+      <label class="semi-opt" title="开窗后后台盯接码接口, 出码显示在下方接码面板"><i data-ic="mail"></i>接码<input type="checkbox" id="semi-watch" checked></label>
+      <label class="semi-opt" title="开窗时调 AI 模型按邮箱生成姓名+年龄, 面板可复制"><i data-ic="sparkle"></i>资料<input type="checkbox" id="semi-prof" checked></label>
+      <label class="semi-opt" title="自动点 Log in 并填入邮箱提交, 密码/验证码/资料页仍手动"><i data-ic="send"></i>邮箱<input type="checkbox" id="semi-email" checked></label>
+      <label class="semi-opt" title="等验证码框出现后自动轮询接码接口取新码填入并提交, 创建密码页仍手动"><i data-ic="hash"></i>填码<input type="checkbox" id="semi-code" checked></label>
+      <label class="semi-opt" title="等 about-you 资料页出现后自动填姓名+年龄并提交, 数据取资料生成结果"><i data-ic="pencil"></i>填资料<input type="checkbox" id="semi-prof2" checked></label>
+      <span style="flex:1"></span>
+      <span class="subtitle" id="sel-hint" style="font-size:12px"></span>
+      <button class="btn btn-ghost btn-sm" id="reload" title="刷新"><i data-ic="refresh-cw"></i></button>
+    </div>
+    <div class="toolbar-row">
+      <button class="btn btn-outline btn-sm" id="pat-sel"><i data-ic="shield-check"></i>PAT检验</button>
+      <span class="tb-sep"></span>
       <select class="form-select" id="join-mother" style="font-size:12px;max-width:150px" title="邀请子号进谁的空间 (空间母号页导入)"></select>
       <select class="form-select" id="join-seat" style="font-size:12px" title="席位类型: 标准 default / 高级 prolite (codex用量计费空间固定usage_based)">
         <option value="prolite">高级席位</option>
         <option value="default">标准席位</option>
       </select>
-      <button class="btn btn-outline btn-sm" id="join-sel" title="母号批量邀请 → 子号开窗刷新接受邀请">👑 加入空间</button>
-      <button class="btn btn-outline btn-sm" id="leave-sel" title="子号主动退出空间: 选了空间筛选就直接退它, 否则弹窗逐个选取">🚪 退空间</button>
-      <button class="btn btn-outline btn-sm" id="ws-refresh" title="开窗拉每个号实际所在空间 (accounts/check 实况, 写入成员列表)">🔄 查空间</button>
-      <button class="btn btn-outline btn-sm" id="cpa-sel" title="本地算OAuth链接 → 开(原/同IP新)窗口授权 → 截回调 → 经账号代理换token → 生成CPA凭证">🔗 OAuth授权</button>
-      <button class="btn btn-outline btn-sm" id="cpa-push" title="把已生成的凭证 JSON 推入 CPA 号池 (auth-files)">📤 推入池</button>
-      <button class="btn btn-outline btn-sm" id="cpa-export" title="导出选中账号的 CPA 凭证 JSON (zip 打包)">📥 导凭证</button>
-      <button class="btn btn-outline btn-sm btn-danger" id="del-sel">删除选中</button>
-      <button class="btn btn-ghost btn-sm" id="reload" title="刷新">⟳</button>
+      <button class="btn btn-outline btn-sm" id="join-sel" title="母号批量邀请 → 子号开窗刷新接受邀请"><i data-ic="user-plus"></i>加入空间</button>
+      <button class="btn btn-outline btn-sm" id="leave-sel" title="子号主动退出空间: 选了空间筛选就直接退它, 否则弹窗逐个选取"><i data-ic="log-out"></i>退空间</button>
+      <button class="btn btn-outline btn-sm" id="ws-refresh" title="开窗拉每个号实际所在空间 (accounts/check 实况, 写入成员列表)"><i data-ic="refresh-cw"></i>查空间</button>
+      <span class="tb-sep"></span>
+      <button class="btn btn-outline btn-sm" id="cpa-sel" title="本地算OAuth链接 → 开(原/同IP新)窗口授权 → 截回调 → 经账号代理换token → 生成CPA凭证"><i data-ic="key"></i>OAuth授权</button>
+      <button class="btn btn-outline btn-sm" id="cpa-push" title="把已生成的凭证 JSON 推入 CPA 号池 (auth-files)"><i data-ic="cloud-upload"></i>推入池</button>
+      <button class="btn btn-outline btn-sm" id="cpa-export" title="导出选中账号的 CPA 凭证 JSON (zip 打包)"><i data-ic="download"></i>导凭证</button>
+      <span class="tb-sep"></span>
+      <button class="btn btn-outline btn-sm btn-danger" id="del-sel"><i data-ic="trash-2"></i>删除选中</button>
     </div>
-    <span class="subtitle" id="sel-hint" style="font-size:12px"></span>
   </div>
 
   <div class="table-card">
@@ -253,9 +145,9 @@
 </div>
 </div>
 <div class="toast" id="toast"></div>
-<div class="lv-mask" id="leave-modal" style="display:none">
-  <div class="lv-box">
-    <div style="font-size:14px;font-weight:600;margin-bottom:6px">🚪 退出空间</div>
+<div class="modal-mask" id="leave-modal" style="display:none">
+  <div class="modal-box">
+    <div class="modal-title"><i data-ic="log-out"></i>退出空间</div>
     <div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">为每个号选取要退出的空间（把子号自己从该空间移除）</div>
     <div id="leave-rows" style="max-height:320px;overflow-y:auto"></div>
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
@@ -370,7 +262,7 @@ function render() {
       ? `<span class="pill pill-ok">已开</span>`
       : `<span class="pill pill-dim">—</span>`;
     const reg = a.email_dead
-      ? `<span class="pill pill-bad" title="接码接口返回 602 邮箱不可用">📪邮箱失效</span>`
+      ? `<span class="pill pill-bad" title="接码接口返回 602 邮箱不可用">${ui.icon("mail")}邮箱失效</span>`
       : a.reg === "new"
         ? `<span class="pill" style="background:#f5f3ff;color:#6d28d9;border:1px solid #ddd6fe" title="本次流程新注册 ${esc(a.reg_at||"")}">新注册</span>`
         : a.reg === "yes"
@@ -384,7 +276,7 @@ function render() {
           ? `<span class="pill pill-warn" title="${esc(a.pat)} ${esc(a.pat_at||"")}">${esc(a.pat)}</span>`
           : `<span class="pill pill-dim">未验</span>`;
     const pw = a.mail_url
-      ? `<span class="pill pill-ok copyable" data-c="${esc(a.mail_url)}" title="点击复制接码链接">接码🔗</span>`
+      ? `<span class="pill pill-ok copyable" data-c="${esc(a.mail_url)}" title="点击复制接码链接">${ui.icon("link")}接码</span>`
       : (a.password
           ? `<span class="copyable" data-c="${esc(a.password)}" title="点击复制密码">••••••</span>`
           : "—");
@@ -406,9 +298,9 @@ function render() {
     const cpa = a.cpa === "yes"
       ? `<a class="pill pill-ok" href="/api/accounts/${a.id}/cred" title="已入CPA池 ${esc(a.cpa_at||"")} —— 点下载凭证 ${esc(a.cred_file||"")}">已入池</a>`
       : a.cpa === "ready"
-        ? `<a class="pill" style="background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe" href="/api/accounts/${a.id}/cred" title="凭证已备好 ${esc(a.cred_at||"")} —— 点下载 ${esc(a.cred_file||"")}, 勾选后📤推入池">已生成</a>`
+        ? `<a class="pill" style="background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe" href="/api/accounts/${a.id}/cred" title="凭证已备好 ${esc(a.cred_at||"")} —— 点下载 ${esc(a.cred_file||"")}, 勾选后推入池">已生成</a>`
         : a.cpa === "pending"
-          ? `<span class="pill pill-warn copyable" data-c="${esc(a.oauth_url||"")}" title="授权未完成, 点复制 OAuth 链接手动开">⏳授权</span>`
+          ? `<span class="pill pill-warn copyable" data-c="${esc(a.oauth_url||"")}" title="授权未完成, 点复制 OAuth 链接手动开">${ui.icon("clock")}待授权</span>`
           : `<span class="pill pill-dim">—</span>`;
     return `<tr>
       <td><input type="checkbox" class="ck" data-id="${a.id}" ${sel.has(a.id) ? "checked" : ""}></td>
@@ -424,7 +316,7 @@ function render() {
       <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(a.note || a.extra || "")}">${esc(a.note || a.extra || "")}</td>
       <td style="text-align:right;white-space:nowrap">
         <button class="btn btn-ghost btn-sm" data-act="open" data-id="${a.id}">开窗</button>
-        ${a.mail_url ? `<button class="btn btn-ghost btn-sm" data-act="watch" data-id="${a.id}" title="开接码监听">📨</button>` : ""}
+        ${a.mail_url ? `<button class="btn btn-ghost btn-sm" data-act="watch" data-id="${a.id}" title="开接码监听">${ui.icon("mail")}</button>` : ""}
         ${a.proxy_id ? `<button class="btn btn-ghost btn-sm" data-act="unbind" data-id="${a.id}">解绑</button>` : ""}
         <button class="btn btn-ghost btn-sm btn-danger" data-act="del" data-id="${a.id}">删</button>
       </td>
@@ -441,11 +333,11 @@ function render() {
 
 // ---- 任务日志: 标签合一 ----
 const TABS = {
-  open: { icon: "🚀", name: "开窗", api: "/api/accounts/open/status", stop: "/api/accounts/open/stop" },
-  pat:  { icon: "🧪", name: "PAT",  api: "/api/accounts/pat/status",  stop: "/api/accounts/pat-check/stop" },
-  join: { icon: "👑", name: "空间", api: "/api/accounts/join/status", stop: "/api/accounts/join/stop" },
-  leave:{ icon: "🚪", name: "退出", api: "/api/accounts/leave/status", stop: "/api/accounts/leave/stop" },
-  cpa:  { icon: "🔗", name: "OAuth",api: "/api/accounts/cpa/status",  stop: "/api/accounts/cpa/stop" },
+  open: { icon: "app-window",   name: "开窗",  api: "/api/accounts/open/status",  stop: "/api/accounts/open/stop" },
+  pat:  { icon: "shield-check", name: "PAT",   api: "/api/accounts/pat/status",   stop: "/api/accounts/pat-check/stop" },
+  join: { icon: "user-plus",    name: "空间",  api: "/api/accounts/join/status",  stop: "/api/accounts/join/stop" },
+  leave:{ icon: "log-out",      name: "退出",  api: "/api/accounts/leave/status", stop: "/api/accounts/leave/stop" },
+  cpa:  { icon: "key",          name: "OAuth", api: "/api/accounts/cpa/status",   stop: "/api/accounts/cpa/stop" },
 };
 const tabData = {};
 let curTab = "open", jobPollT = null;
@@ -461,7 +353,7 @@ function renderJobTab() {
   document.querySelectorAll(".job-tab").forEach(b => {
     const k = b.dataset.tab, d = tabData[k] || {};
     b.classList.toggle("on", k === curTab);
-    b.innerHTML = `${TABS[k].icon} ${TABS[k].name}` +
+    b.innerHTML = `${ui.icon(TABS[k].icon)}${TABS[k].name}` +
       (d.running ? ' <span class="dot"></span>' : "");
   });
   const d = tabData[curTab] || {};
@@ -546,7 +438,7 @@ $("tbody").addEventListener("click", async e => {
   } else if (act === "watch") {
     const r = await post("/api/mail-codes/start", { id });
     if (r.error) return toast("✗ " + r.error);
-    toast("📨 接码监听已开");
+    toast("接码监听已开");
     pollMailWatch();
   } else if (act === "unbind") {
     await post("/api/accounts/unbind", { id });
@@ -627,7 +519,7 @@ async function pollMailWatch() {
     return `<div style="display:flex;align-items:center;gap:14px;padding:8px 0;border-bottom:1px solid var(--border)">
       <span class="mono" style="min-width:230px">${esc(email)}</span>
       ${code} ${prof} ${st}
-      ${w ? `<button class="btn btn-ghost btn-sm btn-danger" data-mw-stop="${w.id}" style="margin-left:auto">✕</button>` : ""}
+      ${w ? `<button class="btn btn-ghost btn-sm btn-danger" data-mw-stop="${w.id}" style="margin-left:auto">${ui.icon("x")}</button>` : ""}
     </div>`;
   }).join("");
 }
