@@ -2140,7 +2140,7 @@ JOIN_JOB = {"running": False, "log": [], "results": {},
             "stop": False}
 
 
-def _join_worker(ids, mname, seat="default"):
+def _join_worker(ids, mname, seat="prolite"):
     """空间母号批量邀请 → 子号开窗刷新 → 接受邀请 → 记 space 字段。
     与 PAT 流程前半段相同, 但收尾不建 PAT, 只落成员身份。
     seat: default(标准) | prolite(高级) —— codex(usage_based)
@@ -3666,9 +3666,9 @@ class H(BaseHTTPRequestHandler):
                 return self._json({"error": "加入空间任务在跑"}, 409)
             ids = [i for i in (req.get("ids") or [])]
             mname = (req.get("mother") or "").strip()
-            seat = (req.get("seat") or "default").strip()
+            seat = (req.get("seat") or "prolite").strip()
             if seat not in ("default", "prolite"):
-                seat = "default"
+                seat = "prolite"
             if not ids:
                 return self._json({"error": "没选账号"})
             if not mname:
