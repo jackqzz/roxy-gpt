@@ -123,6 +123,7 @@
   <div class="brand">roxy-accounts</div>
   <a href="/accounts" class="on">👤 账号</a>
   <a href="/">🌐 代理</a>
+  <a href="/mothers">👑 空间母号</a>
   <a href="/settings">⚙️ 设置</a>
 </nav>
 <div class="main">
@@ -183,9 +184,18 @@
     <pre id="pat-log-pre"></pre>
   </div>
 
+  <div class="log-card" id="join-log">
+    <div class="log-title"><span>加入空间日志</span>
+      <span style="display:flex;align-items:center;gap:8px">
+        <button class="btn btn-outline btn-sm btn-danger" id="join-stop" style="display:none">⏹ 停止</button>
+        <span id="join-log-state"></span></span></div>
+    <pre id="join-log-pre"></pre>
+  </div>
+
   <div class="toolbar">
     <div class="toolbar-left">
       <input class="form-input" id="q" placeholder="搜索邮箱 / 代理 / 备注" style="width:200px">
+      <select class="form-select" id="f-space" style="font-size:12px" title="按已加入的空间筛选"></select>
       <button class="btn btn-primary btn-sm" id="open-sel">🚀 开窗选中 → chatgpt.com</button>
       <button class="btn btn-outline btn-sm" id="open-all">🚀 全部开窗</button>
       <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--text-dim);cursor:pointer" title="只开窗定位到 chatgpt.com, 登录注册全程手动">半自动<input type="checkbox" id="semiauto"></label>
@@ -195,6 +205,8 @@
       <label class="semi-opt" style="display:flex;align-items:center;gap:4px;font-size:12px;color:var(--text-dim);cursor:pointer" title="等验证码框出现后自动轮询接码接口取新码填入并提交, 创建密码页仍手动">🔢填码<input type="checkbox" id="semi-code" checked></label>
       <label class="semi-opt" style="display:flex;align-items:center;gap:4px;font-size:12px;color:var(--text-dim);cursor:pointer" title="等 about-you 资料页出现后自动填姓名+年龄并提交, 数据取🤖资料生成结果">📝填资料<input type="checkbox" id="semi-prof2" checked></label>
       <button class="btn btn-outline btn-sm" id="pat-sel">🧪 PAT检验选中</button>
+      <select class="form-select" id="join-mother" style="font-size:12px;max-width:150px" title="邀请子号进谁的空间 (空间母号页导入)"></select>
+      <button class="btn btn-outline btn-sm" id="join-sel" title="母号批量邀请 → 子号开窗刷新接受邀请">👑 加入空间</button>
       <button class="btn btn-outline btn-sm btn-danger" id="del-sel">删除选中</button>
       <button class="btn btn-ghost btn-sm" id="reload" title="刷新">⟳</button>
     </div>
@@ -213,6 +225,7 @@
           <th style="width:90px">窗口</th>
           <th style="width:80px">注册</th>
           <th style="width:80px">PAT</th>
+          <th style="width:110px">空间</th>
           <th>备注/附加</th>
           <th style="width:150px;text-align:right">操作</th>
         </tr>
@@ -255,8 +268,12 @@ async function post(path, body) {
 }
 function filtered() {
   const q = $("q").value.trim().toLowerCase();
-  if (!q) return accounts;
-  return accounts.filter(a =>
+  const fs = $("f-space").value;
+  let list = accounts;
+  if (fs === "__none__") list = list.filter(a => !a.space);
+  else if (fs) list = list.filter(a => a.space === fs);
+  if (!q) return list;
+  return list.filter(a =>
     a.email.includes(q) || (a.proxy || "").includes(q) ||
     (a.note || "").toLowerCase().includes(q) ||
     (a.extra || "").toLowerCase().includes(q));
@@ -272,7 +289,28 @@ async function load() {
   $("st-opened").textContent = s.opened ?? 0;
   $("st-unbound").textContent = s.unbound ?? 0;
   if (r.target) $("target-url").textContent = r.target.replace(/^https?:\/\//, "");
+  // 空间筛选下拉 (保留当前选择)
+  const fsv = $("f-space").value;
+  const spaces = [...new Set(accounts.map(a => a.space).filter(Boolean))].sort();
+  $("f-space").innerHTML = `<option value="">全部空间</option>`
+    + `<option value="__none__">未入空间</option>`
+    + spaces.map(x => `<option ${x === fsv ? "selected" : ""}>${esc(x)}</option>`).join("");
+  if (fsv && ![...$("f-space").options].some(o => o.value === fsv && o.value))
+    $("f-space").value = "";
+  // 加入空间母号下拉
+  loadMothers();
   render();
+}
+
+let mothersCache = [];
+async function loadMothers() {
+  const r = await fetch("/api/mothers").then(r => r.json()).catch(() => null);
+  mothersCache = (r && r.mothers) || [];
+  const cur = $("join-mother").value;
+  $("join-mother").innerHTML = mothersCache.length
+    ? mothersCache.map(m =>
+        `<option value="${esc(m.name)}" ${m.name === cur ? "selected" : ""}>${esc(m.name)}${m.ws_name ? " · " + esc(m.ws_name) : ""}</option>`).join("")
+    : `<option value="">先到母号页导入</option>`;
 }
 
 function render() {
@@ -307,6 +345,9 @@ function render() {
       : (a.password
           ? `<span class="copyable" data-c="${esc(a.password)}" title="点击复制密码">••••••</span>`
           : "—");
+    const sp = a.space
+      ? `<span class="pill pill-ok" title="母号 ${esc(a.space_mother || "")} · ${esc(a.space_at || "")}">${esc(a.space)}</span>`
+      : `<span class="pill pill-dim">—</span>`;
     return `<tr>
       <td><input type="checkbox" class="ck" data-id="${a.id}" ${sel.has(a.id) ? "checked" : ""}></td>
       <td class="mono" style="color:var(--text-dim)">${idx}</td>
@@ -316,6 +357,7 @@ function render() {
       <td>${win}</td>
       <td>${reg}</td>
       <td>${pat}</td>
+      <td>${sp}</td>
       <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(a.note || a.extra || "")}">${esc(a.note || a.extra || "")}</td>
       <td style="text-align:right;white-space:nowrap">
         <button class="btn btn-ghost btn-sm" data-act="open" data-id="${a.id}">开窗</button>
@@ -324,7 +366,7 @@ function render() {
         <button class="btn btn-ghost btn-sm btn-danger" data-act="del" data-id="${a.id}">删</button>
       </td>
     </tr>`;
-  }).join("") || `<tr><td colspan="10" style="text-align:center;color:var(--text-dim);padding:32px">暂无账号 —— 点右上角「导入账号」</td></tr>`;
+  }).join("") || `<tr><td colspan="11" style="text-align:center;color:var(--text-dim);padding:32px">暂无账号 —— 点右上角「导入账号」</td></tr>`;
   $("pager").style.display = list.length > SIZE ? "flex" : "none";
   $("pg-info").textContent = `第 ${page} / ${pages} 页 · 共 ${list.length} 条`;
   $("sel-hint").textContent = sel.size ? `已选 ${sel.size} 个` : "";
@@ -369,6 +411,7 @@ $("btn-import").onclick = () => $("import-box").style.display = "block";
 $("import-close").onclick = () => $("import-box").style.display = "none";
 $("reload").onclick = load;
 $("q").oninput = () => { page = 1; render(); };
+$("f-space").onchange = () => { page = 1; render(); };
 $("pg-prev").onclick = () => { if (page > 1) { page--; render(); } };
 $("pg-next").onclick = () => {
   const pages = Math.ceil(filtered().length / SIZE);
@@ -527,9 +570,44 @@ $("pat-sel").onclick = e => {
   });
 };
 
+// ---- 加入空间 ----
+let joinPollT = null;
+async function pollJoin() {
+  const r = await fetch("/api/accounts/join/status").then(r => r.json());
+  const box = $("join-log");
+  if (r.running || (r.log || []).length) {
+    box.style.display = "block";
+    $("join-log-state").textContent = r.running ? "运行中 …" : "已结束";
+    $("join-stop").style.display = r.running ? "" : "none";
+    $("join-log-pre").textContent = (r.log || []).join("\n");
+    $("join-log-pre").scrollTop = $("join-log-pre").scrollHeight;
+  }
+  if (!r.running) { clearInterval(joinPollT); joinPollT = null; await load(); }
+}
+$("join-sel").onclick = e => {
+  if (!sel.size) return toast("先勾选账号");
+  const mother = $("join-mother").value;
+  if (!mother) return toast("先选空间母号 (没有就去空间母号页导入)");
+  const ids = [...sel];
+  e.target.disabled = true;
+  post("/api/accounts/join-space", { ids, mother }).then(r => {
+    e.target.disabled = false;
+    if (r.error) return toast("✗ " + r.error);
+    toast(`加入空间启动: ${r.count} 个账号 → ${mother}`);
+    $("join-log").style.display = "block";
+    $("join-log-state").textContent = "运行中 …";
+    if (!joinPollT) joinPollT = setInterval(pollJoin, 1500);
+  });
+};
+$("join-stop").onclick = async () => {
+  await post("/api/accounts/join/stop", {});
+  toast("已请求停止 —— 当前账号做完就停");
+};
+
 load();
 pollOpen();   // 页面打开时若正好有任务在跑则接上
 pollPat();
+pollJoin();
 </script>
 </body>
 </html>

@@ -286,6 +286,22 @@ def _save_settings(s):
     json.dump(s, open(SETTINGS_FILE, "w"), ensure_ascii=False, indent=1)
 
 
+# ---------------- 空间母号 ----------------
+MOTHERS_FILE = os.path.join(BASE_DIR, "mothers.json")
+
+
+def _load_mothers():
+    try:
+        return json.load(open(MOTHERS_FILE)).get("mothers") or []
+    except Exception:
+        return []
+
+
+def _save_mothers(ms):
+    json.dump({"mothers": ms}, open(MOTHERS_FILE, "w"),
+              ensure_ascii=False, indent=1)
+
+
 def _upstream():
     """settings.upstream_proxy -> _parse_proxy_line dict | None"""
     raw = (_settings().get("upstream_proxy") or "").strip()
@@ -1572,10 +1588,10 @@ def _gen_password(n=14):
     return "".join(pwd)
 
 
-def _mother_open():
-    """按设置里的窗口名打开母号窗口, 返回 (ws_url, err)。"""
-    st = _settings()
-    name = (st.get("mother_window") or "").strip()
+def _mother_open(name=None):
+    """打开母号窗口, 返回 (ws_url, err)。
+    name=None 时用设置里的 Pat测试母号窗口名。"""
+    name = (name or _settings().get("mother_window") or "").strip()
     if not name:
         return None, "未配置母号窗口名"
     w, werr = _roxy_find_window(name)
@@ -1588,6 +1604,118 @@ def _mother_open():
     if not ws:
         return None, o.get("error") or "母号窗口打开失败"
     return ws, None
+
+
+_WS_LIST_JS = """async () => {
+    const s = await fetch('/api/auth/session', {credentials:'include'});
+    const sess = await s.json();
+    const tok = sess.accessToken;
+    if (!tok) return {error: '未登录'};
+    const r = await fetch('/backend-api/accounts/check'
+        + '/v4-2023-04-27', {credentials:'include',
+        headers:{authorization:'Bearer '+tok}});
+    const acc = await r.json();
+    const list = [];
+    for (const [k,v] of Object.entries(acc.accounts||{})) {
+        const a = v.account || {};
+        if (a.structure !== 'workspace') continue;
+        if (list.find(x => x.id === a.account_id)) continue;
+        list.push({id: a.account_id, name: a.name,
+                   role: a.account_user_role, plan: a.plan_type});
+    }
+    return {email: sess.user?.email, workspaces: list};
+}"""
+
+
+def _list_workspaces(win_name):
+    """连指定窗口名列出它的 workspace, 返回 (email, [ws], err)。"""
+    ws_url, err = _mother_open(win_name)
+    if err:
+        return None, None, err
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as pw:
+            br = pw.chromium.connect_over_cdp(ws_url)
+            try:
+                pg = _find_cgpt_page(br)
+                if not pg:
+                    return None, None, \
+                        "窗口里没有 chatgpt.com 页面 —— 请先登录"
+                out = pg.evaluate(_WS_LIST_JS)
+                if out.get("error"):
+                    return None, None, out["error"]
+                return out.get("email"), \
+                    out.get("workspaces") or [], None
+            finally:
+                br.close()
+    except Exception as e:
+        return None, None, str(e)[:200]
+
+
+# 子号侧: 检查是否已经是某空间成员
+_MEMBER_CHECK_JS = """async (ws) => {
+    const s = await fetch('/api/auth/session', {credentials:'include'});
+    const sess = await s.json();
+    const tok = sess.accessToken;
+    if (!tok) return {code:'no_token'};
+    const r = await fetch('/backend-api/accounts/check'
+        + '/v4-2023-04-27', {credentials:'include',
+        headers:{authorization:'Bearer '+tok}});
+    const acc = await r.json();
+    for (const [k,v] of Object.entries(acc.accounts||{})) {
+        const a = v.account||{};
+        if (a.account_id === ws)
+            return {found:true, role:a.account_user_role||'',
+                    name:a.name||''};
+    }
+    return {found:false};
+}"""
+
+# 子号侧: 找 pending 邀请并走 API 接受
+_ACCEPT_INVITE_JS = """async (ws) => {
+    const s = await fetch('/api/auth/session', {credentials:'include'});
+    const sess = await s.json();
+    const tok = sess.accessToken;
+    if (!tok) return {ok:false, code:'no_token'};
+    const H = {'authorization':'Bearer '+tok,
+               'content-type':'application/json'};
+    const acc = await (await fetch(
+        '/backend-api/accounts/check/v4-2023-04-27',
+        {credentials:'include', headers:H})).json();
+    const entries = Object.values(acc.accounts||{})
+        .map(v => v.account||{});
+    const me = entries.find(a => a.structure === 'personal')
+               || entries[0] || {};
+    const pid = me.account_id;
+    const tried = [];
+    if (pid) {
+        const r = await fetch('/backend-api/accounts/' + pid
+            + '/invites', {credentials:'include', headers:H});
+        tried.push('list:' + r.status);
+        if (r.ok) {
+            let j = null; try { j = await r.json(); } catch(e) {}
+            const items = (j && (j.invites || j.items))
+                          || (Array.isArray(j) ? j : []);
+            for (const inv of items) {
+                const iid = inv.id || inv.invite_id;
+                const iw = inv.workspace_id || inv.account_id
+                    || (inv.account && inv.account.account_id);
+                if (iw && iw !== ws) continue;
+                if (!iid) continue;
+                for (const u of [
+                    '/backend-api/accounts/' + pid
+                        + '/invites/' + iid + '/accept',
+                    '/backend-api/invites/' + iid + '/accept']) {
+                    const ar = await fetch(u, {method:'POST',
+                        credentials:'include', headers:H, body:'{}'});
+                    tried.push('accept:' + ar.status);
+                    if (ar.ok) return {ok:true, how:'api'};
+                }
+            }
+        }
+    }
+    return {ok:false, tried};
+}"""
 
 
 def _pat_worker(ids):
@@ -1782,6 +1910,232 @@ def _pat_worker(ids):
         PAT_JOB["running"] = False
         log("—— PAT 检验结束 ——"
             + (" (手动停止)" if PAT_JOB["stop"] else ""))
+
+
+# ---------------- 加入空间任务 ----------------
+JOIN_JOB = {"running": False, "log": [], "results": {},
+            "stop": False}
+
+
+def _join_worker(ids, mname):
+    """空间母号批量邀请 → 子号开窗刷新 → 接受邀请 → 记 space 字段。
+    与 PAT 流程前半段相同, 但收尾不建 PAT, 只落成员身份。"""
+    JOIN_JOB["running"] = True
+    JOIN_JOB["stop"] = False
+    JOIN_JOB["log"] = []
+    JOIN_JOB["results"] = {}
+
+    def log(m):
+        line = "%s %s" % (time.strftime("%H:%M:%S"), m)
+        JOIN_JOB["log"].append(line)
+
+    from playwright.sync_api import sync_playwright
+    try:
+        ms = _load_mothers()
+        m = next((x for x in ms if x["name"] == mname), None)
+        if not m:
+            log("✗ 空间母号 %s 不在列表 —— 先到空间母号页导入" % mname)
+            for i in ids:
+                JOIN_JOB["results"][i] = "母号不存在"
+            return
+        # 目标空间: 存过的直接用; 没存就连母号拉 owner 空间存上
+        ws_id = (m.get("ws") or "").strip()
+        if not ws_id:
+            memail, wss, werr = _list_workspaces(mname)
+            if werr:
+                log("✗ 拉母号空间失败: " + werr)
+                for i in ids:
+                    JOIN_JOB["results"][i] = "母号: " + werr
+                return
+            own = next((w for w in wss
+                        if w.get("role") == "account-owner"),
+                       None) or (wss[0] if wss else None)
+            if not own:
+                log("✗ 母号没有任何空间")
+                for i in ids:
+                    JOIN_JOB["results"][i] = "母号无空间"
+                return
+            ws_id = own["id"]
+            m["ws"] = ws_id
+            m["ws_name"] = own.get("name") or ""
+            _save_mothers(ms)
+            log("母号空间自动选择: %s (%s)"
+                % (m["ws_name"], ws_id[:8]))
+        ws_name = m.get("ws_name") or ws_id[:8]
+        mws, err = _mother_open(mname)
+        if err:
+            log("✗ 母号窗口: " + err)
+            for i in ids:
+                JOIN_JOB["results"][i] = "母号: " + err
+            return
+        log("母号窗口 %s 已连, 目标空间 %s" % (mname, ws_name))
+        with sync_playwright() as pw:
+            mbr = pw.chromium.connect_over_cdp(mws)
+            mpg = _find_cgpt_page(mbr)
+            if not mpg:
+                mpg = mbr.contexts[0].new_page()
+                mpg.goto(TARGET_URL,
+                         wait_until="domcontentloaded", timeout=60000)
+                mpg.wait_for_timeout(4000)
+            # 母号批量邀请 —— 一次请求
+            emails = {}
+            for aid in ids:
+                a = next((x for x in _load_accounts()
+                          if x["id"] == aid), None)
+                if a:
+                    emails[aid] = a["email"]
+            r = {}
+            for att in range(3):
+                r = mpg.evaluate(_INVITE_JS, {
+                    "ws": ws_id, "emails": list(emails.values()),
+                    "fid": str(uuid.uuid4()),
+                    "sid": str(uuid.uuid4())})
+                if r.get("status") == 401 \
+                        or "token_expired" in (r.get("body") or ""):
+                    log("  母号 token 过期, 刷新页面重取 (%d/3)"
+                        % (att + 1))
+                    try:
+                        mpg.goto(TARGET_URL,
+                                 wait_until="domcontentloaded",
+                                 timeout=60000)
+                        mpg.wait_for_timeout(4000)
+                    except Exception:
+                        pass
+                    continue
+                break
+            if r.get("status") != 200:
+                log("✗ 批量邀请失败 %s %s"
+                    % (r.get("status"), (r.get("body") or "")[:150]))
+                for i2 in ids:
+                    JOIN_JOB["results"][i2] = "邀请失败"
+                return
+            try:
+                bj = json.loads(r.get("body") or "{}")
+            except Exception:
+                bj = {}
+            already = set(bj.get("already_member_emails") or [])
+            log("→ 批量邀请完成: 新发 %d 个, 已是成员 %d 个"
+                % (len(emails) - len(already & set(emails.values())),
+                   len(already & set(emails.values()))))
+            # 逐个子号: 开窗 → 刷新 → 接受邀请
+            for aid in ids:
+                if JOIN_JOB["stop"]:
+                    log("⏹ 已手动停止")
+                    break
+                a = next((x for x in _load_accounts()
+                          if x["id"] == aid), None)
+                if not a:
+                    continue
+                email = a["email"]
+                try:
+                    px = _load_proxies()
+                    p = next((x for x in px
+                              if x["id"] == a.get("proxy_id")), None)
+                    if not p or p.get("banned"):
+                        p = _pick_proxy(px)
+                        if not p:
+                            JOIN_JOB["results"][aid] = "没有可用代理"
+                            log("✗ %s: 没有可用代理" % email)
+                            continue
+                        _bind_proxy(p, email)
+                        a["proxy_id"] = p["id"]
+                        _save_proxies(px)
+                    dir_id, cws, err = _roxy_open_for(email, p)
+                    if err or not cws:
+                        JOIN_JOB["results"][aid] = "开窗: " + (err or "")
+                        log("✗ %s: 开窗失败 %s" % (email, err))
+                        continue
+                    a["win"] = dir_id
+                    cbr = pw.chromium.connect_over_cdp(cws)
+                    try:
+                        cpg = _find_cgpt_page(cbr)
+                        if not cpg:
+                            cpg = cbr.contexts[0].new_page()
+                        done = None
+                        for att in range(3):
+                            cpg.goto(TARGET_URL,
+                                     wait_until="domcontentloaded",
+                                     timeout=60000)
+                            cpg.wait_for_timeout(3500)
+                            try:
+                                res = cpg.evaluate(
+                                    _ACCEPT_INVITE_JS, ws_id)
+                            except Exception as e:
+                                res = {"ok": False,
+                                       "tried":
+                                       ["eval:" + str(e)[:60]]}
+                            if res.get("code") == "no_token":
+                                done = "窗口未登录"
+                                break
+                            if res.get("ok"):
+                                done = "ok"
+                                break
+                            # API 没找到邀请 → UI 兜底找接受按钮
+                            clicked = False
+                            for sel in (
+                                    'button:has-text("Accept")',
+                                    'button:has-text("加入")',
+                                    'button:has-text("接受")',
+                                    '[data-testid*="accept"]'):
+                                try:
+                                    b = cpg.query_selector(sel)
+                                    if b and b.is_visible():
+                                        b.click()
+                                        clicked = True
+                                        log("  %s: 点了界面接受按钮"
+                                            % email)
+                                        cpg.wait_for_timeout(2500)
+                                        break
+                                except Exception:
+                                    pass
+                            if not clicked:
+                                done = "没找到邀请 (%s)" % ",".join(
+                                    res.get("tried") or [])[:80]
+                                break
+                        if done == "ok" or not done:
+                            try:
+                                mc = cpg.evaluate(
+                                    _MEMBER_CHECK_JS, ws_id)
+                            except Exception:
+                                mc = {}
+                            if mc.get("found") and "invited" \
+                                    not in (mc.get("role") or ""):
+                                done = "ok"
+                        if done == "ok":
+                            a["space"] = ws_name
+                            a["space_ws"] = ws_id
+                            a["space_mother"] = mname
+                            a["space_at"] = _now()
+                            JOIN_JOB["results"][aid] = \
+                                "已入 " + ws_name
+                            log("✓ %s: 已入 %s" % (email, ws_name))
+                        else:
+                            JOIN_JOB["results"][aid] = \
+                                done or "未知"
+                            log("✗ %s: %s" % (email, done or "未知"))
+                    finally:
+                        try:
+                            cbr.close()
+                        except Exception:
+                            pass
+                except Exception as e:
+                    JOIN_JOB["results"][aid] = str(e)[:120]
+                    log("✗ %s: %s" % (email, str(e)[:120]))
+                finally:
+                    accs_all = _load_accounts()
+                    for x in accs_all:
+                        if x["id"] == aid:
+                            x.update(a)
+                            break
+                    _save_accounts(accs_all)
+            try:
+                mbr.close()
+            except Exception:
+                pass
+    finally:
+        JOIN_JOB["running"] = False
+        log("—— 加入空间结束 ——"
+            + (" (手动停止)" if JOIN_JOB["stop"] else ""))
 
 
 def _roxy_delete_window(dir_id):
@@ -1988,6 +2342,7 @@ def _open_worker(accs, semiauto=False, watch_code=False,
 
 # ---------------- HTTP ----------------
 PAGES = {"/": "index.html", "/index.html": "index.html",
+         "/mothers": "mothers.html", "/mothers.html": "mothers.html",
          "/accounts": "accounts.html", "/accounts.html": "accounts.html",
          "/settings": "settings.html", "/settings.html": "settings.html"}
 
@@ -2108,56 +2463,26 @@ class H(BaseHTTPRequestHandler):
                                "mother_workspace_name":
                                s.get("mother_workspace_name") or ""})
         if self.path == "/api/mother/workspaces":
-            """连母号窗口列出她拥有的 workspace (给下拉选择用)。"""
-            ws_url, err = _mother_open()
+            """连 Pat测试母号窗口列出她拥有的 workspace (给下拉选择用)。"""
+            email, wss, err = _list_workspaces(None)
             if err:
                 return self._json({"error": err})
-            try:
-                from playwright.sync_api import sync_playwright
-                with sync_playwright() as pw:
-                    br = pw.chromium.connect_over_cdp(ws_url)
-                    try:
-                        pg = _find_cgpt_page(br)
-                        if not pg:
-                            return self._json(
-                                {"error": "母号窗口里没有 "
-                                 "chatgpt.com 页面 —— 请先登录"})
-                        out = pg.evaluate("""async () => {
-                            const s = await fetch('/api/auth/session',
-                                {credentials:'include'});
-                            const sess = await s.json();
-                            const tok = sess.accessToken;
-                            if (!tok) return {error: '母号未登录'};
-                            const r = await fetch(
-                                '/backend-api/accounts/check'
-                                + '/v4-2023-04-27',
-                                {credentials:'include',
-                                 headers:{'authorization':
-                                          'Bearer '+tok}});
-                            const acc = await r.json();
-                            const list = [];
-                            for (const [k,v] of
-                                 Object.entries(acc.accounts||{})) {
-                                const a = v.account || {};
-                                if (a.structure !== 'workspace')
-                                    continue;
-                                if (list.find(x =>
-                                        x.id === a.account_id))
-                                    continue;
-                                list.push({
-                                    id: a.account_id,
-                                    name: a.name,
-                                    role: a.account_user_role,
-                                    plan: a.plan_type});
-                            }
-                            return {email: sess.user?.email,
-                                    workspaces: list};
-                        }""")
-                        return self._json(out)
-                    finally:
-                        br.close()
-            except Exception as e:
-                return self._json({"error": str(e)[:200]})
+            return self._json({"email": email, "workspaces": wss})
+        if self.path == "/api/mothers":
+            return self._json({"mothers": _load_mothers()})
+        if self.path.startswith("/api/mothers/workspaces"):
+            """连指定空间母号窗口列出她的 workspace。"""
+            q = urllib.parse.parse_qs(
+                urllib.parse.urlparse(self.path).query)
+            name = (q.get("name") or [""])[0].strip()
+            if not name:
+                return self._json({"error": "缺 name 参数"})
+            email, wss, err = _list_workspaces(name)
+            if err:
+                return self._json({"error": err})
+            return self._json({"email": email, "workspaces": wss})
+        if self.path == "/api/accounts/join/status":
+            return self._json(JOIN_JOB)
         if self.path.startswith("/api/proxies/export"):
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             fmt = (q.get("fmt") or ["colon"])[0]
@@ -2467,6 +2792,64 @@ class H(BaseHTTPRequestHandler):
             threading.Thread(target=_pat_worker, args=(ids,),
                              daemon=True).start()
             return self._json({"ok": True, "count": len(ids)})
+        if self.path == "/api/mothers/add":
+            req = self._body()
+            raw = req.get("names") or req.get("name") or ""
+            names = [x.strip() for x in raw.splitlines()
+                     if x.strip()]
+            if not names:
+                return self._json({"error": "没有要导入的窗口名"})
+            ms = _load_mothers()
+            seen = {m["name"] for m in ms}
+            added, dup = 0, 0
+            for n in names:
+                if n in seen:
+                    dup += 1
+                    continue
+                seen.add(n)
+                ms.append({"name": n, "ws": "", "ws_name": "",
+                           "added_at": _now()})
+                added += 1
+            _save_mothers(ms)
+            return self._json({"ok": True, "added": added,
+                               "dup": dup})
+        if self.path == "/api/mothers/delete":
+            req = self._body()
+            names = set(req.get("names") or [])
+            ms = _load_mothers()
+            keep = [m for m in ms if m["name"] not in names]
+            _save_mothers(keep)
+            return self._json({"ok": True,
+                               "deleted": len(ms) - len(keep)})
+        if self.path == "/api/mothers/set-ws":
+            req = self._body()
+            ms = _load_mothers()
+            m = next((x for x in ms
+                      if x["name"] == req.get("name")), None)
+            if not m:
+                return self._json({"error": "母号不存在"}, 404)
+            m["ws"] = (req.get("ws") or "").strip()
+            m["ws_name"] = (req.get("ws_name") or "").strip()
+            _save_mothers(ms)
+            return self._json({"ok": True})
+        if self.path == "/api/accounts/join-space":
+            req = self._body()
+            if JOIN_JOB["running"]:
+                return self._json({"error": "加入空间任务在跑"}, 409)
+            ids = [i for i in (req.get("ids") or [])]
+            mname = (req.get("mother") or "").strip()
+            if not ids:
+                return self._json({"error": "没选账号"})
+            if not mname:
+                return self._json({"error": "没选空间母号"})
+            if len(ids) > 50:
+                return self._json({"error": "单次最多 50 个"}, 400)
+            threading.Thread(target=_join_worker,
+                             args=(ids, mname), daemon=True).start()
+            return self._json({"ok": True, "count": len(ids)})
+        if self.path == "/api/accounts/join/stop":
+            JOIN_JOB["stop"] = True
+            return self._json({"ok": True})
         if self.path == "/api/settings/test-upstream":
             # 经上级代理 CONNECT api.ipify.org:443 验证可达性
             up = _upstream()
