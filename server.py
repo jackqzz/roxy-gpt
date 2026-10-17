@@ -1856,6 +1856,51 @@ _ACCEPT_INVITE_JS = """async (ws) => {
     return {ok:false, tried};
 }"""
 
+# 子号侧: 退出指定空间 (HAR: DELETE accounts/{ws}/users/{自己uid})
+# 先换目标空间 token —— 窗口当前停在哪个空间无所谓,
+# exchange_workspace_token 拿到的就是该空间的 AT
+_LEAVE_WS_JS = """async (wsid) => {
+    const s = await fetch('/api/auth/session'
+        + '?exchange_workspace_token=true&workspace_id=' + wsid
+        + '&reason=setCurrentAccount', {credentials:'include'});
+    const sess = await s.json();
+    const tok = sess.accessToken;
+    const uid = (sess.user || {}).id;
+    if (!tok) return {status:0, code:'no_token'};
+    if (!uid) return {status:0, code:'no_uid'};
+    const H = {'authorization':'Bearer '+tok,
+               'chatgpt-account-id':wsid,
+               'content-type':'application/json'};
+    let mine = null, list = [];
+    try {
+        const acc = await (await fetch(
+            '/backend-api/accounts/check/v4-2023-04-27',
+            {credentials:'include', headers:H})).json();
+        for (const [k,v] of Object.entries(acc.accounts||{})) {
+            const a = v.account||{};
+            if (a.structure !== 'workspace') continue;
+            list.push({id:a.account_id, name:a.name});
+            if (a.account_id === wsid) mine = a;
+        }
+    } catch (e) {}
+    if (!mine) return {status:0, code:'not_member', list};
+    if (/owner/i.test(String(mine.account_user_role||''))) {
+        try {
+            const oc = await (await fetch(
+                '/backend-api/accounts/' + wsid
+                + '/users/owner_count',
+                {credentials:'include', headers:H})).json();
+            if ((oc.owner_count||0) <= 1)
+                return {status:0, code:'sole_owner', list};
+        } catch (e) {}
+    }
+    const r = await fetch('/backend-api/accounts/' + wsid
+        + '/users/' + uid, {method:'DELETE',
+        credentials:'include', headers:H});
+    return {status:r.status, name:mine.name||'', uid,
+            body:(await r.text()).slice(0,400)};
+}"""
+
 
 def _pat_worker(ids):
     PAT_JOB["running"] = True
@@ -2284,6 +2329,152 @@ def _join_worker(ids, mname, seat="default"):
         JOIN_JOB["running"] = False
         log("—— 加入空间结束 ——"
             + (" (手动停止)" if JOIN_JOB["stop"] else ""))
+
+
+# ---------------- 退出空间 ----------------
+# 子号主动退: 换目标空间的 workspace token ->
+#   DELETE /backend-api/accounts/{ws}/users/{自己uid}
+# 目标两种给法: pairs={账号id: 空间id} 精准退;
+#   或 ws_name=空间名 (空间筛选联动), 按成员列表现查 id
+LEAVE_JOB = {"running": False, "log": [], "results": {},
+             "stop": False}
+
+
+def _leave_worker(ids, ws_name=None, pairs=None):
+    from playwright.sync_api import sync_playwright
+    LEAVE_JOB["running"] = True
+    LEAVE_JOB["stop"] = False
+    LEAVE_JOB["log"] = []
+    LEAVE_JOB["results"] = {}
+
+    def log(m):
+        LEAVE_JOB["log"].append(
+            "%s %s" % (time.strftime("%H:%M:%S"), m))
+
+    log("—— 退出空间开始 ——")
+    try:
+        with sync_playwright() as pw:
+            for aid in ids:
+                if LEAVE_JOB["stop"]:
+                    log("⏹ 已手动停止")
+                    break
+                accs = _load_accounts()
+                a = next((x for x in accs if x["id"] == aid), None)
+                if not a:
+                    continue
+                email = a["email"]
+                try:
+                    p = next((x for x in _load_proxies()
+                              if x["id"] == a.get("proxy_id")), None)
+                    if not p or p.get("banned"):
+                        LEAVE_JOB["results"][aid] = "没绑代理"
+                        log("✗ %s: 没绑代理" % email)
+                        continue
+                    dir_id, cws, err = _roxy_open_for(email, p)
+                    if err or not cws:
+                        LEAVE_JOB["results"][aid] = \
+                            "开窗: " + (err or "")
+                        log("✗ %s: 开窗失败 %s" % (email, err))
+                        continue
+                    a["win"] = dir_id
+                    cbr = pw.chromium.connect_over_cdp(cws)
+                    try:
+                        cpg = _find_cgpt_page(cbr)
+                        if not cpg:
+                            cpg = cbr.contexts[0].new_page()
+                            cpg.goto(TARGET_URL,
+                                     wait_until="domcontentloaded",
+                                     timeout=60000)
+                            cpg.wait_for_timeout(3000)
+                        # 解析目标空间 id
+                        target = (pairs or {}).get(aid)
+                        live = []
+                        if not target:
+                            try:
+                                lst = cpg.evaluate(_WS_LIST_JS)
+                                live = lst.get("workspaces") or []
+                            except Exception:
+                                pass
+                            if ws_name:
+                                for w in live:
+                                    if (w.get("name") or "") \
+                                            == ws_name:
+                                        target = w["id"]
+                                        break
+                                if not target and \
+                                        (a.get("space") or "") \
+                                        == ws_name:
+                                    target = a.get("space_ws")
+                        if not target:
+                            LEAVE_JOB["results"][aid] = \
+                                "不在该空间"
+                            log("✗ %s: 不在空间 %s (实际在: %s)"
+                                % (email, ws_name or "?",
+                                   ", ".join(w.get("name")
+                                             for w in live)
+                                   or "无"))
+                            continue
+                        r = cpg.evaluate(_LEAVE_WS_JS, target)
+                        code = r.get("code")
+                        if r.get("status") == 200:
+                            wsn = r.get("name") \
+                                or ws_name or target[:8]
+                            if a.get("space_ws") == target:
+                                for k in ("space", "space_ws",
+                                          "space_mother",
+                                          "space_at",
+                                          "space_seat"):
+                                    a.pop(k, None)
+                            if a.get("ws_id") == target:
+                                a.pop("ws_id", None)
+                            if a.get("ws_list"):
+                                a["ws_list"] = [
+                                    w for w in a["ws_list"]
+                                    if w.get("id") != target]
+                            LEAVE_JOB["results"][aid] = \
+                                "已退 " + wsn
+                            log("✓ %s: 已退出 %s" % (email, wsn))
+                        elif code == "no_token":
+                            LEAVE_JOB["results"][aid] = "窗口未登录"
+                            log("✗ %s: 窗口未登录" % email)
+                        elif code == "not_member":
+                            names = ", ".join(
+                                w.get("name")
+                                for w in r.get("list") or [])
+                            LEAVE_JOB["results"][aid] = \
+                                "不在该空间"
+                            log("✗ %s: 不在该空间 (实际在: %s)"
+                                % (email, names or "无"))
+                        elif code == "sole_owner":
+                            LEAVE_JOB["results"][aid] = \
+                                "唯一owner不能退"
+                            log("✗ %s: 是该空间唯一 owner,"
+                                " 先转交再退" % email)
+                        else:
+                            LEAVE_JOB["results"][aid] = \
+                                "HTTP %s" % r.get("status")
+                            log("✗ %s: HTTP %s %s"
+                                % (email, r.get("status"),
+                                   (r.get("body") or "")[:120]))
+                    finally:
+                        try:
+                            cbr.close()
+                        except Exception:
+                            pass
+                except Exception as e:
+                    LEAVE_JOB["results"][aid] = str(e)[:120]
+                    log("✗ %s: %s" % (email, str(e)[:120]))
+                finally:
+                    accs_all = _load_accounts()
+                    for x in accs_all:
+                        if x["id"] == aid:
+                            x.update(a)
+                            break
+                    _save_accounts(accs_all)
+    finally:
+        LEAVE_JOB["running"] = False
+        log("—— 退出空间结束 ——"
+            + (" (手动停止)" if LEAVE_JOB["stop"] else ""))
 
 
 def _roxy_delete_window(dir_id):
@@ -3016,6 +3207,8 @@ class H(BaseHTTPRequestHandler):
             return self._json({"email": email, "workspaces": wss})
         if self.path == "/api/accounts/join/status":
             return self._json(JOIN_JOB)
+        if self.path == "/api/accounts/leave/status":
+            return self._json(LEAVE_JOB)
         if self.path == "/api/accounts/cpa/status":
             return self._json(CPA_JOB)
         m = re.fullmatch(r"/api/accounts/([0-9a-f-]+)/cred",
@@ -3441,6 +3634,83 @@ class H(BaseHTTPRequestHandler):
             return self._json({"ok": True, "count": len(ids)})
         if self.path == "/api/accounts/join/stop":
             JOIN_JOB["stop"] = True
+            return self._json({"ok": True})
+        if self.path == "/api/accounts/ws-list":
+            # 拉每个号实际所在空间 (开窗 evaluate, 存 a.ws_list)
+            req = self._body()
+            ids = req.get("ids") or []
+            out = {}
+            from playwright.sync_api import sync_playwright
+            with sync_playwright() as pw:
+                for aid in ids[:20]:
+                    a = next((x for x in _load_accounts()
+                              if x["id"] == aid), None)
+                    if not a:
+                        continue
+                    p = next((x for x in _load_proxies()
+                              if x["id"] == a.get("proxy_id")), None)
+                    if not p or p.get("banned"):
+                        out[aid] = {"error": "没绑代理"}
+                        continue
+                    try:
+                        dir_id, cws, err = _roxy_open_for(
+                            a["email"], p)
+                        if err or not cws:
+                            out[aid] = {"error": err or "开窗失败"}
+                            continue
+                        a["win"] = dir_id
+                        cbr = pw.chromium.connect_over_cdp(cws)
+                        try:
+                            cpg = _find_cgpt_page(cbr)
+                            if not cpg:
+                                cpg = cbr.contexts[0].new_page()
+                                cpg.goto(
+                                    TARGET_URL,
+                                    wait_until="domcontentloaded",
+                                    timeout=60000)
+                                cpg.wait_for_timeout(3000)
+                            lst = cpg.evaluate(_WS_LIST_JS)
+                            if lst.get("error"):
+                                out[aid] = {"error": lst["error"]}
+                                continue
+                            ws = lst.get("workspaces") or []
+                            a["ws_list"] = ws
+                            out[aid] = {"list": ws}
+                        finally:
+                            try:
+                                cbr.close()
+                            except Exception:
+                                pass
+                    except Exception as e:
+                        out[aid] = {"error": str(e)[:100]}
+                    finally:
+                        accs_all = _load_accounts()
+                        for x in accs_all:
+                            if x["id"] == aid:
+                                x.update(a)
+                                break
+                        _save_accounts(accs_all)
+            return self._json({"ok": True, "map": out})
+        if self.path == "/api/accounts/leave":
+            req = self._body()
+            if LEAVE_JOB["running"]:
+                return self._json({"error": "退出空间任务在跑"}, 409)
+            ids = [i for i in (req.get("ids") or [])]
+            ws_name = (req.get("ws_name") or "").strip()
+            pairs = req.get("pairs") or {}
+            if not ids:
+                return self._json({"error": "没选账号"})
+            if not ws_name and not pairs:
+                return self._json({"error": "没指定要退出的空间"}, 400)
+            if len(ids) > 50:
+                return self._json({"error": "单次最多 50 个"}, 400)
+            threading.Thread(
+                target=_leave_worker,
+                args=(ids, ws_name or None, pairs or None),
+                daemon=True).start()
+            return self._json({"ok": True, "count": len(ids)})
+        if self.path == "/api/accounts/leave/stop":
+            LEAVE_JOB["stop"] = True
             return self._json({"ok": True})
         if self.path == "/api/accounts/cpa-oauth":
             req = self._body()

@@ -91,6 +91,11 @@
 
   .log-card { background: #0f172a; border-radius: 12px; padding: 14px 16px; margin-bottom: 16px; display: none; }
   .log-card .log-title { color: #94a3b8; font-size: 12px; margin-bottom: 8px; display: flex; justify-content: space-between; }
+  .lv-mask { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: flex; align-items: center; justify-content: center; z-index: 60; }
+  .lv-box { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px; width: 520px; max-width: 92vw; }
+  .lv-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
+  .lv-row:last-child { border-bottom: none; }
+  .lv-row label { display: inline-flex; gap: 4px; align-items: center; margin: 0 10px 0 0; cursor: pointer; white-space: nowrap; }
   .log-card pre { margin: 0; color: #e2e8f0; font-size: 12px; font-family: ui-monospace, Menlo, monospace; max-height: 180px; overflow-y: auto; white-space: pre-wrap; }
   .job-tabs { display: flex; gap: 6px; }
   .job-tab { background: none; border: 1px solid #334155; color: #94a3b8; padding: 3px 10px; border-radius: 6px; font-size: 12px; cursor: pointer; display: flex; align-items: center; gap: 4px; }
@@ -206,6 +211,7 @@
         <option value="prolite">高级席位</option>
       </select>
       <button class="btn btn-outline btn-sm" id="join-sel" title="母号批量邀请 → 子号开窗刷新接受邀请">👑 加入空间</button>
+      <button class="btn btn-outline btn-sm" id="leave-sel" title="子号主动退出空间: 选了空间筛选就直接退它, 否则弹窗逐个选取">🚪 退空间</button>
       <button class="btn btn-outline btn-sm" id="cpa-sel" title="本地算OAuth链接 → 开(原/同IP新)窗口授权 → 截回调 → 经账号代理换token → 生成CPA凭证">🔗 OAuth授权</button>
       <button class="btn btn-outline btn-sm" id="cpa-push" title="把已生成的凭证 JSON 推入 CPA 号池 (auth-files)">📤 推入池</button>
       <button class="btn btn-outline btn-sm" id="cpa-export" title="导出选中账号的 CPA 凭证 JSON (zip 打包)">📥 导凭证</button>
@@ -246,11 +252,23 @@
 </div>
 </div>
 <div class="toast" id="toast"></div>
+<div class="lv-mask" id="leave-modal" style="display:none">
+  <div class="lv-box">
+    <div style="font-size:14px;font-weight:600;margin-bottom:6px">🚪 退出空间</div>
+    <div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">为每个号选取要退出的空间（把子号自己从该空间移除）</div>
+    <div id="leave-rows" style="max-height:320px;overflow-y:auto"></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
+      <button class="btn btn-outline btn-sm" id="leave-cancel">取消</button>
+      <button class="btn btn-primary btn-sm" id="leave-go">退出所选</button>
+    </div>
+  </div>
+</div>
 
 <script>
 const $ = id => document.getElementById(id);
 let accounts = [];
 let patWsId = "";   // Pat测试母号的空间 —— 命中它的 space 不计入"已加入"
+let patWsName = ""; // PAT 空间名 (退出空间选取时展示)
 let page = 1;
 const SIZE = 20;
 const sel = new Set();
@@ -292,6 +310,7 @@ async function load() {
   const m = await fetch("/api/mother").then(r => r.json())
     .catch(() => null);
   patWsId = (m && m.mother_workspace) || "";
+  patWsName = (m && m.mother_workspace_name) || "";
   const s = r.stats || {};
   $("st-total").textContent = s.total ?? 0;
   $("st-reg").textContent = s.reg ?? 0;
@@ -400,6 +419,7 @@ const TABS = {
   open: { icon: "🚀", name: "开窗", api: "/api/accounts/open/status", stop: "/api/accounts/open/stop" },
   pat:  { icon: "🧪", name: "PAT",  api: "/api/accounts/pat/status",  stop: "/api/accounts/pat-check/stop" },
   join: { icon: "👑", name: "空间", api: "/api/accounts/join/status", stop: "/api/accounts/join/stop" },
+  leave:{ icon: "🚪", name: "退出", api: "/api/accounts/leave/status", stop: "/api/accounts/leave/stop" },
   cpa:  { icon: "🔗", name: "OAuth",api: "/api/accounts/cpa/status",  stop: "/api/accounts/cpa/stop" },
 };
 const tabData = {};
@@ -620,6 +640,84 @@ $("join-sel").onclick = e => {
     if (r.error) return toast("✗ " + r.error);
     toast(`加入空间启动: ${r.count} 个账号 → ${mother}`);
     jobTab("join");
+  });
+};
+
+// ---- 退出空间 ----
+$("leave-sel").onclick = () => {
+  if (!sel.size) return toast("先勾选账号");
+  const ids = [...sel];
+  const fs = $("f-space").value;
+  if (fs && fs !== "__none__") {
+    // 空间筛选已选定 → 直接退筛选的这个, 不用逐号选取
+    if (!confirm(`让 ${ids.length} 个账号退出空间「${fs}」?`)) return;
+    post("/api/accounts/leave", { ids, ws_name: fs }).then(r => {
+      if (r.error) return toast("✗ " + r.error);
+      toast(`退出空间启动: ${r.count} 个账号 → ${fs}`);
+      jobTab("leave");
+    });
+    return;
+  }
+  openLeaveModal(ids);
+};
+
+function openLeaveModal(ids) {
+  $("leave-modal").style.display = "flex";
+  renderLeaveRows(ids);   // 先用已有记录渲染, 后台再拉实况刷新
+  post("/api/accounts/ws-list", { ids }).then(r => {
+    if (r && r.map) {
+      // 把实况写回 accounts, 重绘选项
+      Object.entries(r.map).forEach(([id, v]) => {
+        const a = accounts.find(x => x.id === id);
+        if (a && v.list) a.ws_list = v.list;
+      });
+      renderLeaveRows(ids);
+    }
+  });
+}
+
+function renderLeaveRows(ids) {
+  $("leave-rows").innerHTML = ids.map(id => {
+    const a = accounts.find(x => x.id === id);
+    if (!a) return "";
+    let opts = [];
+    if (a.ws_list) {
+      // 实况成员列表 (空数组 = 确认无空间, 不回落过期记录)
+      opts = a.ws_list.map(w => ({
+        ws: w.id,
+        label: w.name + (w.id === patWsId ? " (PAT)" : "") }));
+    } else {
+      if (a.space && a.space_ws)
+        opts.push({ ws: a.space_ws, label: a.space });
+      if (a.ws_id && a.ws_id !== a.space_ws)
+        opts.push({ ws: a.ws_id, label: (patWsName || "PAT空间") + " (PAT)" });
+    }
+    const cur = document.querySelector(
+      `#leave-rows input[name="lv-${id}"]:checked`);
+    const keep = cur ? cur.value : "";
+    const radios = opts.length
+      ? opts.map(o =>
+          `<label title="${esc(o.ws)}"><input type="radio" name="lv-${id}" value="${o.ws}" ${o.ws === keep ? "checked" : ""}>${esc(o.label)}</label>`).join("")
+        + `<label><input type="radio" name="lv-${id}" value="" ${keep === "" ? "checked" : ""}>跳过</label>`
+      : `<span style="color:var(--text-dim)">无空间记录 / 读取失败</span>`;
+    return `<div class="lv-row">
+      <span class="mono" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis" title="${esc(a.email)}">${esc(a.email)}</span>
+      <span style="display:flex;flex-wrap:wrap;justify-content:flex-end">${radios}</span>
+    </div>`;
+  }).join("");
+}
+$("leave-cancel").onclick = () => $("leave-modal").style.display = "none";
+$("leave-go").onclick = () => {
+  const pairs = {};
+  document.querySelectorAll("#leave-rows input[type=radio]:checked")
+    .forEach(r => { if (r.value) pairs[r.name.slice(3)] = r.value; });
+  $("leave-modal").style.display = "none";
+  if (!Object.keys(pairs).length) return toast("没选任何要退的空间");
+  post("/api/accounts/leave",
+       { ids: Object.keys(pairs), pairs }).then(r => {
+    if (r.error) return toast("✗ " + r.error);
+    toast(`退出空间启动: ${r.count} 个账号`);
+    jobTab("leave");
   });
 };
 
