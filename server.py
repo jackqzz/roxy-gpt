@@ -302,6 +302,13 @@ def _save_mothers(ms):
               ensure_ascii=False, indent=1)
 
 
+def _space_mothers():
+    """空间母号列表 —— 排除设置里的 Pat测试母号
+    (Pat测试母号独属 PAT 检验, 不参与别的功能)。"""
+    pat = (_settings().get("mother_window") or "").strip()
+    return [m for m in _load_mothers() if m["name"] != pat]
+
+
 def _upstream():
     """settings.upstream_proxy -> _parse_proxy_line dict | None"""
     raw = (_settings().get("upstream_proxy") or "").strip()
@@ -1932,9 +1939,12 @@ def _join_worker(ids, mname):
     from playwright.sync_api import sync_playwright
     try:
         ms = _load_mothers()
-        m = next((x for x in ms if x["name"] == mname), None)
+        pat = (_settings().get("mother_window") or "").strip()
+        m = next((x for x in ms
+                  if x["name"] == mname and x["name"] != pat), None)
         if not m:
-            log("✗ 空间母号 %s 不在列表 —— 先到空间母号页导入" % mname)
+            log("✗ 空间母号 %s 不在列表 —— 先到空间母号页导入"
+                " (Pat测试母号不参与此功能)" % mname)
             for i in ids:
                 JOIN_JOB["results"][i] = "母号不存在"
             return
@@ -2469,7 +2479,7 @@ class H(BaseHTTPRequestHandler):
                 return self._json({"error": err})
             return self._json({"email": email, "workspaces": wss})
         if self.path == "/api/mothers":
-            return self._json({"mothers": _load_mothers()})
+            return self._json({"mothers": _space_mothers()})
         if self.path.startswith("/api/mothers/workspaces"):
             """连指定空间母号窗口列出她的 workspace。"""
             q = urllib.parse.parse_qs(
@@ -2801,8 +2811,12 @@ class H(BaseHTTPRequestHandler):
                 return self._json({"error": "没有要导入的窗口名"})
             ms = _load_mothers()
             seen = {m["name"] for m in ms}
-            added, dup = 0, 0
+            pat = (_settings().get("mother_window") or "").strip()
+            added, dup, skipped = 0, 0, 0
             for n in names:
+                if n == pat:
+                    skipped += 1
+                    continue
                 if n in seen:
                     dup += 1
                     continue
@@ -2812,7 +2826,7 @@ class H(BaseHTTPRequestHandler):
                 added += 1
             _save_mothers(ms)
             return self._json({"ok": True, "added": added,
-                               "dup": dup})
+                               "dup": dup, "skipped_pat": skipped})
         if self.path == "/api/mothers/delete":
             req = self._body()
             names = set(req.get("names") or [])

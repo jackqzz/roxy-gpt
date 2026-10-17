@@ -127,7 +127,7 @@
       <button class="btn btn-primary btn-sm" id="imp-btn">导入</button>
       <span class="subtitle" id="imp-msg"></span>
     </div>
-    <div class="hint">母号要先在 Roxy 里开好窗口并登录 ChatGPT —— 邀请时系统会开她的窗口走后端批量邀请。</div>
+    <div class="hint">母号要先在 Roxy 里开好窗口并登录 ChatGPT —— 邀请时系统会开她的窗口走后端批量邀请。设置页的 Pat测试母号独属 PAT 检验, 导入同名窗口会被跳过。</div>
   </div>
 
   <div class="card">
@@ -203,7 +203,9 @@ $("imp-btn").onclick = async () => {
   if (!text.trim()) return toast("先填窗口名");
   const r = await post("/api/mothers/add", { names: text });
   if (r.error) return toast("✗ " + r.error);
-  $("imp-msg").textContent = `✓ 导入 ${r.added} 个` + (r.dup ? ` · 重复 ${r.dup}` : "");
+  $("imp-msg").textContent = `✓ 导入 ${r.added} 个`
+    + (r.dup ? ` · 重复 ${r.dup}` : "")
+    + (r.skipped_pat ? ` · 跳过 ${r.skipped_pat} 个 (Pat测试母号不参与)` : "");
   $("imp-text").value = "";
   await load();
 };
