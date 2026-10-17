@@ -4,6 +4,7 @@
 导入/导出/测活/备注/封禁标记; bound[] 预留账号绑定。"""
 import base64
 import hashlib
+import io
 import json
 import os
 import re
@@ -12,6 +13,7 @@ import socket
 import ssl
 import threading
 import time
+import zipfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -2952,6 +2954,36 @@ class H(BaseHTTPRequestHandler):
                 "content-disposition",
                 'attachment; filename="%s"'
                 % (a.get("cred_file") or "codex-cred.json"))
+            self.send_header("content-length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        if self.path.startswith("/api/accounts/cred-export"):
+            q = urllib.parse.parse_qs(
+                urllib.parse.urlparse(self.path).query)
+            ids = set((q.get("ids") or [""])[0].split(",")) - {""}
+            items = [
+                (a.get("cred_file") or _cred_name(a["cred"]),
+                 a["cred"])
+                for a in _load_accounts()
+                if a.get("cred")
+                and (not ids or a["id"] in ids)]
+            if not items:
+                return self._json(
+                    {"error": "没有可导出的凭证 (先跑🔗OAuth授权)"})
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w",
+                                 zipfile.ZIP_DEFLATED) as z:
+                for name, cred in items:
+                    z.writestr(name, json.dumps(
+                        cred, ensure_ascii=False, indent=2))
+            data = buf.getvalue()
+            self.send_response(200)
+            self.send_header("content-type", "application/zip")
+            self.send_header(
+                "content-disposition",
+                'attachment; filename="cpa-creds-%s.zip"'
+                % time.strftime("%m%d-%H%M"))
             self.send_header("content-length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)

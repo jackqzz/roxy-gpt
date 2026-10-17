@@ -225,6 +225,7 @@
       <button class="btn btn-outline btn-sm" id="join-sel" title="母号批量邀请 → 子号开窗刷新接受邀请">👑 加入空间</button>
       <button class="btn btn-outline btn-sm" id="cpa-sel" title="本地算OAuth链接 → 开(原/同IP新)窗口授权 → 截回调 → 经账号代理换token → 生成CPA凭证">🔗 OAuth授权</button>
       <button class="btn btn-outline btn-sm" id="cpa-push" title="把已生成的凭证 JSON 推入 CPA 号池 (auth-files)">📤 推入池</button>
+      <button class="btn btn-outline btn-sm" id="cpa-export" title="导出选中账号的 CPA 凭证 JSON (zip 打包)">📥 导凭证</button>
       <button class="btn btn-outline btn-sm btn-danger" id="del-sel">删除选中</button>
       <button class="btn btn-ghost btn-sm" id="reload" title="刷新">⟳</button>
     </div>
@@ -682,6 +683,10 @@ $("cpa-push").onclick = e => {
     toast(`已推入池 ${r.ok} 个` + (fails ? " · ✗ " + fails : ""));
     load();
   });
+};
+$("cpa-export").onclick = () => {
+  if (!sel.size) return toast("先勾选有凭证的账号");
+  window.location = "/api/accounts/cred-export?ids=" + [...sel].join(",");
 };
 $("cpa-stop").onclick = async () => {
   await post("/api/accounts/cpa/stop", {});
