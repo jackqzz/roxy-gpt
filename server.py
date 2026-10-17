@@ -2200,8 +2200,8 @@ def _join_worker(ids, mname, seat="prolite"):
             for i in ids:
                 JOIN_JOB["results"][i] = "母号: " + err
             return
-        log("母号窗口 %s 已连, 目标空间 %s, 席位 %s"
-            % (mname, ws_name, seat))
+        log("母号窗口 %s 已连, 目标空间 %s (%s), 席位 %s"
+            % (mname, ws_name, ws_id[:8], seat))
         with sync_playwright() as pw:
             mbr = pw.chromium.connect_over_cdp(mws)
             mpg = _find_cgpt_page(mbr)
@@ -2356,8 +2356,9 @@ def _join_worker(ids, mname, seat="prolite"):
                                 a, ws_id, ws_name,
                                 "standard-user")
                             JOIN_JOB["results"][aid] = \
-                                "已入 " + ws_name
-                            log("✓ %s: 已入 %s" % (email, ws_name))
+                                "已入 %s (%s)" % (ws_name, ws_id[:8])
+                            log("✓ %s: 已入 %s (%s)"
+                                % (email, ws_name, ws_id[:8]))
                         else:
                             JOIN_JOB["results"][aid] = \
                                 done or "点了接受但未确认入队"
@@ -2504,8 +2505,9 @@ def _leave_worker(ids, ws_name=None, pairs=None):
                                     w for w in a["ws_list"]
                                     if w.get("id") != target]
                             LEAVE_JOB["results"][aid] = \
-                                "已退 " + wsn
-                            log("✓ %s: 已退出 %s" % (email, wsn))
+                                "已退 %s (%s)" % (wsn, target[:8])
+                            log("✓ %s: 已退出 %s (%s)"
+                                % (email, wsn, target[:8]))
                         elif code == "no_token":
                             LEAVE_JOB["results"][aid] = "窗口未登录"
                             log("✗ %s: 窗口未登录" % email)
