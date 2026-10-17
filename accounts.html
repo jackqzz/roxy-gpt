@@ -92,6 +92,11 @@
   .log-card { background: #0f172a; border-radius: 12px; padding: 14px 16px; margin-bottom: 16px; display: none; }
   .log-card .log-title { color: #94a3b8; font-size: 12px; margin-bottom: 8px; display: flex; justify-content: space-between; }
   .log-card pre { margin: 0; color: #e2e8f0; font-size: 12px; font-family: ui-monospace, Menlo, monospace; max-height: 180px; overflow-y: auto; white-space: pre-wrap; }
+  .job-tabs { display: flex; gap: 6px; }
+  .job-tab { background: none; border: 1px solid #334155; color: #94a3b8; padding: 3px 10px; border-radius: 6px; font-size: 12px; cursor: pointer; display: flex; align-items: center; gap: 4px; }
+  .job-tab.on { background: #1d4ed8; color: #fff; border-color: #1d4ed8; }
+  .job-tab .dot { width: 6px; height: 6px; border-radius: 50%; background: #34d399; display: inline-block; animation: jk 1s infinite; }
+  @keyframes jk { 50% { opacity: .25 } }
 
   .toolbar { background: var(--surface); border: 1px solid var(--border); border-radius: 12px 12px 0 0; padding: 12px 16px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; border-bottom: none; }
   .toolbar-left { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -168,37 +173,15 @@
     <div id="mailwatch-list" style="font-size:13px"></div>
   </div>
 
-  <div class="log-card" id="open-log">
-    <div class="log-title"><span>开窗任务日志</span>
+  <!-- 任务日志: 全部任务合一, 标签路由 -->
+  <div class="log-card" id="job-log">
+    <div class="log-title">
+      <span class="job-tabs" id="job-tabs"></span>
       <span style="display:flex;align-items:center;gap:8px">
-        <button class="btn btn-outline btn-sm btn-danger" id="open-stop" style="display:none">⏹ 停止</button>
-        <span id="open-log-state"></span></span></div>
-    <pre id="open-log-pre"></pre>
-  </div>
-
-  <div class="log-card" id="pat-log">
-    <div class="log-title"><span>PAT 检验日志</span>
-      <span style="display:flex;align-items:center;gap:8px">
-        <button class="btn btn-outline btn-sm btn-danger" id="pat-stop" style="display:none">⏹ 停止</button>
-        <span id="pat-log-state"></span></span></div>
-    <pre id="pat-log-pre"></pre>
-  </div>
-
-  <div class="log-card" id="join-log">
-    <div class="log-title"><span>加入空间日志</span>
-      <span style="display:flex;align-items:center;gap:8px">
-        <button class="btn btn-outline btn-sm btn-danger" id="join-stop" style="display:none">⏹ 停止</button>
-        <span id="join-log-state"></span></span></div>
-    <pre id="join-log-pre"></pre>
-  </div>
-
-  <div class="log-card" id="cpa-log">
-    <div class="log-title"><span>OAuth 授权日志 (本地算链接 → 窗口授权 → 同IP换token → 凭证)</span>
-      <span style="display:flex;align-items:center;gap:8px">
-        <button class="btn btn-outline btn-sm btn-danger" id="cpa-stop" style="display:none">⏹ 停止</button>
-        <span id="cpa-log-state"></span></span></div>
-    <pre id="cpa-log-pre"></pre>
-    <div style="display:flex;gap:8px;margin-top:8px;align-items:center">
+        <button class="btn btn-outline btn-sm btn-danger" id="job-stop" style="display:none">⏹ 停止</button>
+        <span id="job-log-state"></span></span></div>
+    <pre id="job-log-pre"></pre>
+    <div id="oauth-cb-row" style="display:none;gap:8px;margin-top:8px;align-items:center">
       <input class="form-input" id="oauth-cb" placeholder="自动截码失败? 手动兜底: 浏览器地址栏复制 http://localhost:1455/auth/callback?code=...&state=... 整串贴进来" style="flex:1;font-size:12px">
       <button class="btn btn-outline btn-sm" id="oauth-cb-go">提交回调</button>
     </div>
@@ -271,7 +254,7 @@ let patWsId = "";   // Pat测试母号的空间 —— 命中它的 space 不计
 let page = 1;
 const SIZE = 20;
 const sel = new Set();
-let pollT = null;
+
 
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g,
@@ -406,26 +389,68 @@ function render() {
   $("pager").style.display = list.length > SIZE ? "flex" : "none";
   $("pg-info").textContent = `第 ${page} / ${pages} 页 · 共 ${list.length} 条`;
   $("sel-hint").textContent = sel.size ? `已选 ${sel.size} 个` : "";
-  // 有账号在等回调 → 手动兜底输入框所在的日志卡保持可见
-  if (accounts.some(a => a.cpa === "pending")) $("cpa-log").style.display = "block";
+  // 有账号在等回调 → 日志卡保持可见并切到 OAuth 页
+  if (accounts.some(a => a.cpa === "pending")) {
+    $("job-log").style.display = "block"; curTab = "cpa"; renderJobTab();
+  }
 }
 
-// ---- 开窗任务轮询 ----
-async function pollOpen() {
-  const r = await fetch("/api/accounts/open/status").then(r => r.json());
-  const box = $("open-log");
-  if (r.running || (r.log || []).length) {
-    box.style.display = "block";
-    $("open-log-state").textContent = r.running ? "运行中 …" : "已结束";
-    $("open-stop").style.display = r.running ? "" : "none";
-    $("open-log-pre").textContent = (r.log || []).join("\n");
-    $("open-log-pre").scrollTop = $("open-log-pre").scrollHeight;
-  }
-  if (!r.running) {
-    clearInterval(pollT); pollT = null;
-    await load();
+// ---- 任务日志: 标签合一 ----
+const TABS = {
+  open: { icon: "🚀", name: "开窗", api: "/api/accounts/open/status", stop: "/api/accounts/open/stop" },
+  pat:  { icon: "🧪", name: "PAT",  api: "/api/accounts/pat/status",  stop: "/api/accounts/pat-check/stop" },
+  join: { icon: "👑", name: "空间", api: "/api/accounts/join/status", stop: "/api/accounts/join/stop" },
+  cpa:  { icon: "🔗", name: "OAuth",api: "/api/accounts/cpa/status",  stop: "/api/accounts/cpa/stop" },
+};
+const tabData = {};
+let curTab = "open", jobPollT = null;
+
+$("job-tabs").innerHTML = Object.keys(TABS)
+  .map(k => `<button class="job-tab" data-tab="${k}"></button>`).join("");
+$("job-tabs").addEventListener("click", e => {
+  const b = e.target.closest(".job-tab");
+  if (b) { curTab = b.dataset.tab; renderJobTab(); }
+});
+
+function renderJobTab() {
+  document.querySelectorAll(".job-tab").forEach(b => {
+    const k = b.dataset.tab, d = tabData[k] || {};
+    b.classList.toggle("on", k === curTab);
+    b.innerHTML = `${TABS[k].icon} ${TABS[k].name}` +
+      (d.running ? ' <span class="dot"></span>' : "");
+  });
+  const d = tabData[curTab] || {};
+  $("job-log-state").textContent =
+    d.running ? "运行中 …" : ((d.log || []).length ? "已结束" : "");
+  $("job-stop").style.display = d.running ? "" : "none";
+  $("job-log-pre").textContent = (d.log || []).join("\n");
+  $("job-log-pre").scrollTop = $("job-log-pre").scrollHeight;
+  $("oauth-cb-row").style.display = curTab === "cpa" ? "flex" : "none";
+}
+
+async function pollJobs() {
+  const keys = Object.keys(TABS);
+  const rs = await Promise.all(keys.map(k =>
+    fetch(TABS[k].api).then(r => r.json()).catch(() => null)));
+  keys.forEach((k, i) => { if (rs[i]) tabData[k] = rs[i]; });
+  if (keys.some(k => (tabData[k].log || []).length || tabData[k].running))
+    $("job-log").style.display = "block";
+  renderJobTab();
+  if (!keys.some(k => tabData[k].running) && jobPollT) {
+    clearInterval(jobPollT); jobPollT = null; await load();
   }
 }
+function jobTab(k) {
+  curTab = k;
+  $("job-log").style.display = "block";
+  renderJobTab();
+  if (!jobPollT) jobPollT = setInterval(pollJobs, 1200);
+}
+$("job-stop").onclick = async () => {
+  await post(TABS[curTab].stop, {});
+  toast("已请求停止 —— 当前账号做完手上这步就停");
+};
+
 function startOpen(ids, btn) {
   btn.disabled = true;
   post("/api/accounts/open",
@@ -438,9 +463,7 @@ function startOpen(ids, btn) {
     btn.disabled = false;
     if (r.error) return toast("✗ " + r.error);
     toast(`开窗任务启动: ${r.count} 个账号`);
-    $("open-log").style.display = "block";
-    $("open-log-state").textContent = "运行中 …";
-    if (!pollT) pollT = setInterval(pollOpen, 1200);
+    jobTab("open");
   });
 }
 
@@ -572,28 +595,6 @@ $("mailwatch-list").addEventListener("click", async e => {
 setInterval(pollMailWatch, 3000);
 pollMailWatch();
 
-// ---- PAT 检验 ----
-let patPollT = null;
-async function pollPat() {
-  const r = await fetch("/api/accounts/pat/status").then(r => r.json());
-  const box = $("pat-log");
-  if (r.running || (r.log || []).length) {
-    box.style.display = "block";
-    $("pat-log-state").textContent = r.running ? "检验中 …" : "已结束";
-    $("pat-stop").style.display = r.running ? "" : "none";
-    $("pat-log-pre").textContent = (r.log || []).join("\n");
-    $("pat-log-pre").scrollTop = $("pat-log-pre").scrollHeight;
-  }
-  if (!r.running) { clearInterval(patPollT); patPollT = null; await load(); }
-}
-$("open-stop").onclick = async () => {
-  await post("/api/accounts/open/stop", {});
-  toast("已请求停止 —— 当前账号做完手上这步就停");
-};
-$("pat-stop").onclick = async () => {
-  await post("/api/accounts/pat-check/stop", {});
-  toast("已请求停止");
-};
 $("pat-sel").onclick = e => {
   if (!sel.size) return toast("先勾选账号");
   const ids = [...sel];
@@ -602,26 +603,11 @@ $("pat-sel").onclick = e => {
     e.target.disabled = false;
     if (r.error) return toast("✗ " + r.error);
     toast(`PAT 检验启动: ${r.count} 个账号`);
-    $("pat-log").style.display = "block";
-    $("pat-log-state").textContent = "检验中 …";
-    if (!patPollT) patPollT = setInterval(pollPat, 1500);
+    jobTab("pat");
   });
 };
 
 // ---- 加入空间 ----
-let joinPollT = null;
-async function pollJoin() {
-  const r = await fetch("/api/accounts/join/status").then(r => r.json());
-  const box = $("join-log");
-  if (r.running || (r.log || []).length) {
-    box.style.display = "block";
-    $("join-log-state").textContent = r.running ? "运行中 …" : "已结束";
-    $("join-stop").style.display = r.running ? "" : "none";
-    $("join-log-pre").textContent = (r.log || []).join("\n");
-    $("join-log-pre").scrollTop = $("join-log-pre").scrollHeight;
-  }
-  if (!r.running) { clearInterval(joinPollT); joinPollT = null; await load(); }
-}
 $("join-sel").onclick = e => {
   if (!sel.size) return toast("先勾选账号");
   const mother = $("join-mother").value;
@@ -633,30 +619,11 @@ $("join-sel").onclick = e => {
     e.target.disabled = false;
     if (r.error) return toast("✗ " + r.error);
     toast(`加入空间启动: ${r.count} 个账号 → ${mother}`);
-    $("join-log").style.display = "block";
-    $("join-log-state").textContent = "运行中 …";
-    if (!joinPollT) joinPollT = setInterval(pollJoin, 1500);
+    jobTab("join");
   });
-};
-$("join-stop").onclick = async () => {
-  await post("/api/accounts/join/stop", {});
-  toast("已请求停止 —— 当前账号做完就停");
 };
 
 // ---- CPA 入池 ----
-let cpaPollT = null;
-async function pollCpa() {
-  const r = await fetch("/api/accounts/cpa/status").then(r => r.json());
-  const box = $("cpa-log");
-  if (r.running || (r.log || []).length) {
-    box.style.display = "block";
-    $("cpa-log-state").textContent = r.running ? "运行中 …" : "已结束";
-    $("cpa-stop").style.display = r.running ? "" : "none";
-    $("cpa-log-pre").textContent = (r.log || []).join("\n");
-    $("cpa-log-pre").scrollTop = $("cpa-log-pre").scrollHeight;
-  }
-  if (!r.running) { clearInterval(cpaPollT); cpaPollT = null; await load(); }
-}
 $("cpa-sel").onclick = e => {
   if (!sel.size) return toast("先勾选账号");
   const ids = [...sel];
@@ -665,9 +632,7 @@ $("cpa-sel").onclick = e => {
     e.target.disabled = false;
     if (r.error) return toast("✗ " + r.error);
     toast(`OAuth 授权启动: ${r.count} 个账号 —— 开窗走完授权页`);
-    $("cpa-log").style.display = "block";
-    $("cpa-log-state").textContent = "运行中 …";
-    if (!cpaPollT) cpaPollT = setInterval(pollCpa, 1500);
+    jobTab("cpa");
   });
 };
 $("cpa-push").onclick = e => {
@@ -688,10 +653,6 @@ $("cpa-export").onclick = () => {
   if (!sel.size) return toast("先勾选有凭证的账号");
   window.location = "/api/accounts/cred-export?ids=" + [...sel].join(",");
 };
-$("cpa-stop").onclick = async () => {
-  await post("/api/accounts/cpa/stop", {});
-  toast("已请求停止 —— 当前账号做完就停");
-};
 $("oauth-cb-go").onclick = async () => {
   const url = $("oauth-cb").value.trim();
   if (!url) return toast("贴回调链接进来");
@@ -703,10 +664,8 @@ $("oauth-cb-go").onclick = async () => {
 };
 
 load();
-pollOpen();   // 页面打开时若正好有任务在跑则接上
-pollPat();
-pollJoin();
-pollCpa();
+pollJobs();   // 页面打开时若正好有任务在跑则接上
+renderJobTab();
 </script>
 </body>
 </html>
