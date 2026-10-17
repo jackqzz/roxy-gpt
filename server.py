@@ -193,18 +193,20 @@ def _s5_connect(s, host, port):
     return None
 
 
-def _dial_via_upstream(up, host, port, timeout):
-    """经上级代理隧道到 host:port, 返回已就绪 socket。
-    up = _parse_proxy_line 结果 (http/https=CONNECT, socks5=s5 CONNECT)。"""
-    s = socket.create_connection((up["host"], int(up["port"])),
-                                 timeout=timeout)
+def _proxy_tunnel(up, host, port, timeout, sock=None):
+    """在 sock (None=直连 up 新建) 上跑 up 的代理协议隧道到
+    host:port, 返回已就绪 socket。up = _parse_proxy_line dict。"""
+    s = sock or socket.create_connection((up["host"],
+                                          int(up["port"])),
+                                         timeout=timeout)
     s.settimeout(timeout)
+    label = up.get("_label") or "代理"
     if up["scheme"] == "socks5":
         e = _s5_auth(s, up.get("username"), up.get("password")) \
             or _s5_connect(s, host, port)
         if e:
             s.close()
-            raise OSError("上级代理: " + e)
+            raise OSError(label + ": " + e)
         return s
     # http/https -> CONNECT 隧道
     cred = ""
@@ -224,9 +226,30 @@ def _dial_via_upstream(up, host, port, timeout):
     st = buf.split(b"\r\n", 1)[0]
     if b" 200" not in st:
         s.close()
-        raise OSError("上级代理: "
+        raise OSError(label + ": "
                       + st.decode(errors="ignore")[:60])
     return s
+
+
+def _dial_via_upstream(up, host, port, timeout):
+    """经上级代理隧道到 host:port, 返回已就绪 socket。"""
+    up = dict(up)
+    up["_label"] = "上级代理"
+    return _proxy_tunnel(up, host, port, timeout)
+
+
+def _dial_via_account_proxy(p, host, port, timeout):
+    """本机 → (上级代理 →) 账号代理 → host:port。
+    账号代理只有经上级链式才握手得通 (RST 直连)。"""
+    up = _upstream()
+    if not up:
+        q = dict(p)
+        q["_label"] = "账号代理"
+        return _proxy_tunnel(q, host, port, timeout)
+    s = _proxy_tunnel(up, p["host"], int(p["port"]), timeout)
+    q = dict(p)
+    q["_label"] = "账号代理"
+    return _proxy_tunnel(q, host, port, timeout, sock=s)
 
 
 def _socks5_check(p, timeout=8, target=("api.ipify.org", 80),
@@ -2302,8 +2325,9 @@ def _jwt_claims(tok):
 
 def _post_form_via(p, host, path, form, timeout=30):
     """经账号代理 p 发 x-www-form-urlencoded POST → https://host/path。
-    token 交换必须走注册/授权同一 IP。返回 (status, body)。"""
-    s = _dial_via_upstream(p, host, 443, timeout)
+    链式: 本机→上级代理→账号代理→目标, token 交换与注册同 IP。
+    返回 (status, body)。"""
+    s = _dial_via_account_proxy(p, host, 443, timeout)
     s = ssl.create_default_context().wrap_socket(
         s, server_hostname=host)
     s.settimeout(timeout)
