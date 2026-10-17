@@ -26,19 +26,26 @@
   }
   * { box-sizing: border-box; }
   body {
-    margin: 0; padding: 24px 32px 80px; background: var(--bg-page); color: var(--text-main);
+    margin: 0; background: var(--bg-page); color: var(--text-main);
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
     -webkit-font-smoothing: antialiased;
   }
-  .page-container { max-width: 1360px; margin: 0 auto; }
-
-  .nav-tabs { display: flex; gap: 8px; margin-bottom: 18px; }
-  .nav-tabs a {
-    padding: 6px 16px; border-radius: 8px; font-size: 13px; font-weight: 500;
-    color: var(--text-muted); text-decoration: none; border: 1px solid var(--border);
-    background: var(--surface);
+  /* ---- 左侧导航 ---- */
+  .sidebar {
+    position: fixed; left: 0; top: 0; bottom: 0; width: 176px;
+    background: var(--surface); border-right: 1px solid var(--border);
+    padding: 20px 10px; display: flex; flex-direction: column; gap: 4px;
   }
-  .nav-tabs a.on { background: var(--primary); color: #fff; border-color: var(--primary); }
+  .sidebar .brand { font-size: 13px; font-weight: 700; padding: 4px 12px 16px; color: var(--text-main); }
+  .sidebar a {
+    display: flex; align-items: center; gap: 9px;
+    padding: 8px 12px; border-radius: 8px; font-size: 13px; font-weight: 500;
+    color: var(--text-muted); text-decoration: none;
+  }
+  .sidebar a:hover { background: var(--surface-hover); color: var(--text-main); }
+  .sidebar a.on { background: var(--primary); color: #fff; }
+  .main { margin-left: 176px; padding: 24px 32px 80px; }
+  .page-container { max-width: 1360px; margin: 0 auto; }
 
   .page-header {
     display: flex; align-items: center; justify-content: space-between;
@@ -112,87 +119,21 @@
 </style>
 </head>
 <body>
+<nav class="sidebar">
+  <div class="brand">roxy-accounts</div>
+  <a href="/accounts" class="on">👤 账号</a>
+  <a href="/">🌐 代理</a>
+  <a href="/settings">⚙️ 设置</a>
+</nav>
+<div class="main">
 <div class="page-container">
-  <div class="nav-tabs">
-    <a href="/">代理池</a>
-    <a href="/accounts" class="on">账号</a>
-  </div>
-
   <div class="page-header">
     <div class="title-group">
       <h1>账号库</h1>
-      <div class="subtitle">自动选绑定数最少的代理 → Roxy 开窗 (auto-邮箱) → 打开 <span id="target-url">chatgpt.com</span></div>
+      <div class="subtitle">自动选绑定数最少的代理 → Roxy 开窗 (auto-邮箱) → 打开 <span id="target-url">chatgpt.com</span> · 母号/资料/节奏在设置页</div>
     </div>
     <div class="header-actions">
-      <button class="btn btn-outline" id="btn-namegen">🤖 资料生成</button>
-      <button class="btn btn-outline" id="btn-pace">⏱ 注册节奏</button>
-      <button class="btn btn-outline" id="btn-mother">⚙ 母号设置</button>
       <button class="btn btn-primary" id="btn-import">+ 导入账号</button>
-    </div>
-  </div>
-
-  <div class="drawer-card" id="namegen-box" style="display:none">
-    <div class="drawer-title">
-      <span>AI 资料生成 (注册页姓名+年龄 —— OpenAI 兼容接口)</span>
-      <button class="btn btn-ghost btn-sm" id="namegen-close">✕ 关闭</button>
-    </div>
-    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px">
-      <label style="display:flex;align-items:center;gap:6px;font-size:13px">
-        <input type="checkbox" id="ng-enabled"> 启用
-      </label>
-      <input class="form-input" id="ng-url" placeholder="接口地址, 如 http://127.0.0.1:11434/v1" style="width:300px">
-      <input class="form-input" id="ng-model" list="ng-models" placeholder="模型名, 点右侧拉列表" style="width:170px">
-      <datalist id="ng-models"></datalist>
-      <button class="btn btn-outline btn-sm" id="ng-models-btn" title="GET <base>/models 拉取可用模型到下拉">📋 拉模型</button>
-      <input class="form-input" id="ng-key" type="password" placeholder="API Key (本地可留空)" style="width:160px">
-    </div>
-    <textarea class="import-textarea" id="ng-prompt" style="min-height:90px" placeholder="系统提示词"></textarea>
-    <div style="display:flex;align-items:center;gap:10px;margin-top:10px;flex-wrap:wrap">
-      <input class="form-input" id="ng-test-email" placeholder="测试邮箱 (可自定义, 留空用默认样例)" style="width:280px">
-      <button class="btn btn-outline btn-sm" id="ng-test">生成测试</button>
-      <button class="btn btn-primary btn-sm" id="ng-save">保存</button>
-      <span class="subtitle" id="ng-msg"></span>
-    </div>
-    <div class="subtitle" style="margin-top:6px;font-size:12px">
-      返回格式 <code>名字,年龄</code>（如 falcons,31）。注册到 about-you 页时调用；
-      账号"其他字段"填了名字的优先用手动值，接口失败兜底用邮箱前缀+随机年龄。
-    </div>
-  </div>
-
-  <div class="drawer-card" id="mother-box" style="display:none">
-    <div class="drawer-title">
-      <span>母号配置 (Team 空间 owner —— 用它邀请子号入队)</span>
-      <button class="btn btn-ghost btn-sm" id="mother-close">✕ 关闭</button>
-    </div>
-    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-      <input class="form-input" id="mother-window" placeholder="Roxy 窗口名, 如 youngj111" style="width:220px">
-      <button class="btn btn-outline btn-sm" id="mother-list">列出空间</button>
-      <select class="form-input" id="mother-ws" style="width:280px;display:none"></select>
-      <button class="btn btn-primary btn-sm" id="mother-save">保存</button>
-      <span class="subtitle" id="mother-msg"></span>
-    </div>
-    <div class="subtitle" style="margin-top:6px;font-size:12px">当前: <span id="mother-cur">未配置</span></div>
-  </div>
-
-  <div class="drawer-card" id="pace-box" style="display:none">
-    <div class="drawer-title">
-      <span>注册拟人节奏 (自动注册的等待/击键速度)</span>
-      <button class="btn btn-ghost btn-sm" id="pace-close">✕ 关闭</button>
-    </div>
-    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-      <span class="subtitle">步骤间隔(秒)</span>
-      <input class="form-input" id="pc-step-min" type="number" step="0.5" min="0" style="width:80px"> ~
-      <input class="form-input" id="pc-step-max" type="number" step="0.5" min="0" style="width:80px">
-      <span class="subtitle">击键间隔(毫秒)</span>
-      <input class="form-input" id="pc-type-min" type="number" step="10" min="0" style="width:80px"> ~
-      <input class="form-input" id="pc-type-max" type="number" step="10" min="0" style="width:80px">
-      <span class="subtitle">落地等待(毫秒)</span>
-      <input class="form-input" id="pc-load" type="number" step="500" min="0" style="width:90px">
-      <button class="btn btn-primary btn-sm" id="pace-save">保存</button>
-      <span class="subtitle" id="pace-msg"></span>
-    </div>
-    <div class="subtitle" style="margin-top:6px;font-size:12px">
-      步骤间隔 = 每步操作之间的停顿; 击键间隔 = 每字符的打字速度; 落地等待 = 打开 chatgpt.com 后的静置。越小越快越像机器。
     </div>
   </div>
 
@@ -286,6 +227,7 @@
       </div>
     </div>
   </div>
+</div>
 </div>
 <div class="toast" id="toast"></div>
 
@@ -501,98 +443,6 @@ $("del-sel").onclick = async () => {
   await load();
 };
 
-// ---- 母号配置 ----
-let motherWs = [];
-async function loadMother() {
-  const r = await fetch("/api/mother").then(r => r.json());
-  $("mother-window").value = r.mother_window || "";
-  $("mother-cur").textContent = r.mother_window
-    ? `窗口 ${r.mother_window} · 空间 ${r.mother_workspace_name || r.mother_workspace || "未选"}`
-    : "未配置";
-}
-$("btn-mother").onclick = () => { loadMother(); $("mother-box").style.display = "block"; };
-$("mother-close").onclick = () => $("mother-box").style.display = "none";
-$("mother-list").onclick = async e => {
-  const name = $("mother-window").value.trim();
-  if (!name) return toast("先填母号窗口名");
-  e.target.disabled = true;
-  $("mother-msg").textContent = "连接母号窗口中 …";
-  // 先存窗口名, 后端按它找窗口
-  await post("/api/mother", { mother_window: name });
-  const r = await fetch("/api/mother/workspaces").then(r => r.json()).catch(() => null);
-  e.target.disabled = false;
-  if (!r || r.error) { $("mother-msg").textContent = "✗ " + ((r && r.error) || "请求失败"); return; }
-  motherWs = r.workspaces || [];
-  const selW = $("mother-ws");
-  selW.innerHTML = motherWs.map(w =>
-    `<option value="${w.id}">${esc(w.name || w.id)} · ${esc(w.plan)} · ${esc(w.role)}</option>`).join("");
-  selW.style.display = motherWs.length ? "" : "none";
-  $("mother-msg").textContent = `母号: ${r.email || "?"} · 拉到 ${motherWs.length} 个空间`;
-};
-$("mother-save").onclick = async () => {
-  const name = $("mother-window").value.trim();
-  const selW = $("mother-ws");
-  const wsid = selW.style.display === "none" ? "" : selW.value;
-  const wsname = wsid ? (motherWs.find(w => w.id === wsid) || {}).name : "";
-  const r = await post("/api/mother", {
-    mother_window: name, mother_workspace: wsid,
-    mother_workspace_name: wsname || "" });
-  if (r.error) return toast("✗ " + r.error);
-  toast("✓ 母号已存");
-  loadMother();
-};
-
-// ---- AI 资料生成配置 ----
-async function loadNamegen() {
-  const r = await fetch("/api/settings").then(r => r.json());
-  $("ng-enabled").checked = !!r.namegen_enabled;
-  $("ng-url").value = r.namegen_url || "";
-  $("ng-model").value = r.namegen_model || "";
-  $("ng-key").value = r.namegen_key || "";
-  $("ng-prompt").value = r.namegen_prompt || "";
-}
-$("btn-namegen").onclick = () => { loadNamegen(); $("namegen-box").style.display = "block"; };
-$("namegen-close").onclick = () => $("namegen-box").style.display = "none";
-function ngPayload() {
-  return { namegen_enabled: $("ng-enabled").checked,
-           namegen_url: $("ng-url").value.trim(),
-           namegen_model: $("ng-model").value.trim(),
-           namegen_key: $("ng-key").value.trim(),
-           namegen_prompt: $("ng-prompt").value.trim() };
-}
-$("ng-save").onclick = async () => {
-  const r = await post("/api/settings", ngPayload());
-  if (r.error) return toast("✗ " + r.error);
-  $("ng-msg").textContent = "✓ 已保存";
-  toast("✓ 资料生成配置已存");
-};
-$("ng-models-btn").onclick = async e => {
-  e.target.disabled = true;
-  $("ng-msg").textContent = "拉取模型列表 …";
-  const r = await post("/api/settings/namegen-models",
-    { url: $("ng-url").value.trim(), key: $("ng-key").value.trim() })
-    .catch(() => null);
-  e.target.disabled = false;
-  if (r && r.ok) {
-    $("ng-models").innerHTML = r.models
-      .map(m => `<option value="${esc(m)}">`).join("");
-    $("ng-msg").textContent = `✓ ${r.count} 个模型 —— 点模型输入框下拉选择`;
-  } else {
-    $("ng-msg").textContent = "✗ " + ((r && r.error) || "请求失败");
-  }
-};
-$("ng-test").onclick = async e => {
-  await post("/api/settings", ngPayload());   // 先存再测
-  e.target.disabled = true;
-  $("ng-msg").textContent = "生成中 …";
-  const r = await post("/api/settings/test-namegen",
-    { email: $("ng-test-email").value.trim() }).catch(() => null);
-  e.target.disabled = false;
-  $("ng-msg").textContent = r && r.ok
-    ? `✓ ${r.name}, ${r.age} 岁` + (r.logs && r.logs.length ? " · " + r.logs[0] : "")
-    : "✗ " + ((r && r.error) || "请求失败");
-};
-
 // ---- 接码监听面板 ----
 async function pollMailWatch() {
   const r = await fetch("/api/mail-codes").then(r => r.json())
@@ -641,29 +491,6 @@ $("mailwatch-list").addEventListener("click", async e => {
 setInterval(pollMailWatch, 3000);
 pollMailWatch();
 
-// ---- 注册节奏配置 ----
-async function loadPace() {
-  const r = await fetch("/api/settings").then(r => r.json());
-  $("pc-step-min").value = r.pace_step_min;
-  $("pc-step-max").value = r.pace_step_max;
-  $("pc-type-min").value = r.pace_type_min;
-  $("pc-type-max").value = r.pace_type_max;
-  $("pc-load").value = r.pace_load_ms;
-}
-$("btn-pace").onclick = () => { loadPace(); $("pace-box").style.display = "block"; };
-$("pace-close").onclick = () => $("pace-box").style.display = "none";
-$("pace-save").onclick = async () => {
-  const r = await post("/api/settings", {
-    pace_step_min: parseFloat($("pc-step-min").value) || 2,
-    pace_step_max: parseFloat($("pc-step-max").value) || 6,
-    pace_type_min: parseInt($("pc-type-min").value) || 90,
-    pace_type_max: parseInt($("pc-type-max").value) || 240,
-    pace_load_ms: parseInt($("pc-load").value) || 5000 });
-  if (r.error) return toast("✗ " + r.error);
-  $("pace-msg").textContent = "✓ 已保存";
-  toast("✓ 注册节奏已存");
-};
-
 // ---- PAT 检验 ----
 let patPollT = null;
 async function pollPat() {
@@ -703,7 +530,6 @@ $("pat-sel").onclick = e => {
 load();
 pollOpen();   // 页面打开时若正好有任务在跑则接上
 pollPat();
-loadMother();
 </script>
 </body>
 </html>

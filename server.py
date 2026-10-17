@@ -721,8 +721,9 @@ def _mail_code_once(mail_url, upstream):
     except Exception:
         pass
     if j is not None:
-        if j.get("code") in (602, "602") \
-                or "unavailable" in str(j.get("message") or "").lower():
+        if j.get("code") in (502, 602, "502", "602") \
+                or "unavailable" in str(j.get("message") or "").lower() \
+                or "not found" in str(j.get("message") or "").lower():
             return None, "dead"
         if j.get("code") in (601, "601") or not j.get("data"):
             return None, None                  # Waiting for code
@@ -1987,7 +1988,8 @@ def _open_worker(accs, semiauto=False, watch_code=False,
 
 # ---------------- HTTP ----------------
 PAGES = {"/": "index.html", "/index.html": "index.html",
-         "/accounts": "accounts.html", "/accounts.html": "accounts.html"}
+         "/accounts": "accounts.html", "/accounts.html": "accounts.html",
+         "/settings": "settings.html", "/settings.html": "settings.html"}
 
 
 class H(BaseHTTPRequestHandler):

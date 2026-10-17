@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>设置 · roxy-accounts</title>
+<style>
+  :root {
+    --bg-page: #f8fafc;
+    --surface: #ffffff;
+    --surface-hover: #f1f5f9;
+    --border: #e2e8f0;
+    --border-strong: #cbd5e1;
+    --text-main: #0f172a;
+    --text-muted: #64748b;
+    --text-dim: #94a3b8;
+    --primary: #2563eb;
+    --primary-hover: #1d4ed8;
+    --success-soft: #ecfdf5;
+    --warning-soft: #fffbeb;
+    --danger: #ef4444;
+    --danger-soft: #fef2f2;
+    --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg-page); color: var(--text-main);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  /* ---- 左侧导航 ---- */
+  .sidebar {
+    position: fixed; left: 0; top: 0; bottom: 0; width: 176px;
+    background: var(--surface); border-right: 1px solid var(--border);
+    padding: 20px 10px; display: flex; flex-direction: column; gap: 4px;
+  }
+  .sidebar .brand { font-size: 13px; font-weight: 700; padding: 4px 12px 16px; color: var(--text-main); }
+  .sidebar a {
+    display: flex; align-items: center; gap: 9px;
+    padding: 8px 12px; border-radius: 8px; font-size: 13px; font-weight: 500;
+    color: var(--text-muted); text-decoration: none;
+  }
+  .sidebar a:hover { background: var(--surface-hover); color: var(--text-main); }
+  .sidebar a.on { background: var(--primary); color: #fff; }
+  .main { margin-left: 176px; padding: 24px 32px 80px; }
+  .page-container { max-width: 960px; }
+
+  h1 { font-size: 20px; font-weight: 700; margin: 0; letter-spacing: -0.3px; }
+  .subtitle { font-size: 13px; color: var(--text-muted); }
+  .page-header { margin-bottom: 20px; }
+
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    padding: 7px 14px; border-radius: 8px; font-size: 13px; font-weight: 500;
+    cursor: pointer; transition: all 0.15s ease; border: 1px solid transparent;
+    user-select: none; text-decoration: none; line-height: 1.4;
+  }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-primary { background: var(--primary); color: #fff; }
+  .btn-primary:hover:not(:disabled) { background: var(--primary-hover); }
+  .btn-outline { background: var(--surface); color: var(--text-main); border-color: var(--border); box-shadow: var(--shadow-sm); }
+  .btn-outline:hover:not(:disabled) { background: var(--surface-hover); border-color: var(--border-strong); }
+  .btn-ghost { background: transparent; color: var(--text-muted); border-color: transparent; }
+  .btn-ghost:hover:not(:disabled) { background: var(--surface-hover); color: var(--text-main); }
+  .btn-sm { padding: 4px 10px; font-size: 12px; border-radius: 6px; }
+
+  .card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    padding: 18px; margin-bottom: 16px; box-shadow: var(--shadow-sm);
+  }
+  .card-title { font-size: 14px; font-weight: 600; margin-bottom: 12px; }
+  .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .form-input, .form-select {
+    padding: 6px 10px; border: 1px solid var(--border); border-radius: 7px;
+    font-size: 13px; background: var(--surface); color: var(--text-main); outline: none;
+  }
+  .form-input:focus, .form-select:focus { border-color: var(--primary); }
+  textarea.import-textarea {
+    width: 100%; min-height: 90px; resize: vertical; font-size: 12px;
+    font-family: ui-monospace, Menlo, Monaco, monospace;
+    border: 1px solid var(--border); border-radius: 8px; padding: 10px;
+    background: #f8fafc; color: var(--text-main); outline: none;
+  }
+  textarea.import-textarea:focus { border-color: var(--primary); background: #fff; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace; font-size: 12px; }
+  .hint { font-size: 12px; color: var(--text-dim); margin-top: 8px; }
+  .toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: #0f172a; color: #fff; padding: 8px 16px; border-radius: 8px; font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 99; }
+</style>
+</head>
+<body>
+<nav class="sidebar">
+  <div class="brand">roxy-accounts</div>
+  <a href="/accounts">👤 账号</a>
+  <a href="/">🌐 代理</a>
+  <a href="/settings" class="on">⚙️ 设置</a>
+</nav>
+<div class="main">
+<div class="page-container">
+  <div class="page-header">
+    <h1>设置</h1>
+    <div class="subtitle">上级代理 · 母号 · AI 资料生成 · 注册节奏 —— 改动即时生效</div>
+  </div>
+
+  <!-- 上级代理 -->
+  <div class="card">
+    <div class="card-title">⚙ 上级代理 (本机出网隧道 —— 测活/接码请求经它转发)</div>
+    <div class="row">
+      <input class="form-input" id="up-in" placeholder="http://127.0.0.1:7897" style="width:260px">
+      <button class="btn btn-primary btn-sm" id="up-save">保存</button>
+      <button class="btn btn-outline btn-sm" id="up-test">测试连通</button>
+      <span class="subtitle" id="up-msg"></span>
+    </div>
+    <div class="hint">留空 = 直连。本机无外网时必须配置，否则代理测活/接码查询全部失败。</div>
+  </div>
+
+  <!-- 母号配置 -->
+  <div class="card">
+    <div class="card-title">👑 母号配置 (Team 空间 owner —— 用它批量邀请子号入队做 PAT 检验)</div>
+    <div class="row">
+      <input class="form-input" id="mother-window" placeholder="Roxy 窗口名, 如 youngj111" style="width:220px">
+      <button class="btn btn-outline btn-sm" id="mother-list">列出空间</button>
+      <select class="form-input" id="mother-ws" style="width:280px;display:none"></select>
+      <button class="btn btn-primary btn-sm" id="mother-save">保存</button>
+      <span class="subtitle" id="mother-msg"></span>
+    </div>
+    <div class="hint">当前: <span id="mother-cur">未配置</span></div>
+  </div>
+
+  <!-- AI 资料生成 -->
+  <div class="card">
+    <div class="card-title">🤖 AI 资料生成 (注册页姓名+年龄 —— OpenAI 兼容接口)</div>
+    <div class="row" style="margin-bottom:8px">
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px">
+        <input type="checkbox" id="ng-enabled"> 启用
+      </label>
+      <input class="form-input" id="ng-url" placeholder="接口地址, 如 http://127.0.0.1:11434/v1" style="width:300px">
+      <input class="form-input" id="ng-model" list="ng-models" placeholder="模型名, 点右侧拉列表" style="width:170px">
+      <datalist id="ng-models"></datalist>
+      <button class="btn btn-outline btn-sm" id="ng-models-btn" title="GET <base>/models 拉取可用模型到下拉">📋 拉模型</button>
+      <input class="form-input" id="ng-key" type="password" placeholder="API Key (本地可留空)" style="width:160px">
+    </div>
+    <textarea class="import-textarea" id="ng-prompt" placeholder="系统提示词"></textarea>
+    <div class="row" style="margin-top:10px">
+      <input class="form-input" id="ng-test-email" placeholder="测试邮箱 (可自定义, 留空用默认样例)" style="width:280px">
+      <button class="btn btn-outline btn-sm" id="ng-test">生成测试</button>
+      <button class="btn btn-primary btn-sm" id="ng-save">保存</button>
+      <span class="subtitle" id="ng-msg"></span>
+    </div>
+    <div class="hint">
+      返回格式 <code>名字,年龄</code>（如 falcons,31）。注册到 about-you 页时调用；
+      账号"其他字段"填了名字的优先用手动值，接口失败兜底用邮箱前缀+随机年龄。
+    </div>
+  </div>
+
+  <!-- 注册节奏 -->
+  <div class="card">
+    <div class="card-title">⏱ 注册拟人节奏 (自动注册的等待/击键速度)</div>
+    <div class="row">
+      <span class="subtitle">步骤间隔(秒)</span>
+      <input class="form-input" id="pc-step-min" type="number" step="0.5" min="0" style="width:80px"> ~
+      <input class="form-input" id="pc-step-max" type="number" step="0.5" min="0" style="width:80px">
+      <span class="subtitle">击键间隔(毫秒)</span>
+      <input class="form-input" id="pc-type-min" type="number" step="10" min="0" style="width:80px"> ~
+      <input class="form-input" id="pc-type-max" type="number" step="10" min="0" style="width:80px">
+      <span class="subtitle">落地等待(毫秒)</span>
+      <input class="form-input" id="pc-load" type="number" step="500" min="0" style="width:90px">
+      <button class="btn btn-primary btn-sm" id="pace-save">保存</button>
+      <span class="subtitle" id="pace-msg"></span>
+    </div>
+    <div class="hint">步骤间隔 = 每步操作之间的停顿; 击键间隔 = 每字符的打字速度; 落地等待 = 打开 chatgpt.com 后的静置。越小越快越像机器。</div>
+  </div>
+</div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g,
+    c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function toast(msg) {
+  const t = $("toast"); t.textContent = msg; t.style.opacity = 1;
+  clearTimeout(t._h); t._h = setTimeout(() => t.style.opacity = 0, 1800);
+}
+async function post(path, body) {
+  const r = await fetch(path, { method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body) });
+  return r.json();
+}
+
+// ---- 上级代理 ----
+async function loadUpstream() {
+  const r = await fetch("/api/settings").then(r => r.json());
+  if (document.activeElement !== $("up-in"))
+    $("up-in").value = r.upstream_proxy || "";
+}
+$("up-save").onclick = async () => {
+  const r = await post("/api/settings",
+    { upstream_proxy: $("up-in").value.trim() });
+  if (r.error) { $("up-msg").textContent = "✗ " + r.error; return; }
+  $("up-msg").textContent = r.upstream_proxy ? "已存" : "已清空(直连)";
+  toast("上级代理已保存");
+};
+$("up-test").onclick = async () => {
+  $("up-msg").textContent = "测中…";
+  const r = await post("/api/settings/test-upstream", {});
+  $("up-msg").textContent = r.error
+    ? "✗ " + r.error
+    : `✓ 上级可达 ${r.ms}ms (${r.scheme})`;
+};
+
+// ---- 母号配置 ----
+let motherWs = [];
+async function loadMother() {
+  const r = await fetch("/api/mother").then(r => r.json());
+  $("mother-window").value = r.mother_window || "";
+  $("mother-cur").textContent = r.mother_window
+    ? `窗口 ${r.mother_window} · 空间 ${r.mother_workspace_name || r.mother_workspace || "未选"}`
+    : "未配置";
+}
+$("mother-list").onclick = async e => {
+  const name = $("mother-window").value.trim();
+  if (!name) return toast("先填母号窗口名");
+  e.target.disabled = true;
+  $("mother-msg").textContent = "连接母号窗口中 …";
+  await post("/api/mother", { mother_window: name });
+  const r = await fetch("/api/mother/workspaces").then(r => r.json()).catch(() => null);
+  e.target.disabled = false;
+  if (!r || r.error) { $("mother-msg").textContent = "✗ " + ((r && r.error) || "请求失败"); return; }
+  motherWs = r.workspaces || [];
+  const selW = $("mother-ws");
+  selW.innerHTML = motherWs.map(w =>
+    `<option value="${w.id}">${esc(w.name || w.id)} · ${esc(w.plan)} · ${esc(w.role)}</option>`).join("");
+  selW.style.display = motherWs.length ? "" : "none";
+  $("mother-msg").textContent = `母号: ${r.email || "?"} · 拉到 ${motherWs.length} 个空间`;
+};
+$("mother-save").onclick = async () => {
+  const name = $("mother-window").value.trim();
+  const selW = $("mother-ws");
+  const wsid = selW.style.display === "none" ? "" : selW.value;
+  const wsname = wsid ? (motherWs.find(w => w.id === wsid) || {}).name : "";
+  const r = await post("/api/mother", {
+    mother_window: name, mother_workspace: wsid,
+    mother_workspace_name: wsname || "" });
+  if (r.error) return toast("✗ " + r.error);
+  toast("✓ 母号已存");
+  loadMother();
+};
+
+// ---- AI 资料生成 ----
+async function loadNamegen() {
+  const r = await fetch("/api/settings").then(r => r.json());
+  $("ng-enabled").checked = !!r.namegen_enabled;
+  $("ng-url").value = r.namegen_url || "";
+  $("ng-model").value = r.namegen_model || "";
+  $("ng-key").value = r.namegen_key || "";
+  $("ng-prompt").value = r.namegen_prompt || "";
+}
+function ngPayload() {
+  return { namegen_enabled: $("ng-enabled").checked,
+           namegen_url: $("ng-url").value.trim(),
+           namegen_model: $("ng-model").value.trim(),
+           namegen_key: $("ng-key").value.trim(),
+           namegen_prompt: $("ng-prompt").value.trim() };
+}
+$("ng-save").onclick = async () => {
+  const r = await post("/api/settings", ngPayload());
+  if (r.error) return toast("✗ " + r.error);
+  $("ng-msg").textContent = "✓ 已保存";
+  toast("✓ 资料生成配置已存");
+};
+$("ng-models-btn").onclick = async e => {
+  e.target.disabled = true;
+  $("ng-msg").textContent = "拉取模型列表 …";
+  const r = await post("/api/settings/namegen-models",
+    { url: $("ng-url").value.trim(), key: $("ng-key").value.trim() })
+    .catch(() => null);
+  e.target.disabled = false;
+  if (r && r.ok) {
+    $("ng-models").innerHTML = r.models
+      .map(m => `<option value="${esc(m)}">`).join("");
+    $("ng-msg").textContent = `✓ ${r.count} 个模型 —— 点模型输入框下拉选择`;
+  } else {
+    $("ng-msg").textContent = "✗ " + ((r && r.error) || "请求失败");
+  }
+};
+$("ng-test").onclick = async e => {
+  await post("/api/settings", ngPayload());   // 先存再测
+  e.target.disabled = true;
+  $("ng-msg").textContent = "生成中 …";
+  const r = await post("/api/settings/test-namegen",
+    { email: $("ng-test-email").value.trim() }).catch(() => null);
+  e.target.disabled = false;
+  $("ng-msg").textContent = r && r.ok
+    ? `✓ ${r.name}, ${r.age} 岁` + (r.logs && r.logs.length ? " · " + r.logs[0] : "")
+    : "✗ " + ((r && r.error) || "请求失败");
+};
+
+// ---- 注册节奏 ----
+async function loadPace() {
+  const r = await fetch("/api/settings").then(r => r.json());
+  $("pc-step-min").value = r.pace_step_min;
+  $("pc-step-max").value = r.pace_step_max;
+  $("pc-type-min").value = r.pace_type_min;
+  $("pc-type-max").value = r.pace_type_max;
+  $("pc-load").value = r.pace_load_ms;
+}
+$("pace-save").onclick = async () => {
+  const r = await post("/api/settings", {
+    pace_step_min: parseFloat($("pc-step-min").value) || 2,
+    pace_step_max: parseFloat($("pc-step-max").value) || 6,
+    pace_type_min: parseInt($("pc-type-min").value) || 90,
+    pace_type_max: parseInt($("pc-type-max").value) || 240,
+    pace_load_ms: parseInt($("pc-load").value) || 5000 });
+  if (r.error) return toast("✗ " + r.error);
+  $("pace-msg").textContent = "✓ 已保存";
+  toast("✓ 注册节奏已存");
+};
+
+loadUpstream();
+loadMother();
+loadNamegen();
+loadPace();
+</script>
+</body>
+</html>
