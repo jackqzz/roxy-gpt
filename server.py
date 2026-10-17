@@ -2100,6 +2100,10 @@ def _pat_worker(ids):
                         a["pat"] = verdict
                         a["pat_at"] = _now()
                         a["ws_id"] = ws_id
+                        _ws_list_add(
+                            a, ws_id,
+                            st.get("mother_workspace_name")
+                            or "", "standard-user")
                         # 能探到 verdict = 号存在且窗口已登录
                         # = 注册已成功, 回填 reg
                         if verdict != "窗口未登录" \
@@ -2342,6 +2346,9 @@ def _join_worker(ids, mname, seat="prolite"):
                             a["space_mother"] = mname
                             a["space_seat"] = r.get("seat") or seat
                             a["space_at"] = _now()
+                            _ws_list_add(
+                                a, ws_id, ws_name,
+                                "standard-user")
                             JOIN_JOB["results"][aid] = \
                                 "已入 " + ws_name
                             log("✓ %s: 已入 %s" % (email, ws_name))
@@ -2381,6 +2388,21 @@ def _join_worker(ids, mname, seat="prolite"):
 #   或 ws_name=空间名 (空间筛选联动), 按成员列表现查 id
 LEAVE_JOB = {"running": False, "log": [], "results": {},
              "stop": False}
+
+
+def _ws_list_add(a, ws_id, name="", role=""):
+    """往 a.ws_list 里补一条成员记录 (按 id 去重, 补缺失字段)。"""
+    if not ws_id:
+        return
+    lst = a.setdefault("ws_list", [])
+    for w in lst:
+        if w.get("id") == ws_id:
+            if name:
+                w["name"] = name
+            if role:
+                w["role"] = role
+            return
+    lst.append({"id": ws_id, "name": name, "role": role})
 
 
 def _leave_worker(ids, ws_name=None, pairs=None):

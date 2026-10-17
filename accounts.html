@@ -212,6 +212,7 @@
       </select>
       <button class="btn btn-outline btn-sm" id="join-sel" title="母号批量邀请 → 子号开窗刷新接受邀请">👑 加入空间</button>
       <button class="btn btn-outline btn-sm" id="leave-sel" title="子号主动退出空间: 选了空间筛选就直接退它, 否则弹窗逐个选取">🚪 退空间</button>
+      <button class="btn btn-outline btn-sm" id="ws-refresh" title="开窗拉每个号实际所在空间 (accounts/check 实况, 写入成员列表)">🔄 查空间</button>
       <button class="btn btn-outline btn-sm" id="cpa-sel" title="本地算OAuth链接 → 开(原/同IP新)窗口授权 → 截回调 → 经账号代理换token → 生成CPA凭证">🔗 OAuth授权</button>
       <button class="btn btn-outline btn-sm" id="cpa-push" title="把已生成的凭证 JSON 推入 CPA 号池 (auth-files)">📤 推入池</button>
       <button class="btn btn-outline btn-sm" id="cpa-export" title="导出选中账号的 CPA 凭证 JSON (zip 打包)">📥 导凭证</button>
@@ -291,12 +292,24 @@ async function post(path, body) {
 // PAT 空间不算"已加入空间"
 function inSpace(a) { return a.space && a.space_ws !== patWsId; }
 
+// 账号实际所在全部空间名 (正式加入 + ws_list 实况 + PAT)
+function accWsNames(a) {
+  const names = [];
+  const add = n => { if (n && !names.includes(n)) names.push(n); };
+  if (a.space && a.space_ws !== patWsId) add(a.space);
+  (a.ws_list || []).forEach(w => add(w.name));
+  if (a.ws_id === patWsId && patWsName) add(patWsName);
+  return names;
+}
+
 function filtered() {
   const q = $("q").value.trim().toLowerCase();
   const fs = $("f-space").value;
   let list = accounts;
-  if (fs === "__none__") list = list.filter(a => !inSpace(a));
-  else if (fs) list = list.filter(a => inSpace(a) && a.space === fs);
+  // "未加入" = 除PAT外没有任何空间成员记录
+  if (fs === "__none__") list = list.filter(a =>
+    !accWsNames(a).some(n => n !== patWsName));
+  else if (fs) list = list.filter(a => accWsNames(a).includes(fs));
   if (!q) return list;
   return list.filter(a =>
     a.email.includes(q) || (a.proxy || "").includes(q) ||
@@ -318,13 +331,13 @@ async function load() {
   $("st-opened").textContent = s.opened ?? 0;
   $("st-unbound").textContent = s.unbound ?? 0;
   if (r.target) $("target-url").textContent = r.target.replace(/^https?:\/\//, "");
-  // 空间筛选下拉 (保留当前选择; PAT 空间不计入)
+  // 空间筛选下拉 (实况成员也入选项, PAT 标注; 保留当前选择)
   const fsv = $("f-space").value;
-  const spaces = [...new Set(accounts.filter(inSpace)
-    .map(a => a.space))].sort();
+  const spaces = [...new Set(accounts.flatMap(accWsNames))].sort();
   $("f-space").innerHTML = `<option value="">全部空间</option>`
     + `<option value="__none__">未加入空间</option>`
-    + spaces.map(x => `<option ${x === fsv ? "selected" : ""}>${esc(x)}</option>`).join("");
+    + spaces.map(x =>
+        `<option value="${esc(x)}" ${x === fsv ? "selected" : ""}>${esc(x)}${x === patWsName ? " (PAT)" : ""}</option>`).join("");
   if (fsv && ![...$("f-space").options].some(o => o.value === fsv && o.value))
     $("f-space").value = "";
   // 加入空间母号下拉
@@ -375,9 +388,21 @@ function render() {
       : (a.password
           ? `<span class="copyable" data-c="${esc(a.password)}" title="点击复制密码">••••••</span>`
           : "—");
-    const sp = inSpace(a)
-      ? `<span class="pill pill-ok" title="母号 ${esc(a.space_mother || "")} · 席位 ${esc(a.space_seat || "?")} · ${esc(a.space_at || "")}">${esc(a.space)}</span>`
-      : `<span class="pill pill-dim">—</span>`;
+    const sp = (() => {
+      let h = "";
+      if (inSpace(a))
+        h += `<span class="pill pill-ok" title="母号 ${esc(a.space_mother || "")} · 席位 ${esc(a.space_seat || "?")} · ${esc(a.space_at || "")}">${esc(a.space)}</span>`;
+      (a.ws_list || []).forEach(w => {
+        if (!w.id || w.id === a.space_ws) return;  // 绿pill已显示
+        const isPat = w.id === patWsId;
+        h += ` <span class="pill pill-dim" title="${isPat ? "PAT母号空间" : "成员空间"} ${esc(w.id)}">${esc(w.name)}${isPat ? "(PAT)" : ""}</span>`;
+      });
+      if (a.ws_id === patWsId && patWsName
+          && !(a.ws_list || []).find(w => w.id === a.ws_id)
+          && a.ws_id !== a.space_ws)
+        h += ` <span class="pill pill-dim" title="PAT母号空间 ${esc(a.ws_id)}">${esc(patWsName)}(PAT)</span>`;
+      return h || `<span class="pill pill-dim">—</span>`;
+    })();
     const cpa = a.cpa === "yes"
       ? `<a class="pill pill-ok" href="/api/accounts/${a.id}/cred" title="已入CPA池 ${esc(a.cpa_at||"")} —— 点下载凭证 ${esc(a.cred_file||"")}">已入池</a>`
       : a.cpa === "ready"
@@ -706,6 +731,27 @@ function renderLeaveRows(ids) {
     </div>`;
   }).join("");
 }
+// ---- 查空间 (实况成员列表) ----
+$("ws-refresh").onclick = e => {
+  if (!sel.size) return toast("先勾选账号");
+  const ids = [...sel];
+  e.target.disabled = true;
+  toast(`正在拉 ${ids.length} 个号的空间成员…`);
+  post("/api/accounts/ws-list", { ids }).then(r => {
+    e.target.disabled = false;
+    if (r.error) return toast("✗ " + r.error);
+    let ok = 0, fails = [];
+    Object.entries((r && r.map) || {}).forEach(([id, v]) => {
+      const a = accounts.find(x => x.id === id);
+      if (v.list !== undefined) { ok++; if (a) a.ws_list = v.list; }
+      else fails.push(v.error || "?");
+    });
+    render();
+    toast(`✓ ${ok} 个号空间成员已刷新`
+      + (fails.length ? ` · ✗${fails.length}: ${fails.slice(0, 2).join(" · ")}` : ""));
+  });
+};
+
 $("leave-cancel").onclick = () => $("leave-modal").style.display = "none";
 $("leave-go").onclick = () => {
   const pairs = {};
