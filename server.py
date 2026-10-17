@@ -1189,6 +1189,100 @@ def _chatgpt_code_step(ws, a, log, upstream, should_stop=None):
             br.close()
 
 
+def _about_fields(pg):
+    """dump about-you 表单字段结构供诊断 (名字/类型/占位/必填)。"""
+    try:
+        return pg.evaluate(
+            "() => [...document.querySelectorAll('form input,"
+            "form select,input[name],select,[role=spinbutton]')]"
+            ".map(e=>({tag:e.tagName,name:e.name||'',"
+            "type:e.type||'',ph:e.placeholder||'',"
+            "aria:e.getAttribute('aria-label')||'',"
+            "req:!!e.required}))")
+    except Exception:
+        return []
+
+
+def _about_fill(pg, name, age, log, hdelay, tdelay):
+    """about-you 填姓名+年龄/生日并提交。
+    认不出年龄控件就停手留人工 —— 空着提交等于送风控。
+    返回 ok|need_human|err。"""
+    import random
+    fs = _about_fields(pg)
+    if fs:
+        log("  资料页字段: " + "; ".join(
+            "%s[%s:%s]%s" % (f["tag"], f.get("type", ""),
+                             f.get("name", ""),
+                             "*" if f.get("req") else "")
+            for f in fs))
+    pg.click("input[name=name]")
+    pg.type("input[name=name]", name, delay=tdelay())
+    hdelay(1.0, 3.0)
+    age = int(age)
+    y = time.localtime().tm_year - age
+    mm, dd = random.randint(1, 12), random.randint(1, 28)
+    filled = None
+    # a) 数字年龄框
+    for sel in ("input[name=age]", "input[type=number]",
+                "input[inputmode=numeric]",
+                'input[aria-label*="age" i]',
+                'input[aria-label*="old" i]'):
+        try:
+            el = pg.query_selector(sel)
+            if el and el.is_visible():
+                el.click()
+                pg.type(sel, str(age), delay=tdelay())
+                filled = sel
+                break
+        except Exception:
+            pass
+    # b) 生日文本框 MM/DD/YYYY
+    if not filled:
+        for sel in ("input[name=birthday]", "input[name=birthdate]",
+                    "input[name=dob]", 'input[name*="birth" i]',
+                    'input[placeholder*="MM" i]',
+                    'input[aria-label*="birth" i]'):
+            try:
+                el = pg.query_selector(sel)
+                if el and el.is_visible():
+                    el.click()
+                    # 掩码框自动插斜杠, 只打数字最稳
+                    pg.type(sel, "%02d%02d%d" % (mm, dd, y),
+                            delay=tdelay())
+                    filled = sel
+                    break
+            except Exception:
+                pass
+    # c) 三段下拉 月/日/年
+    if not filled:
+        sels = [s for s in pg.query_selector_all("select")
+                if s.is_visible()]
+        if len(sels) >= 3:
+            try:
+                for i, v in enumerate((mm, dd, y)):
+                    try:
+                        sels[i].select_option(str(v))
+                    except Exception:
+                        opts = sels[i].evaluate(
+                            "e=>[...e.options]"
+                            ".map(o=>o.value||o.text)")
+                        hit = [o for o in opts if str(v) in o]
+                        if not hit:
+                            raise
+                        sels[i].select_option(hit[0])
+                filled = "selects"
+            except Exception:
+                pass
+    if not filled:
+        log("  ⚠ 年龄控件认不出, 停在资料页留人工 ——"
+            " 空着提交等于送风控")
+        return "need_human"
+    hdelay()
+    if not _real_continue(pg):
+        return "资料页提交按钮点不动"
+    return "ok"
+
+
 def _chatgpt_profile_step(ws, a, log, should_stop=None):
     """半自动·自动填资料: 等 about-you 姓名/年龄页 -> 填 -> 提交。
     数据优先取 🤖资料预生成结果 (PROF_WATCH), 其次现场 AI 生成,
@@ -1270,20 +1364,10 @@ def _chatgpt_profile_step(ws, a, log, should_stop=None):
             if (a.get("extra") or "").strip():
                 name = a["extra"].strip()
                 src += "+extra"
-            hdelay()
-            pg.click("input[name=name]")
-            pg.type("input[name=name]", name, delay=tdelay())
-            hdelay(1.0, 3.0)
-            try:
-                pg.click("input[name=age]", timeout=5000)
-                pg.type("input[name=age]", str(age), delay=tdelay())
-            except Exception:
-                pass   # 有的 about-you 只有生日下拉, 输不进就留人工
-            hdelay()
-            if not _real_continue(pg):
-                return "资料页提交按钮点不动"
-            log(f"  📝 资料已填并提交 ({name}, {age}) ← {src}")
-            return "ok"
+            r = _about_fill(pg, name, age, log, hdelay, tdelay)
+            if r == "ok":
+                log(f"  📝 资料已填并提交 ({name}, {age}) ← {src}")
+            return r
         finally:
             br.close()
 
@@ -1491,18 +1575,13 @@ def _chatgpt_login(ws, a, log, upstream, should_stop=None):
                                    .capitalize() or "User"
                         age = str(gen[1] if gen
                                   else random.randint(22, 38))
-                        hdelay()
                         # 真实键盘输入 (fill 不产生 keydown/keyup)
-                        pg.click("input[name=name]")
-                        pg.type("input[name=name]", name,
-                                delay=tdelay())
-                        hdelay(1.0, 3.0)
-                        pg.click("input[name=age]")
-                        pg.type("input[name=age]", age,
-                                delay=tdelay())
-                        hdelay()
-                        if not _real_continue(pg):
-                            continue
+                        r = _about_fill(pg, name, age,
+                                        log, hdelay, tdelay)
+                        if r == "need_human":
+                            return "about_you_need_human"
+                        if r != "ok":
+                            return r
                         log("  资料页已填 (%s, %s)%s"
                             % (name, age, " ← AI生成" if gen else ""))
                         is_new = True
