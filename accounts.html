@@ -247,6 +247,7 @@
 <script>
 const $ = id => document.getElementById(id);
 let accounts = [];
+let patWsId = "";   // Pat测试母号的空间 —— 命中它的 space 不计入"已加入"
 let page = 1;
 const SIZE = 20;
 const sel = new Set();
@@ -266,12 +267,15 @@ async function post(path, body) {
     body: JSON.stringify(body) });
   return r.json();
 }
+// PAT 空间不算"已加入空间"
+function inSpace(a) { return a.space && a.space_ws !== patWsId; }
+
 function filtered() {
   const q = $("q").value.trim().toLowerCase();
   const fs = $("f-space").value;
   let list = accounts;
-  if (fs === "__none__") list = list.filter(a => !a.space);
-  else if (fs) list = list.filter(a => a.space === fs);
+  if (fs === "__none__") list = list.filter(a => !inSpace(a));
+  else if (fs) list = list.filter(a => inSpace(a) && a.space === fs);
   if (!q) return list;
   return list.filter(a =>
     a.email.includes(q) || (a.proxy || "").includes(q) ||
@@ -282,6 +286,9 @@ function filtered() {
 async function load() {
   const r = await fetch("/api/accounts").then(r => r.json());
   accounts = r.accounts || [];
+  const m = await fetch("/api/mother").then(r => r.json())
+    .catch(() => null);
+  patWsId = (m && m.mother_workspace) || "";
   const s = r.stats || {};
   $("st-total").textContent = s.total ?? 0;
   $("st-reg").textContent = s.reg ?? 0;
@@ -289,11 +296,12 @@ async function load() {
   $("st-opened").textContent = s.opened ?? 0;
   $("st-unbound").textContent = s.unbound ?? 0;
   if (r.target) $("target-url").textContent = r.target.replace(/^https?:\/\//, "");
-  // 空间筛选下拉 (保留当前选择)
+  // 空间筛选下拉 (保留当前选择; PAT 空间不计入)
   const fsv = $("f-space").value;
-  const spaces = [...new Set(accounts.map(a => a.space).filter(Boolean))].sort();
+  const spaces = [...new Set(accounts.filter(inSpace)
+    .map(a => a.space))].sort();
   $("f-space").innerHTML = `<option value="">全部空间</option>`
-    + `<option value="__none__">未入空间</option>`
+    + `<option value="__none__">未加入空间</option>`
     + spaces.map(x => `<option ${x === fsv ? "selected" : ""}>${esc(x)}</option>`).join("");
   if (fsv && ![...$("f-space").options].some(o => o.value === fsv && o.value))
     $("f-space").value = "";
@@ -345,7 +353,7 @@ function render() {
       : (a.password
           ? `<span class="copyable" data-c="${esc(a.password)}" title="点击复制密码">••••••</span>`
           : "—");
-    const sp = a.space
+    const sp = inSpace(a)
       ? `<span class="pill pill-ok" title="母号 ${esc(a.space_mother || "")} · ${esc(a.space_at || "")}">${esc(a.space)}</span>`
       : `<span class="pill pill-dim">—</span>`;
     return `<tr>
