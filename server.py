@@ -2445,6 +2445,7 @@ def _cpa_worker(ids):
                     url, state, verifier = _oauth_gen()
                     a["oauth_state"] = state
                     a["oauth_url"] = url
+                    a["oauth_verifier"] = verifier
                     log("→ %s: OAuth 链接已生成" % email)
                     # 2) 开窗口: 优先复用原来的窗 (win 还在直接连),
                     #    没有就按绑定的同一代理新建 —— IP 不变
@@ -2462,24 +2463,52 @@ def _cpa_worker(ids):
                         cpg.goto(url, wait_until="domcontentloaded",
                                  timeout=60000)
                         code = None
+                        hit = {"u": None}
+
+                        def _take(u):
+                            """URL 是 localhost:1455 回调且 state 匹配
+                            → 记 code。request 事件/轮询/历史三路共用。"""
+                            if not u or not u.startswith(
+                                    "http://localhost:1455/"):
+                                return
+                            qs = urllib.parse.parse_qs(
+                                urllib.parse.urlparse(u).query)
+                            got = (qs.get("state") or [""])[0]
+                            if got and got != state:
+                                return
+                            if qs.get("code"):
+                                hit["u"] = u
+
+                        # 主路: 请求发出瞬间捕获 (跳转 localhost 会
+                        # 连接失败成 chrome-error 页, page.url 被顶掉
+                        # —— 光靠轮询 url 永远看不到 code)
+                        cpg.on("request", lambda r: _take(r.url))
+                        cpg.on("requestfailed",
+                               lambda r: _take(r.url))
+                        cdp = cpg.context.new_cdp_session(cpg)
                         deadline = time.time() + 300   # 5 分钟授权窗口
                         while time.time() < deadline:
                             if CPA_JOB["stop"]:
                                 break
-                            cur = cpg.url or ""
-                            # 回调打到 localhost:1455 —— 浏览器
-                            # 到不了, 页面停在错误页但 URL 里有 code
-                            if "code=" in cur:
+                            if hit["u"]:
                                 qs = urllib.parse.parse_qs(
-                                    urllib.parse.urlparse(cur).query)
-                                got = (qs.get("state") or [""])[0]
-                                if got and got != state:
-                                    log("  %s: state 不匹配, 继续等"
-                                        % email)
-                                else:
-                                    code = (qs.get("code")
-                                            or [None])[0]
-                                    break
+                                    urllib.parse.urlparse(
+                                        hit["u"]).query)
+                                code = (qs.get("code")
+                                        or [None])[0]
+                                break
+                            _take(cpg.url or "")
+                            # 兜底: chrome-error 页时 url 已丢,
+                            # 翻导航历史找那条 localhost 回调
+                            try:
+                                for e in (cdp.send(
+                                        "Page.getNavigationHistory")
+                                        .get("entries") or []):
+                                    _take(e.get("url"))
+                            except Exception:
+                                pass
+                            if hit["u"]:
+                                continue
                             # 有授权按钮就点 (尽力而为)
                             for sel in (
                                     'button:has-text("Authorize")',
@@ -2525,6 +2554,7 @@ def _cpa_worker(ids):
                         a["cpa"] = "ready"
                         a.pop("oauth_url", None)
                         a.pop("oauth_state", None)
+                        a.pop("oauth_verifier", None)
                         CPA_JOB["results"][aid] = "凭证已生成"
                         log("✓ %s: rt/at 到手, 凭证 %s 已备好"
                             " —— 推送入池用「📤推入池」"
