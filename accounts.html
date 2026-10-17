@@ -192,6 +192,14 @@
     <pre id="join-log-pre"></pre>
   </div>
 
+  <div class="log-card" id="cpa-log">
+    <div class="log-title"><span>CPA 入池日志 (切代理 → OAuth → 窗口授权)</span>
+      <span style="display:flex;align-items:center;gap:8px">
+        <button class="btn btn-outline btn-sm btn-danger" id="cpa-stop" style="display:none">⏹ 停止</button>
+        <span id="cpa-log-state"></span></span></div>
+    <pre id="cpa-log-pre"></pre>
+  </div>
+
   <div class="toolbar">
     <div class="toolbar-left">
       <input class="form-input" id="q" placeholder="搜索邮箱 / 代理 / 备注" style="width:200px">
@@ -211,6 +219,7 @@
         <option value="prolite">高级席位</option>
       </select>
       <button class="btn btn-outline btn-sm" id="join-sel" title="母号批量邀请 → 子号开窗刷新接受邀请">👑 加入空间</button>
+      <button class="btn btn-outline btn-sm" id="cpa-sel" title="CPA 全局代理切成账号绑定代理 → 取 Codex OAuth 链接 → 子号窗口授权 → 凭证入池">🔗 入CPA池</button>
       <button class="btn btn-outline btn-sm btn-danger" id="del-sel">删除选中</button>
       <button class="btn btn-ghost btn-sm" id="reload" title="刷新">⟳</button>
     </div>
@@ -230,6 +239,7 @@
           <th style="width:80px">注册</th>
           <th style="width:80px">PAT</th>
           <th style="width:110px">空间</th>
+          <th style="width:80px">凭证</th>
           <th>备注/附加</th>
           <th style="width:150px;text-align:right">操作</th>
         </tr>
@@ -360,6 +370,11 @@ function render() {
     const sp = inSpace(a)
       ? `<span class="pill pill-ok" title="母号 ${esc(a.space_mother || "")} · 席位 ${esc(a.space_seat || "?")} · ${esc(a.space_at || "")}">${esc(a.space)}</span>`
       : `<span class="pill pill-dim">—</span>`;
+    const cpa = a.cpa === "yes"
+      ? `<span class="pill pill-ok" title="Codex OAuth 凭证已入 CPA 池 ${esc(a.cpa_at||"")}">已入池</span>`
+      : a.cpa === "pending"
+        ? `<span class="pill pill-warn copyable" data-c="${esc(a.cpa_url||"")}" title="授权未完成, 点复制 OAuth 链接手动开 ${esc(a.cpa_at||"")}">⏳链接</span>`
+        : `<span class="pill pill-dim">—</span>`;
     return `<tr>
       <td><input type="checkbox" class="ck" data-id="${a.id}" ${sel.has(a.id) ? "checked" : ""}></td>
       <td class="mono" style="color:var(--text-dim)">${idx}</td>
@@ -370,6 +385,7 @@ function render() {
       <td>${reg}</td>
       <td>${pat}</td>
       <td>${sp}</td>
+      <td>${cpa}</td>
       <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(a.note || a.extra || "")}">${esc(a.note || a.extra || "")}</td>
       <td style="text-align:right;white-space:nowrap">
         <button class="btn btn-ghost btn-sm" data-act="open" data-id="${a.id}">开窗</button>
@@ -378,7 +394,7 @@ function render() {
         <button class="btn btn-ghost btn-sm btn-danger" data-act="del" data-id="${a.id}">删</button>
       </td>
     </tr>`;
-  }).join("") || `<tr><td colspan="11" style="text-align:center;color:var(--text-dim);padding:32px">暂无账号 —— 点右上角「导入账号」</td></tr>`;
+  }).join("") || `<tr><td colspan="12" style="text-align:center;color:var(--text-dim);padding:32px">暂无账号 —— 点右上角「导入账号」</td></tr>`;
   $("pager").style.display = list.length > SIZE ? "flex" : "none";
   $("pg-info").textContent = `第 ${page} / ${pages} 页 · 共 ${list.length} 条`;
   $("sel-hint").textContent = sel.size ? `已选 ${sel.size} 个` : "";
@@ -617,10 +633,43 @@ $("join-stop").onclick = async () => {
   toast("已请求停止 —— 当前账号做完就停");
 };
 
+// ---- CPA 入池 ----
+let cpaPollT = null;
+async function pollCpa() {
+  const r = await fetch("/api/accounts/cpa/status").then(r => r.json());
+  const box = $("cpa-log");
+  if (r.running || (r.log || []).length) {
+    box.style.display = "block";
+    $("cpa-log-state").textContent = r.running ? "运行中 …" : "已结束";
+    $("cpa-stop").style.display = r.running ? "" : "none";
+    $("cpa-log-pre").textContent = (r.log || []).join("\n");
+    $("cpa-log-pre").scrollTop = $("cpa-log-pre").scrollHeight;
+  }
+  if (!r.running) { clearInterval(cpaPollT); cpaPollT = null; await load(); }
+}
+$("cpa-sel").onclick = e => {
+  if (!sel.size) return toast("先勾选账号");
+  const ids = [...sel];
+  e.target.disabled = true;
+  post("/api/accounts/cpa-oauth", { ids }).then(r => {
+    e.target.disabled = false;
+    if (r.error) return toast("✗ " + r.error);
+    toast(`CPA 入池启动: ${r.count} 个账号 —— 逐一切代理取链接开窗`);
+    $("cpa-log").style.display = "block";
+    $("cpa-log-state").textContent = "运行中 …";
+    if (!cpaPollT) cpaPollT = setInterval(pollCpa, 1500);
+  });
+};
+$("cpa-stop").onclick = async () => {
+  await post("/api/accounts/cpa/stop", {});
+  toast("已请求停止 —— 当前账号做完就停");
+};
+
 load();
 pollOpen();   // 页面打开时若正好有任务在跑则接上
 pollPat();
 pollJoin();
+pollCpa();
 </script>
 </body>
 </html>
