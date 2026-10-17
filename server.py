@@ -2327,11 +2327,7 @@ def _join_worker(ids, mname, seat="prolite"):
                                         break
                                 except Exception:
                                     pass
-                            if not clicked:
-                                done = "没找到邀请 (%s)" % ",".join(
-                                    res.get("tried") or [])[:80]
-                                break
-                        if done == "ok" or not done:
+                            # 每轮成员校验: 邀请可能免点已自动入队
                             try:
                                 mc = cpg.evaluate(
                                     _MEMBER_CHECK_JS, ws_id)
@@ -2340,6 +2336,16 @@ def _join_worker(ids, mname, seat="prolite"):
                             if mc.get("found") and "invited" \
                                     not in (mc.get("role") or ""):
                                 done = "ok"
+                                break
+                            if clicked:
+                                continue   # 点了按钮, 下轮再校验
+                            if att < 2:
+                                log("  %s: 第%d次没找到邀请,"
+                                    " 3s后重刷" % (email, att + 1))
+                                time.sleep(3)
+                                continue
+                            done = "没找到邀请 (%s)" % ",".join(
+                                res.get("tried") or [])[:80]
                         if done == "ok":
                             a["space"] = ws_name
                             a["space_ws"] = ws_id
@@ -2354,8 +2360,9 @@ def _join_worker(ids, mname, seat="prolite"):
                             log("✓ %s: 已入 %s" % (email, ws_name))
                         else:
                             JOIN_JOB["results"][aid] = \
-                                done or "未知"
-                            log("✗ %s: %s" % (email, done or "未知"))
+                                done or "点了接受但未确认入队"
+                            log("✗ %s: %s" % (email, done
+                                            or "点了接受但未确认入队"))
                     finally:
                         try:
                             cbr.close()
