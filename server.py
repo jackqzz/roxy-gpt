@@ -1513,17 +1513,35 @@ _INVITE_JS = """async ({ws, emails, fid, sid}) => {
         {credentials: 'include'});
     const tok = (await s.json()).accessToken;
     if (!tok) return {status: 0, code: 'no_token'};
+    const H = {'authorization': 'Bearer ' + tok,
+               'chatgpt-account-id': ws,
+               'content-type': 'application/json'};
+    // 席位类型按空间计费方式决定: 用量计费空间要带
+    // seat_type=usage_based, 固定席位空间带了反而 403
+    let seatType = null;
+    try {
+        const acc = await (await fetch(
+            '/backend-api/accounts/check/v4-2023-04-27',
+            {credentials: 'include', headers: H})).json();
+        for (const [k,v] of Object.entries(acc.accounts||{})) {
+            const a = v.account || {};
+            if (a.account_id !== ws) continue;
+            const pt = String(a.plan_type || '');
+            if (pt.includes('usage_based')
+                || a.is_usage_based_seat_enabled === true)
+                seatType = 'usage_based';
+        }
+    } catch (e) {}
+    const body = {email_addresses: emails, flow_id: fid,
+                  role: 'standard-user', resend_emails: true,
+                  submission_id: sid};
+    if (seatType) body.seat_type = seatType;
     const r = await fetch('/backend-api/accounts/' + ws + '/invites', {
-        method: 'POST', credentials: 'include',
-        headers: {'authorization': 'Bearer ' + tok,
-                  'chatgpt-account-id': ws,
-                  'content-type': 'application/json'},
-        body: JSON.stringify({
-            email_addresses: emails, flow_id: fid,
-            role: 'standard-user', seat_type: 'usage_based',
-            resend_emails: true, submission_id: sid})});
-    const body = await r.text();
-    return {status: r.status, body: body.slice(0, 800)};
+        method: 'POST', credentials: 'include', headers: H,
+        body: JSON.stringify(body)});
+    const bodyText = await r.text();
+    return {status: r.status, body: bodyText.slice(0, 800),
+            seat: seatType};
 }"""
 
 # 建 PAT 探针: name 必须有, ttl 是 int 秒 (30 天)
