@@ -3322,6 +3322,65 @@ class H(BaseHTTPRequestHandler):
         if self.path == "/api/accounts/cpa/stop":
             CPA_JOB["stop"] = True
             return self._json({"ok": True})
+        if self.path == "/api/accounts/oauth-callback":
+            # 手动兜底: 贴完整回调链接 (自动按 state 对账号)
+            # 或裸 code (仅当只有一个账号在等回调时)
+            req = self._body()
+            raw = (req.get("url") or "").strip()
+            if not raw:
+                return self._json({"error": "贴回调链接"})
+            qs = urllib.parse.parse_qs(
+                urllib.parse.urlparse(raw).query)
+            code = (qs.get("code") or [""])[0]
+            state = (qs.get("state") or [""])[0]
+            if not code:
+                code = raw.split("code=")[-1].split("&")[0] \
+                    if "code=" in raw else raw
+            accs = _load_accounts()
+            pend = [x for x in accs if x.get("oauth_verifier")]
+            a = None
+            if state:
+                a = next((x for x in pend
+                          if x.get("oauth_state") == state), None)
+            if not a and len(pend) == 1:
+                a = pend[0]
+            if not a and req.get("id"):
+                a = next((x for x in accs
+                          if x["id"] == req["id"]), None)
+            if not a:
+                return self._json({"error":
+                    "对不上账号 (state 匹配失败)"
+                    if state else
+                    "多个账号在等回调, 请贴带 state= 的完整链接"
+                    if len(pend) > 1 else
+                    "没有在等回调的账号 (先跑🔗OAuth授权)"})
+            if not a.get("oauth_verifier"):
+                return self._json(
+                    {"error": "该账号没有进行中的 OAuth,"
+                     " 重跑🔗OAuth授权"})
+            if not code:
+                return self._json({"error": "链接里没有 code="})
+            px = _load_proxies()
+            p = next((x for x in px
+                      if x["id"] == a.get("proxy_id")), None)
+            if not p:
+                return self._json({"error": "账号没绑代理"})
+            j, err = _oauth_exchange(p, code,
+                                     a["oauth_verifier"])
+            if err:
+                return self._json(
+                    {"error": "换token失败: " + err})
+            cred = _oauth_cred(j, _proxy_url(p, "url"))
+            a["cred"] = cred
+            a["cred_file"] = _cred_name(cred)
+            a["cred_at"] = _now()
+            a["cpa"] = "ready"
+            a.pop("oauth_url", None)
+            a.pop("oauth_state", None)
+            a.pop("oauth_verifier", None)
+            _save_accounts(accs)
+            return self._json({"ok": True, "email": a["email"],
+                               "cred_file": a["cred_file"]})
         if self.path == "/api/accounts/cpa-push":
             req = self._body()
             ids = req.get("ids") or []

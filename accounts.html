@@ -198,6 +198,10 @@
         <button class="btn btn-outline btn-sm btn-danger" id="cpa-stop" style="display:none">⏹ 停止</button>
         <span id="cpa-log-state"></span></span></div>
     <pre id="cpa-log-pre"></pre>
+    <div style="display:flex;gap:8px;margin-top:8px;align-items:center">
+      <input class="form-input" id="oauth-cb" placeholder="自动截码失败? 手动兜底: 浏览器地址栏复制 http://localhost:1455/auth/callback?code=...&state=... 整串贴进来" style="flex:1;font-size:12px">
+      <button class="btn btn-outline btn-sm" id="oauth-cb-go">提交回调</button>
+    </div>
   </div>
 
   <div class="toolbar">
@@ -401,6 +405,8 @@ function render() {
   $("pager").style.display = list.length > SIZE ? "flex" : "none";
   $("pg-info").textContent = `第 ${page} / ${pages} 页 · 共 ${list.length} 条`;
   $("sel-hint").textContent = sel.size ? `已选 ${sel.size} 个` : "";
+  // 有账号在等回调 → 手动兜底输入框所在的日志卡保持可见
+  if (accounts.some(a => a.cpa === "pending")) $("cpa-log").style.display = "block";
 }
 
 // ---- 开窗任务轮询 ----
@@ -680,6 +686,15 @@ $("cpa-push").onclick = e => {
 $("cpa-stop").onclick = async () => {
   await post("/api/accounts/cpa/stop", {});
   toast("已请求停止 —— 当前账号做完就停");
+};
+$("oauth-cb-go").onclick = async () => {
+  const url = $("oauth-cb").value.trim();
+  if (!url) return toast("贴回调链接进来");
+  const r = await post("/api/accounts/oauth-callback", { url });
+  if (r.error) return toast("✗ " + r.error);
+  toast(`✓ ${r.email} 凭证已生成: ${r.cred_file} —— 可📤推入池`);
+  $("oauth-cb").value = "";
+  await load();
 };
 
 load();
