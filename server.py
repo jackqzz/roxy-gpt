@@ -550,9 +550,10 @@ UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
       "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36")
 
 
-def _https_get(url, upstream=None, timeout=15):
+def _https_get(url, upstream=None, timeout=15, headers=None):
     """GET http(s) url 返回 body bytes。
-    有上级代理则先建隧道再包 TLS —— 本机无外网时这是唯一出路。"""
+    有上级代理则先建隧道再包 TLS —— 本机无外网时这是唯一出路。
+    headers: dict 额外请求头 (如 Authorization)。"""
     u = urllib.parse.urlparse(url)
     host = u.hostname
     port = u.port or (443 if u.scheme == "https" else 80)
@@ -567,8 +568,10 @@ def _https_get(url, upstream=None, timeout=15):
             ctx = ssl.create_default_context()
             s = ctx.wrap_socket(s, server_hostname=host)
             s.settimeout(timeout)
+        extra = "".join(f"{k}: {v}\r\n" for k, v in (headers or {}).items())
         s.sendall((f"GET {path} HTTP/1.1\r\nHost: {u.netloc}\r\n"
                    f"User-Agent: {UA}\r\nAccept: */*\r\n"
+                   + extra +
                    f"Connection: close\r\n\r\n").encode())
         data = b""
         while True:
@@ -2279,6 +2282,33 @@ class H(BaseHTTPRequestHandler):
                     s[k] = req[k]
             _save_settings(s)
             return self._json({"ok": True})
+        if self.path == "/api/settings/namegen-models":
+            # GET <base>/models —— OpenAI 兼容接口的模型列表。
+            # 可用表单当前值测, 不必先保存 (url/key 可从请求体覆盖)
+            req = self._body()
+            s = _settings()
+            url = (req.get("url") or s.get("namegen_url") or "") \
+                .strip().rstrip("/")
+            key = req.get("key") or s.get("namegen_key") or ""
+            if url.endswith("/chat/completions"):
+                url = url[:-len("/chat/completions")]
+            if not url:
+                return self._json({"error": "先填接口地址"})
+            hdrs = {"Authorization": "Bearer " + key} if key else None
+            up = _upstream() if url.startswith("https://") else None
+            try:
+                body = _https_get(url + "/models", up, 20,
+                                  headers=hdrs)
+                j = json.loads(body.decode(errors="ignore"))
+                models = sorted(m["id"] for m in j.get("data") or []
+                                if m.get("id"))
+                if not models and isinstance(j.get("models"), list):
+                    models = sorted(str(m) for m in j["models"])
+                return self._json({"ok": True, "models": models,
+                                   "count": len(models)})
+            except Exception as e:
+                return self._json({"error": "拉模型列表失败: "
+                                            + str(e)[:120]})
         if self.path == "/api/settings/test-namegen":
             # 用一条样例邮箱实测生成链路
             req = self._body()

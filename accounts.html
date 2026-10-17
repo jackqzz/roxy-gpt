@@ -141,12 +141,15 @@
         <input type="checkbox" id="ng-enabled"> 启用
       </label>
       <input class="form-input" id="ng-url" placeholder="接口地址, 如 http://127.0.0.1:11434/v1" style="width:300px">
-      <input class="form-input" id="ng-model" placeholder="模型名, 如 qwen2.5:3b" style="width:170px">
+      <input class="form-input" id="ng-model" list="ng-models" placeholder="模型名, 点右侧拉列表" style="width:170px">
+      <datalist id="ng-models"></datalist>
+      <button class="btn btn-outline btn-sm" id="ng-models-btn" title="GET <base>/models 拉取可用模型到下拉">📋 拉模型</button>
       <input class="form-input" id="ng-key" type="password" placeholder="API Key (本地可留空)" style="width:160px">
     </div>
     <textarea class="import-textarea" id="ng-prompt" style="min-height:90px" placeholder="系统提示词"></textarea>
-    <div style="display:flex;align-items:center;gap:10px;margin-top:10px">
-      <button class="btn btn-outline btn-sm" id="ng-test">用样例邮箱测试</button>
+    <div style="display:flex;align-items:center;gap:10px;margin-top:10px;flex-wrap:wrap">
+      <input class="form-input" id="ng-test-email" placeholder="测试邮箱 (可自定义, 留空用默认样例)" style="width:280px">
+      <button class="btn btn-outline btn-sm" id="ng-test">生成测试</button>
       <button class="btn btn-primary btn-sm" id="ng-save">保存</button>
       <span class="subtitle" id="ng-msg"></span>
     </div>
@@ -563,11 +566,27 @@ $("ng-save").onclick = async () => {
   $("ng-msg").textContent = "✓ 已保存";
   toast("✓ 资料生成配置已存");
 };
+$("ng-models-btn").onclick = async e => {
+  e.target.disabled = true;
+  $("ng-msg").textContent = "拉取模型列表 …";
+  const r = await post("/api/settings/namegen-models",
+    { url: $("ng-url").value.trim(), key: $("ng-key").value.trim() })
+    .catch(() => null);
+  e.target.disabled = false;
+  if (r && r.ok) {
+    $("ng-models").innerHTML = r.models
+      .map(m => `<option value="${esc(m)}">`).join("");
+    $("ng-msg").textContent = `✓ ${r.count} 个模型 —— 点模型输入框下拉选择`;
+  } else {
+    $("ng-msg").textContent = "✗ " + ((r && r.error) || "请求失败");
+  }
+};
 $("ng-test").onclick = async e => {
   await post("/api/settings", ngPayload());   // 先存再测
   e.target.disabled = true;
   $("ng-msg").textContent = "生成中 …";
-  const r = await post("/api/settings/test-namegen", {}).catch(() => null);
+  const r = await post("/api/settings/test-namegen",
+    { email: $("ng-test-email").value.trim() }).catch(() => null);
   e.target.disabled = false;
   $("ng-msg").textContent = r && r.ok
     ? `✓ ${r.name}, ${r.age} 岁` + (r.logs && r.logs.length ? " · " + r.logs[0] : "")
