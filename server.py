@@ -573,8 +573,8 @@ UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
       "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36")
 
 
-def _https_get(url, upstream=None, timeout=15, headers=None):
-    """GET http(s) url 返回 body bytes。
+def _https_status_get(url, upstream=None, timeout=15, headers=None):
+    """GET http(s) url 返回 (status_code, body bytes)。
     有上级代理则先建隧道再包 TLS —— 本机无外网时这是唯一出路。
     headers: dict 额外请求头 (如 Authorization)。"""
     u = urllib.parse.urlparse(url)
@@ -603,6 +603,10 @@ def _https_get(url, upstream=None, timeout=15, headers=None):
                 break
             data += ch
         head, _, body = data.partition(b"\r\n\r\n")
+        try:
+            status = int(head.split(b" ", 2)[1].split(b" ")[0])
+        except Exception:
+            status = 0
         if b"chunked" in head.lower():        # 简易 dechunk
             out, rest = b"", body
             while True:
@@ -618,12 +622,16 @@ def _https_get(url, upstream=None, timeout=15, headers=None):
                 out += rest[nl + 2: nl + 2 + n]
                 rest = rest[nl + 2 + n + 2:]
             body = out
-        return body
+        return status, body
     finally:
         try:
             s.close()
         except Exception:
             pass
+
+
+def _https_get(url, upstream=None, timeout=15, headers=None):
+    return _https_status_get(url, upstream, timeout, headers)[1]
 
 
 def _http_post_json(url, payload, headers=None, upstream=None,
@@ -2437,7 +2445,9 @@ class H(BaseHTTPRequestHandler):
                 "pace_step_max": s.get("pace_step_max") or 6.0,
                 "pace_type_min": s.get("pace_type_min") or 90,
                 "pace_type_max": s.get("pace_type_max") or 240,
-                "pace_load_ms": s.get("pace_load_ms") or 5000})
+                "pace_load_ms": s.get("pace_load_ms") or 5000,
+                "cpa_url": s.get("cpa_url") or "",
+                "cpa_key": s.get("cpa_key") or ""})
         if self.path == "/api/accounts":
             accs = _load_accounts()
             px = _load_proxies()
@@ -2638,7 +2648,8 @@ class H(BaseHTTPRequestHandler):
                       "namegen_prompt",
                       "pace_step_min", "pace_step_max",
                       "pace_type_min", "pace_type_max",
-                      "pace_load_ms"):
+                      "pace_load_ms",
+                      "cpa_url", "cpa_key"):
                 if k in req:
                     s[k] = req[k]
             _save_settings(s)
@@ -2891,6 +2902,59 @@ class H(BaseHTTPRequestHandler):
         if self.path == "/api/accounts/join/stop":
             JOIN_JOB["stop"] = True
             return self._json({"ok": True})
+        if self.path == "/api/settings/test-cpa":
+            # 连通性: GET <cpa>/v8/management/credentials
+            # (v8 不在退回 /v0/management/api-keys) ——
+            # 顺带验证了管理 key 是否有效
+            req = self._body()
+            s = _settings()
+            url = (req.get("url") or s.get("cpa_url")
+                   or "").strip().rstrip("/")
+            key = req.get("key") or s.get("cpa_key") or ""
+            if not url:
+                return self._json({"error": "先填 CPA 地址"})
+            if "://" not in url:
+                url = "http://" + url
+            hdrs = {"Authorization": "Bearer " + key} if key else None
+            up = _upstream() if url.startswith("https://") else None
+            t0 = time.time()
+            try:
+                st, body = _https_status_get(
+                    url + "/v8/management/credentials",
+                    up, 12, headers=hdrs)
+                ver = "v8"
+                if st == 404:
+                    st, body = _https_status_get(
+                        url + "/v0/management/api-keys",
+                        up, 12, headers=hdrs)
+                    ver = "v0"
+                ms = int((time.time() - t0) * 1000)
+                if st in (401, 403):
+                    return self._json(
+                        {"error": f"管理 Key 无效或未授权 ({st})",
+                         "ms": ms})
+                if st != 200:
+                    return self._json(
+                        {"error": f"HTTP {st}: "
+                                  f"{body[:160].decode(errors='ignore')}",
+                         "ms": ms})
+                try:
+                    j = json.loads(body)
+                except Exception:
+                    j = None
+                n = None
+                if isinstance(j, list):
+                    n = len(j)
+                elif isinstance(j, dict):
+                    for kk in ("credentials", "items", "files",
+                               "api-keys", "api_keys", "data"):
+                        if isinstance(j.get(kk), list):
+                            n = len(j[kk])
+                            break
+                return self._json({"ok": True, "ms": ms, "ver": ver,
+                                   "creds": n})
+            except Exception as e:
+                return self._json({"error": str(e)[:200]})
         if self.path == "/api/settings/test-upstream":
             # 经上级代理 CONNECT api.ipify.org:443 验证可达性
             up = _upstream()

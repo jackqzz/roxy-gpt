@@ -98,7 +98,22 @@
 <div class="page-container">
   <div class="page-header">
     <h1>设置</h1>
-    <div class="subtitle">上级代理 · 母号 · AI 资料生成 · 注册节奏 —— 改动即时生效</div>
+    <div class="subtitle">CPA号池 · 上级代理 · 母号 · AI 资料生成 · 注册节奏 —— 改动即时生效</div>
+  </div>
+
+  <!-- CPA 号池 (CLIProxyAPI) -->
+  <div class="card">
+    <div class="card-title">🔗 CPA 号池 (CLIProxyAPI —— 子号凭证的下游池)</div>
+    <div class="row">
+      <input class="form-input" id="cpa-url" placeholder="CPA 地址, 如 http://127.0.0.1:8317" style="width:280px">
+      <input class="form-input" id="cpa-key" type="password" placeholder="管理 Key (management key)" style="width:220px">
+      <button class="btn btn-outline btn-sm" id="cpa-test">测试连通</button>
+      <button class="btn btn-primary btn-sm" id="cpa-save">保存</button>
+      <span class="subtitle" id="cpa-msg"></span>
+    </div>
+    <div class="hint">
+      连通测试打 <code>/v8/management/credentials</code>（顺带验证管理 key）。子号入空间拿到凭证后推到这个池子统一调度。
+    </div>
   </div>
 
   <!-- 上级代理 -->
@@ -189,6 +204,32 @@ async function post(path, body) {
     body: JSON.stringify(body) });
   return r.json();
 }
+
+// ---- CPA 号池 ----
+async function loadCpa() {
+  const r = await fetch("/api/settings").then(r => r.json());
+  $("cpa-url").value = r.cpa_url || "";
+  $("cpa-key").value = r.cpa_key || "";
+}
+$("cpa-save").onclick = async () => {
+  const r = await post("/api/settings",
+    { cpa_url: $("cpa-url").value.trim(),
+      cpa_key: $("cpa-key").value.trim() });
+  if (r.error) return toast("✗ " + r.error);
+  $("cpa-msg").textContent = "✓ 已保存";
+  toast("✓ CPA 配置已存");
+};
+$("cpa-test").onclick = async e => {
+  e.target.disabled = true;
+  $("cpa-msg").textContent = "测中…";
+  const r = await post("/api/settings/test-cpa",
+    { url: $("cpa-url").value.trim(),
+      key: $("cpa-key").value.trim() }).catch(() => null);
+  e.target.disabled = false;
+  $("cpa-msg").textContent = r && r.ok
+    ? `✓ 连通 ${r.ms}ms · ${r.ver} API` + (r.creds != null ? ` · 池内 ${r.creds} 条凭证` : "")
+    : "✗ " + ((r && r.error) || "请求失败");
+};
 
 // ---- 上级代理 ----
 async function loadUpstream() {
@@ -320,6 +361,7 @@ $("pace-save").onclick = async () => {
 };
 
 loadUpstream();
+loadCpa();
 loadMother();
 loadNamegen();
 loadPace();
