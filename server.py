@@ -1507,7 +1507,7 @@ _WS_TOKEN_JS = """async (wsid) => {
     return j.accessToken || null;
 }"""
 
-_INVITE_JS = """async ({ws, emails, fid, sid}) => {
+_INVITE_JS = """async ({ws, emails, fid, sid, seat}) => {
     const s = await fetch('/api/auth/session?exchange_workspace_token=true'
         + '&workspace_id=' + ws + '&reason=setCurrentAccount',
         {credentials: 'include'});
@@ -1516,9 +1516,9 @@ _INVITE_JS = """async ({ws, emails, fid, sid}) => {
     const H = {'authorization': 'Bearer ' + tok,
                'chatgpt-account-id': ws,
                'content-type': 'application/json'};
-    // 席位类型按空间计费方式决定: 用量计费空间要带
-    // seat_type=usage_based, 固定席位空间带了反而 403
-    let seatType = null;
+    // 席位类型: codex(用量计费) 空间固定 usage_based;
+    // 固定席位空间可选 default(标准) / prolite(高级)
+    let seatType = seat || 'default';
     try {
         const acc = await (await fetch(
             '/backend-api/accounts/check/v4-2023-04-27',
@@ -1793,7 +1793,8 @@ def _pat_worker(ids):
                 r = mpg.evaluate(_INVITE_JS, {
                     "ws": ws_id, "emails": list(emails.values()),
                     "fid": str(uuid.uuid4()),
-                    "sid": str(uuid.uuid4())})
+                    "sid": str(uuid.uuid4()),
+                    "seat": "usage_based"})   # PAT 固定 codex 席
                 if r.get("status") == 401 \
                         or "token_expired" in (r.get("body") or ""):
                     log(f"  母号 token 过期, 刷新页面重取 ({att + 1}/3)")
@@ -1942,9 +1943,11 @@ JOIN_JOB = {"running": False, "log": [], "results": {},
             "stop": False}
 
 
-def _join_worker(ids, mname):
+def _join_worker(ids, mname, seat="default"):
     """空间母号批量邀请 → 子号开窗刷新 → 接受邀请 → 记 space 字段。
-    与 PAT 流程前半段相同, 但收尾不建 PAT, 只落成员身份。"""
+    与 PAT 流程前半段相同, 但收尾不建 PAT, 只落成员身份。
+    seat: default(标准) | prolite(高级) —— codex(usage_based)
+    空间会被强制改回 usage_based。"""
     JOIN_JOB["running"] = True
     JOIN_JOB["stop"] = False
     JOIN_JOB["log"] = []
@@ -1996,7 +1999,8 @@ def _join_worker(ids, mname):
             for i in ids:
                 JOIN_JOB["results"][i] = "母号: " + err
             return
-        log("母号窗口 %s 已连, 目标空间 %s" % (mname, ws_name))
+        log("母号窗口 %s 已连, 目标空间 %s, 席位 %s"
+            % (mname, ws_name, seat))
         with sync_playwright() as pw:
             mbr = pw.chromium.connect_over_cdp(mws)
             mpg = _find_cgpt_page(mbr)
@@ -2017,7 +2021,8 @@ def _join_worker(ids, mname):
                 r = mpg.evaluate(_INVITE_JS, {
                     "ws": ws_id, "emails": list(emails.values()),
                     "fid": str(uuid.uuid4()),
-                    "sid": str(uuid.uuid4())})
+                    "sid": str(uuid.uuid4()),
+                    "seat": seat})
                 if r.get("status") == 401 \
                         or "token_expired" in (r.get("body") or ""):
                     log("  母号 token 过期, 刷新页面重取 (%d/3)"
@@ -2133,6 +2138,7 @@ def _join_worker(ids, mname):
                             a["space"] = ws_name
                             a["space_ws"] = ws_id
                             a["space_mother"] = mname
+                            a["space_seat"] = r.get("seat") or seat
                             a["space_at"] = _now()
                             JOIN_JOB["results"][aid] = \
                                 "已入 " + ws_name
@@ -2870,6 +2876,9 @@ class H(BaseHTTPRequestHandler):
                 return self._json({"error": "加入空间任务在跑"}, 409)
             ids = [i for i in (req.get("ids") or [])]
             mname = (req.get("mother") or "").strip()
+            seat = (req.get("seat") or "default").strip()
+            if seat not in ("default", "prolite"):
+                seat = "default"
             if not ids:
                 return self._json({"error": "没选账号"})
             if not mname:
@@ -2877,7 +2886,7 @@ class H(BaseHTTPRequestHandler):
             if len(ids) > 50:
                 return self._json({"error": "单次最多 50 个"}, 400)
             threading.Thread(target=_join_worker,
-                             args=(ids, mname), daemon=True).start()
+                             args=(ids, mname, seat), daemon=True).start()
             return self._json({"ok": True, "count": len(ids)})
         if self.path == "/api/accounts/join/stop":
             JOIN_JOB["stop"] = True

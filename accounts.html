@@ -206,6 +206,10 @@
       <label class="semi-opt" style="display:flex;align-items:center;gap:4px;font-size:12px;color:var(--text-dim);cursor:pointer" title="等 about-you 资料页出现后自动填姓名+年龄并提交, 数据取🤖资料生成结果">📝填资料<input type="checkbox" id="semi-prof2" checked></label>
       <button class="btn btn-outline btn-sm" id="pat-sel">🧪 PAT检验选中</button>
       <select class="form-select" id="join-mother" style="font-size:12px;max-width:150px" title="邀请子号进谁的空间 (空间母号页导入)"></select>
+      <select class="form-select" id="join-seat" style="font-size:12px" title="席位类型: 标准 default / 高级 prolite (codex用量计费空间固定usage_based)">
+        <option value="default">标准席位</option>
+        <option value="prolite">高级席位</option>
+      </select>
       <button class="btn btn-outline btn-sm" id="join-sel" title="母号批量邀请 → 子号开窗刷新接受邀请">👑 加入空间</button>
       <button class="btn btn-outline btn-sm btn-danger" id="del-sel">删除选中</button>
       <button class="btn btn-ghost btn-sm" id="reload" title="刷新">⟳</button>
@@ -354,7 +358,7 @@ function render() {
           ? `<span class="copyable" data-c="${esc(a.password)}" title="点击复制密码">••••••</span>`
           : "—");
     const sp = inSpace(a)
-      ? `<span class="pill pill-ok" title="母号 ${esc(a.space_mother || "")} · ${esc(a.space_at || "")}">${esc(a.space)}</span>`
+      ? `<span class="pill pill-ok" title="母号 ${esc(a.space_mother || "")} · 席位 ${esc(a.space_seat || "?")} · ${esc(a.space_at || "")}">${esc(a.space)}</span>`
       : `<span class="pill pill-dim">—</span>`;
     return `<tr>
       <td><input type="checkbox" class="ck" data-id="${a.id}" ${sel.has(a.id) ? "checked" : ""}></td>
@@ -596,9 +600,10 @@ $("join-sel").onclick = e => {
   if (!sel.size) return toast("先勾选账号");
   const mother = $("join-mother").value;
   if (!mother) return toast("先选空间母号 (没有就去空间母号页导入)");
+  const seat = $("join-seat").value;
   const ids = [...sel];
   e.target.disabled = true;
-  post("/api/accounts/join-space", { ids, mother }).then(r => {
+  post("/api/accounts/join-space", { ids, mother, seat }).then(r => {
     e.target.disabled = false;
     if (r.error) return toast("✗ " + r.error);
     toast(`加入空间启动: ${r.count} 个账号 → ${mother}`);
