@@ -180,10 +180,12 @@
       <input class="form-input" id="pc-type-max" type="number" step="10" min="0" style="width:80px">
       <span class="subtitle">落地等待(毫秒)</span>
       <input class="form-input" id="pc-load" type="number" step="500" min="0" style="width:90px">
+      <span class="subtitle">代理冷却(分钟)</span>
+      <input class="form-input" id="pc-cool" type="number" step="1" min="0" style="width:80px" title="代理被某账号取用/释放后, 其他账号要等这么久才能再拿到它 (同账号豁免)">
       <button class="btn btn-primary btn-sm" id="pace-save">保存</button>
       <span class="subtitle" id="pace-msg"></span>
     </div>
-    <div class="hint">步骤间隔 = 每步操作之间的停顿; 击键间隔 = 每字符的打字速度; 落地等待 = 打开 chatgpt.com 后的静置。越小越快越像机器。</div>
+    <div class="hint">步骤间隔 = 每步操作之间的停顿; 击键间隔 = 每字符的打字速度; 落地等待 = 打开 chatgpt.com 后的静置。代理冷却 = IP 被取用/释放后对其他账号的隔离期, 同账号续用不拦截。</div>
   </div>
 </div>
 </div>
@@ -348,6 +350,7 @@ async function loadPace() {
   $("pc-type-min").value = r.pace_type_min;
   $("pc-type-max").value = r.pace_type_max;
   $("pc-load").value = r.pace_load_ms;
+  $("pc-cool").value = r.proxy_cool_min ?? 20;
 }
 $("pace-save").onclick = async () => {
   const r = await post("/api/settings", {
@@ -355,7 +358,8 @@ $("pace-save").onclick = async () => {
     pace_step_max: parseFloat($("pc-step-max").value) || 6,
     pace_type_min: parseInt($("pc-type-min").value) || 90,
     pace_type_max: parseInt($("pc-type-max").value) || 240,
-    pace_load_ms: parseInt($("pc-load").value) || 5000 });
+    pace_load_ms: parseInt($("pc-load").value) || 5000,
+    proxy_cool_min: parseInt($("pc-cool").value) || 20 });
   if (r.error) return toast("✗ " + r.error);
   $("pace-msg").textContent = "✓ 已保存";
   toast("✓ 注册节奏已存");

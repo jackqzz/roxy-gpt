@@ -564,20 +564,52 @@ def _new_account(email, password, mail_url="", extra=""):
 
 # ---------------- 选代理 / 绑定 ----------------
 PICK_LIMIT = 3          # 一条代理最多绑几个账号
+PICK_LAST = {"cooled": 0}   # 上次 pick 时被冷却拦了几条 (日志用)
+
+
+def _cool_secs():
+    try:
+        return int(float(
+            _settings().get("proxy_cool_min") or 20) * 60)
+    except Exception:
+        return 1200
+
+
+def _touch_cool(p, email):
+    """账号取用/释放过这条代理 -> 对其他账号进入冷却期。
+    同一账号 (bound 里 / 触发冷却的) 豁免。"""
+    p["cool_email"] = email
+    p["cool_until"] = time.strftime(
+        "%Y-%m-%dT%H:%M:%S",
+        time.localtime(time.time() + _cool_secs()))
+
+
+def _cooling(p, email):
+    """email 取这条代理会被冷却拦住吗。"""
+    cu = p.get("cool_until")
+    if not cu:
+        return False
+    if email and (email in (p.get("bound") or [])
+                  or email == p.get("cool_email")):
+        return False          # 同账号/持有人豁免
+    return cu > _now()        # iso 串字典序 = 时间序
 
 
 def _bound_count(p):
     return len(p.get("bound") or [])
 
 
-def _pick_proxy(px, limit=PICK_LIMIT):
-    """未封禁 + 绑定<limit; 排序: 绑定数 -> 已知失效沉底 -> 最久未用。"""
+def _pick_proxy(px, email=None, limit=PICK_LIMIT):
+    """未封禁 + 绑定<limit + 非冷却(对 email);
+    排序: 绑定数 -> 已知失效沉底 -> 最久未用。"""
     cands = [p for p in px if not p.get("banned")
              and _bound_count(p) < limit]
-    cands.sort(key=lambda p: (_bound_count(p),
+    avail = [p for p in cands if not _cooling(p, email)]
+    PICK_LAST["cooled"] = len(cands) - len(avail)
+    avail.sort(key=lambda p: (_bound_count(p),
                               p.get("alive") is False,
                               p.get("last_used") or "1970-01-01"))
-    return cands[0] if cands else None
+    return avail[0] if avail else None
 
 
 def _bind_proxy(p, email):
@@ -585,12 +617,14 @@ def _bind_proxy(p, email):
     if email not in bound:
         bound.append(email)
     p["last_used"] = _now()
+    _touch_cool(p, email)
 
 
 def _unbind_proxy(p, email):
     bound = p.get("bound") or []
     if email in bound:
         bound.remove(email)
+        _touch_cool(p, email)
         return True
     return False
 
@@ -2003,10 +2037,14 @@ def _pat_worker(ids):
                     p = next((x for x in px
                               if x["id"] == a.get("proxy_id")), None)
                     if not p or p.get("banned"):
-                        p = _pick_proxy(px)
+                        p = _pick_proxy(px, email)
                         if not p:
-                            PAT_JOB["results"][aid] = "没有可用代理"
-                            log(f"✗ {email}: 没有可用代理")
+                            cool = (" (冷却中 %d 条)"
+                                    % PICK_LAST["cooled"]
+                                    if PICK_LAST["cooled"] else "")
+                            PAT_JOB["results"][aid] = \
+                                "没有可用代理" + cool
+                            log(f"✗ {email}: 没有可用代理{cool}")
                             continue
                         _bind_proxy(p, email)
                         a["proxy_id"] = p["id"]
@@ -2224,10 +2262,15 @@ def _join_worker(ids, mname, seat="default"):
                     p = next((x for x in px
                               if x["id"] == a.get("proxy_id")), None)
                     if not p or p.get("banned"):
-                        p = _pick_proxy(px)
+                        p = _pick_proxy(px, email)
                         if not p:
-                            JOIN_JOB["results"][aid] = "没有可用代理"
-                            log("✗ %s: 没有可用代理" % email)
+                            cool = (" (冷却中 %d 条)"
+                                    % PICK_LAST["cooled"]
+                                    if PICK_LAST["cooled"] else "")
+                            JOIN_JOB["results"][aid] = \
+                                "没有可用代理" + cool
+                            log("✗ %s: 没有可用代理%s"
+                                % (email, cool))
                             continue
                         _bind_proxy(p, email)
                         a["proxy_id"] = p["id"]
@@ -2927,15 +2970,17 @@ def _open_worker(accs, semiauto=False, watch_code=False,
                 if p and not p.get("banned"):
                     bound = False
                 else:
-                    p = _pick_proxy(px)
+                    p = _pick_proxy(px, email)
                     bound = True
                     if p:
                         _bind_proxy(p, email)
                         a["proxy_id"] = p["id"]
                         _save_proxies(px)
             if not p:
-                OPEN_JOB["results"][a["id"]] = "没有可用代理"
-                log(f"✗ {email}: 没有可用代理")
+                cool = (" (冷却中 %d 条)" % PICK_LAST["cooled"]
+                        if PICK_LAST["cooled"] else "")
+                OPEN_JOB["results"][a["id"]] = "没有可用代理" + cool
+                log(f"✗ {email}: 没有可用代理{cool}")
                 return
             if bound:
                 log(f"→ {email}: 绑代理 "
@@ -3126,6 +3171,7 @@ class H(BaseHTTPRequestHandler):
                 "pace_type_min": s.get("pace_type_min") or 90,
                 "pace_type_max": s.get("pace_type_max") or 240,
                 "pace_load_ms": s.get("pace_load_ms") or 5000,
+                "proxy_cool_min": s.get("proxy_cool_min") or 20,
                 "cpa_url": s.get("cpa_url") or "",
                 "cpa_key": s.get("cpa_key") or ""})
         if self.path == "/api/accounts":
@@ -3381,7 +3427,7 @@ class H(BaseHTTPRequestHandler):
                       "namegen_prompt",
                       "pace_step_min", "pace_step_max",
                       "pace_type_min", "pace_type_max",
-                      "pace_load_ms",
+                      "pace_load_ms", "proxy_cool_min",
                       "cpa_url", "cpa_key"):
                 if k in req:
                     s[k] = req[k]

@@ -342,6 +342,10 @@ function render() {
       ? `<span class="pill pill-bad">已封禁</span>`
       : `<span class="pill pill-dim">—</span>`;
     const bound = (p.bound || []).length;
+    const coolMs = p.cool_until ? (new Date(p.cool_until) - Date.now()) : 0;
+    const cool = coolMs > 0
+      ? ` <span class="pill pill-dim" title="${esc(p.cool_email || "?")} 取用/释放后冷却中 → ${esc(p.cool_until)}">⏳${Math.ceil(coolMs / 60000)}m</span>`
+      : "";
     return `<tr>
       <td><input type="checkbox" class="ck" data-id="${p.id}" ${sel.has(p.id) ? "checked" : ""}></td>
       <td class="mono" style="color:var(--text-dim)">${idx}</td>
@@ -350,7 +354,7 @@ function render() {
       <td>${health}</td>
       <td class="mono">${esc(p.exit_ip || "—")}</td>
       <td>${ban}</td>
-      <td class="mono">${bound || "—"}</td>
+      <td class="mono">${bound || "—"}${cool}</td>
       <td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(p.note || "")}">${esc(p.note || "")}</td>
       <td style="text-align:right;white-space:nowrap">
         <button class="btn btn-ghost btn-sm" data-act="check" data-id="${p.id}">测活</button>
