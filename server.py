@@ -3,9 +3,11 @@
 阶段1: 代理池 — socks5 静态代理自管理, 无下层同步。
 导入/导出/测活/备注/封禁标记; bound[] 预留账号绑定。"""
 import base64
+import hashlib
 import json
 import os
 import re
+import secrets
 import socket
 import ssl
 import threading
@@ -2233,51 +2235,6 @@ def _cpa_call(method, path, body=None, timeout=15):
     return st, j, None
 
 
-def _cpa_set_proxy(purl):
-    """写 CPA 全局代理 (v8 优先, 404 降 v0)。返回 err|None。"""
-    st, j, err = _cpa_call(
-        "PUT", "/v8/management/config/requests/proxy-url", purl)
-    if st == 404:
-        st, j, err = _cpa_call("PUT", "/v0/management/proxy-url",
-                               {"value": purl})
-    return err
-
-
-def _cpa_auth_url():
-    """取 Codex OAuth 链接 (v8/v0 自动)。返回 (j, err)。"""
-    st, j, err = _cpa_call(
-        "GET", "/v8/management/oauth/auth-url?provider=codex",
-        timeout=30)
-    if st == 404:
-        st, j, err = _cpa_call(
-            "GET", "/v0/management/codex-auth-url", timeout=30)
-    return j, err
-
-
-def _cpa_oauth_status(state):
-    """轮询 OAuth 状态, 返回 (j, err)。status: wait/ok/error。"""
-    q = urllib.parse.quote(state or "")
-    st, j, err = _cpa_call(
-        "GET", "/v8/management/oauth/status?state=" + q)
-    if st == 404:
-        st, j, err = _cpa_call(
-            "GET", "/v0/management/get-auth-status?state=" + q)
-    return j, err
-
-
-def _cpa_oauth_callback(state, redirect_url):
-    """把浏览器抓到的回调 URL 转交 CPA 换 token。返回 err|None。"""
-    st, j, err = _cpa_call(
-        "POST", "/v8/management/oauth/callback",
-        {"provider": "codex", "state": state,
-         "redirect_url": redirect_url})
-    if st == 404:
-        st, j, err = _cpa_call(
-            "POST", "/v0/management/oauth-callback",
-            {"redirect_url": redirect_url})
-    return err
-
-
 def _cpa_list_creds():
     """池内凭证列表 (v8 credentials / v0 auth-files)。"""
     st, j, err = _cpa_call("GET", "/v8/management/credentials")
@@ -2286,29 +2243,164 @@ def _cpa_list_creds():
     return j, err
 
 
-def _cpa_oauth_start(a):
-    """给账号起 Codex OAuth: 先把 CPA 全局代理切成该账号
-    绑定的代理 (全链路同 IP), 再取 auth-url。
-    返回 (auth_url, state, err)。"""
-    px = _load_proxies()
-    p = next((x for x in px if x["id"] == a.get("proxy_id")),
-             None)
-    if not p:
-        return None, None, "账号没绑代理"
-    purl = _proxy_url(p, "url")
-    err = _cpa_set_proxy(purl)
-    if err:
-        return None, None, "设 CPA 代理失败: " + err
-    j, err = _cpa_auth_url()
-    if err:
-        return None, None, "取 OAuth 链接失败: " + err
-    j = j or {}
-    url = j.get("url") or j.get("auth_url") or j.get("auth-url")
-    state = j.get("state")
-    if not url:
-        return None, None, \
-            "响应里没有 auth url: %s" % json.dumps(j)[:150]
-    return url, state, None
+def _cpa_push_cred(name, cred):
+    """推凭证 JSON 入 CPA 池 (v8/v0 auth-files?name=, 原始 JSON body)。
+    返回 err|None。"""
+    q = "?name=" + urllib.parse.quote(name)
+    st, j, err = _cpa_call(
+        "POST", "/v8/management/auth-files" + q, cred, timeout=30)
+    if st == 404:
+        st, j, err = _cpa_call(
+            "POST", "/v0/management/auth-files" + q, cred,
+            timeout=30)
+    return err
+
+
+# ---------------- Codex OAuth 本地实现 ----------------
+# 照 CLIProxyAPI internal/auth/codex 源码: PKCE → auth.openai.com
+# 授权 → 回调 code → 经账号代理换 token → CPA 凭证 JSON。
+OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
+OAUTH_AUTH_URL = "https://auth.openai.com/oauth/authorize"
+OAUTH_TOKEN_HOST = "auth.openai.com"
+OAUTH_TOKEN_PATH = "/oauth/token"
+OAUTH_REDIRECT = "http://localhost:1455/auth/callback"
+
+
+def _b64u(b):
+    return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+
+
+def _oauth_gen():
+    """本地算 PKCE + state → (auth_url, state, code_verifier)。
+    不依赖 CPA —— 链接参数照 CPA 源码一模一样。"""
+    verifier = _b64u(secrets.token_bytes(96))
+    challenge = _b64u(hashlib.sha256(verifier.encode()).digest())
+    state = secrets.token_hex(16)
+    q = urllib.parse.urlencode({
+        "client_id": OAUTH_CLIENT_ID,
+        "response_type": "code",
+        "redirect_uri": OAUTH_REDIRECT,
+        "scope": "openid email profile offline_access",
+        "state": state,
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+        "prompt": "login",
+        "id_token_add_organizations": "true",
+        "codex_cli_simplified_flow": "true"})
+    return OAUTH_AUTH_URL + "?" + q, state, verifier
+
+
+def _jwt_claims(tok):
+    """解 JWT payload (不验签)。返回 claims dict。"""
+    try:
+        pl = (tok or "").split(".")[1]
+        pl += "=" * (-len(pl) % 4)
+        return json.loads(base64.urlsafe_b64decode(pl))
+    except Exception:
+        return {}
+
+
+def _post_form_via(p, host, path, form, timeout=30):
+    """经账号代理 p 发 x-www-form-urlencoded POST → https://host/path。
+    token 交换必须走注册/授权同一 IP。返回 (status, body)。"""
+    s = _dial_via_upstream(p, host, 443, timeout)
+    s = ssl.create_default_context().wrap_socket(
+        s, server_hostname=host)
+    s.settimeout(timeout)
+    try:
+        s.sendall((
+            "POST %s HTTP/1.1\r\nHost: %s\r\n"
+            "Content-Type: application/x-www-form-urlencoded\r\n"
+            "Accept: application/json\r\n"
+            "Content-Length: %d\r\n"
+            "Connection: close\r\n\r\n"
+            % (path, host, len(form))).encode() + form)
+        buf = b""
+        while True:
+            ch = s.recv(8192)
+            if not ch:
+                break
+            buf += ch
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+    head, _, body = buf.partition(b"\r\n\r\n")
+    st = int(head.split(b" ", 2)[1]) if b" " in head else 0
+    if b"chunked" in head.lower():
+        out, rest = b"", body
+        while True:
+            nl = rest.find(b"\r\n")
+            if nl < 0:
+                break
+            try:
+                n = int(rest[:nl].split(b";")[0].strip(), 16)
+            except ValueError:
+                break
+            if n == 0:
+                break
+            out += rest[nl + 2: nl + 2 + n]
+            rest = rest[nl + 2 + n + 2:]
+        body = out
+    return st, body
+
+
+def _oauth_exchange(p, code, verifier):
+    """经账号代理用 code 换 token。返回 (token_resp dict, err)。"""
+    form = urllib.parse.urlencode({
+        "grant_type": "authorization_code",
+        "client_id": OAUTH_CLIENT_ID,
+        "code": code,
+        "redirect_uri": OAUTH_REDIRECT,
+        "code_verifier": verifier}).encode()
+    try:
+        st, body = _post_form_via(p, OAUTH_TOKEN_HOST,
+                                  OAUTH_TOKEN_PATH, form)
+    except Exception as e:
+        return None, str(e)[:160]
+    try:
+        j = json.loads(body) if body else {}
+    except Exception:
+        j = {}
+    if st != 200:
+        return None, "token 交换 HTTP %d: %s" % (
+            st, (body or b"")[:160].decode(errors="ignore"))
+    if not j.get("access_token"):
+        return None, "响应里没有 access_token"
+    return j, None
+
+
+def _oauth_cred(j, proxy_url):
+    """token 响应 → CPA codex 凭证 JSON (字段照 CodexTokenStorage,
+    带 proxy_url —— 池子消费凭证时继续走同一 IP)。"""
+    idt = j.get("id_token") or ""
+    cl = _jwt_claims(idt)
+    auth = cl.get("https://api.openai.com/auth") or {}
+    now = time.time()
+    exp = now + int(j.get("expires_in") or 0)
+    rfc = lambda t: time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                  time.gmtime(t))
+    return {
+        "id_token": idt,
+        "access_token": j.get("access_token") or "",
+        "refresh_token": j.get("refresh_token") or "",
+        "account_id": auth.get("chatgpt_account_id") or "",
+        "last_refresh": rfc(now),
+        "email": cl.get("email") or "",
+        "type": "codex",
+        "expired": rfc(exp),
+        "plan_type": auth.get("chatgpt_plan_type") or "free",
+        "proxy_url": proxy_url,
+    }
+
+
+def _cred_name(cred):
+    """codex-<8hex>-<email>-<plan>.json (照 CPA 池内命名风格)。"""
+    em = (cred.get("email") or "unknown").strip()
+    plan = (cred.get("plan_type") or "free").strip()
+    return "codex-%s-%s-%s.json" % (
+        secrets.token_hex(4), em, plan)
 
 
 CPA_JOB = {"running": False, "log": [], "results": {},
@@ -2316,8 +2408,9 @@ CPA_JOB = {"running": False, "log": [], "results": {},
 
 
 def _cpa_worker(ids):
-    """逐账号: 切 CPA 全局代理=账号代理 → 取 Codex OAuth 链接
-    → 开子号窗口走授权 → 捕获回调/轮询状态 → 标 a.cpa。"""
+    """逐账号本地 OAuth: 算链接 → 开(原/同IP新)子号窗口走授权
+    → 截 localhost:1455 回调 → 经账号代理换 token
+    → 生成带 proxy_url 的 CPA 凭证 JSON 存账号 (a.cpa=ready)。"""
     CPA_JOB["running"] = True
     CPA_JOB["stop"] = False
     CPA_JOB["log"] = []
@@ -2328,13 +2421,6 @@ def _cpa_worker(ids):
             "%s %s" % (time.strftime("%H:%M:%S"), m))
 
     from playwright.sync_api import sync_playwright
-    _, err0 = _cpa_list_creds()
-    if err0:
-        log("✗ CPA 连不通: " + err0)
-        for i in ids:
-            CPA_JOB["results"][i] = "CPA: " + err0
-        CPA_JOB["running"] = False
-        return
     try:
         with sync_playwright() as pw:
             for aid in ids:
@@ -2347,20 +2433,21 @@ def _cpa_worker(ids):
                     continue
                 email = a["email"]
                 try:
-                    # 1) 切 CPA 全局代理 + 取链接
-                    url, state, err = _cpa_oauth_start(a)
-                    if err:
-                        CPA_JOB["results"][aid] = err
-                        log("✗ %s: %s" % (email, err))
-                        continue
-                    a["cpa_state"] = state
-                    a["cpa_url"] = url
-                    log("→ %s: 代理已切, OAuth 链接已取" % email)
-                    # 2) 开子号窗口走授权页
                     px = _load_proxies()
                     p = next((x for x in px
                               if x["id"] == a.get("proxy_id")),
                              None)
+                    if not p:
+                        CPA_JOB["results"][aid] = "账号没绑代理"
+                        log("✗ %s: 没绑代理, 全链同IP做不到" % email)
+                        continue
+                    # 1) 本地算 OAuth 链接 (不依赖 CPA)
+                    url, state, verifier = _oauth_gen()
+                    a["oauth_state"] = state
+                    a["oauth_url"] = url
+                    log("→ %s: OAuth 链接已生成" % email)
+                    # 2) 开窗口: 优先复用原来的窗 (win 还在直接连),
+                    #    没有就按绑定的同一代理新建 —— IP 不变
                     dir_id, cws, err = _roxy_open_for(email, p)
                     if err or not cws:
                         CPA_JOB["results"][aid] = "开窗: " + (err or "")
@@ -2374,36 +2461,26 @@ def _cpa_worker(ids):
                             cpg = cbr.contexts[0].new_page()
                         cpg.goto(url, wait_until="domcontentloaded",
                                  timeout=60000)
-                        done = None
+                        code = None
                         deadline = time.time() + 300   # 5 分钟授权窗口
-                        submitted = False
                         while time.time() < deadline:
                             if CPA_JOB["stop"]:
-                                done = "手动停止"
                                 break
-                            # 2a) 回调已直接打到 CPA? 查状态
-                            if state:
-                                j, _ = _cpa_oauth_status(state)
-                                sv = ((j or {}).get("status") or ""
-                                      ).lower()
-                                if sv in ("ok", "success", "done"):
-                                    done = "ok"
-                                    break
-                                if sv == "error":
-                                    done = "CPA 报错: %s" % \
-                                        str(j)[:120]
-                                    break
                             cur = cpg.url or ""
-                            # 2b) 页面停在回调地址 (子号浏览器到不了
-                            #     CPA 时) —— 抓 URL 转交 CPA 换 token
-                            if "code=" in cur and "state=" in cur \
-                                    and not submitted:
-                                cerr = _cpa_oauth_callback(state, cur)
-                                submitted = True
-                                log("  %s: 回调已截获转交 CPA %s"
-                                    % (email, "✓" if not cerr
-                                       else "✗ " + cerr))
-                            # 2c) 有授权按钮就点 (尽力而为)
+                            # 回调打到 localhost:1455 —— 浏览器
+                            # 到不了, 页面停在错误页但 URL 里有 code
+                            if "code=" in cur:
+                                qs = urllib.parse.parse_qs(
+                                    urllib.parse.urlparse(cur).query)
+                                got = (qs.get("state") or [""])[0]
+                                if got and got != state:
+                                    log("  %s: state 不匹配, 继续等"
+                                        % email)
+                                else:
+                                    code = (qs.get("code")
+                                            or [None])[0]
+                                    break
+                            # 有授权按钮就点 (尽力而为)
                             for sel in (
                                     'button:has-text("Authorize")',
                                     'button:has-text("Allow")',
@@ -2422,18 +2499,36 @@ def _cpa_worker(ids):
                                 except Exception:
                                     pass
                             cpg.wait_for_timeout(2000)
-                        if not done:
-                            done = "等待授权超时"
-                        if done == "ok":
-                            a["cpa"] = "yes"
-                            a["cpa_at"] = _now()
-                            CPA_JOB["results"][aid] = "已入池"
-                            log("✓ %s: OAuth 完成, 凭证已入池" % email)
-                        else:
+                        if not code:
+                            done = "手动停止" if CPA_JOB["stop"] \
+                                else "等回调超时"
                             a["cpa"] = "pending"
                             CPA_JOB["results"][aid] = done
-                            log("✗ %s: %s (窗口授权页留着,"
-                                " 可人工继续)" % (email, done))
+                            log("✗ %s: %s (授权页留在窗口里,"
+                                " 可手动继续后重跑)" % (email, done))
+                            continue
+                        log("  %s: 回调已截获, 走账号代理换 token"
+                            % email)
+                        # 3) 同 IP 换 token
+                        j, err = _oauth_exchange(p, code, verifier)
+                        if err:
+                            a["cpa"] = "pending"
+                            CPA_JOB["results"][aid] = "换token: " + err
+                            log("✗ %s: %s" % (email, err))
+                            continue
+                        # 4) 组 CPA 凭证 JSON (proxy_url=账号代理)
+                        cred = _oauth_cred(
+                            j, _proxy_url(p, "url"))
+                        a["cred"] = cred
+                        a["cred_file"] = _cred_name(cred)
+                        a["cred_at"] = _now()
+                        a["cpa"] = "ready"
+                        a.pop("oauth_url", None)
+                        a.pop("oauth_state", None)
+                        CPA_JOB["results"][aid] = "凭证已生成"
+                        log("✓ %s: rt/at 到手, 凭证 %s 已备好"
+                            " —— 推送入池用「📤推入池」"
+                            % (email, a["cred_file"]))
                     finally:
                         try:
                             cbr.close()
@@ -2451,7 +2546,7 @@ def _cpa_worker(ids):
                     _save_accounts(accs_all)
     finally:
         CPA_JOB["running"] = False
-        log("—— CPA OAuth 结束 ——"
+        log("—— OAuth 授权结束 ——"
             + (" (手动停止)" if CPA_JOB["stop"] else ""))
 
 
@@ -2788,22 +2883,25 @@ class H(BaseHTTPRequestHandler):
             return self._json(JOIN_JOB)
         if self.path == "/api/accounts/cpa/status":
             return self._json(CPA_JOB)
-        if self.path == "/api/cpa/proxy":
-            st, j, err = _cpa_call(
-                "GET", "/v8/management/config/requests/proxy-url")
-            if st == 404:
-                st, j, err = _cpa_call(
-                    "GET", "/v0/management/config")
-                if j and isinstance(j, dict):
-                    j = j.get("proxy-url")
-            if err:
-                return self._json({"error": err})
-            return self._json({"ok": True, "proxy": j})
-        if self.path == "/api/cpa/auth-url":
-            j, err = _cpa_auth_url()
-            if err:
-                return self._json({"error": err})
-            return self._json(j or {"raw": j})
+        m = re.fullmatch(r"/api/accounts/([0-9a-f-]+)/cred",
+                         self.path)
+        if m:
+            a = next((x for x in _load_accounts()
+                      if x["id"] == m.group(1)), None)
+            if not a or not a.get("cred"):
+                return self._json({"error": "没有凭证"}, 404)
+            data = json.dumps(a["cred"], ensure_ascii=False,
+                              indent=2).encode()
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header(
+                "content-disposition",
+                'attachment; filename="%s"'
+                % (a.get("cred_file") or "codex-cred.json"))
+            self.send_header("content-length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         if self.path.startswith("/api/proxies/export"):
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             fmt = (q.get("fmt") or ["colon"])[0]
@@ -3194,15 +3292,31 @@ class H(BaseHTTPRequestHandler):
         if self.path == "/api/accounts/cpa/stop":
             CPA_JOB["stop"] = True
             return self._json({"ok": True})
-        if self.path == "/api/cpa/proxy":
+        if self.path == "/api/accounts/cpa-push":
             req = self._body()
-            purl = (req.get("proxy") or "").strip()
-            if not purl:
-                return self._json({"error": "缺 proxy"})
-            err = _cpa_set_proxy(purl)
-            if err:
-                return self._json({"error": err})
-            return self._json({"ok": True, "proxy": purl})
+            ids = req.get("ids") or []
+            if not ids:
+                return self._json({"error": "没选账号"})
+            accs = _load_accounts()
+            ok, failed = 0, {}
+            for a in accs:
+                if a["id"] not in ids:
+                    continue
+                cred = a.get("cred")
+                if not cred:
+                    failed[a["email"]] = "没有凭证 (先跑OAuth)"
+                    continue
+                err = _cpa_push_cred(
+                    a.get("cred_file") or _cred_name(cred), cred)
+                if err:
+                    failed[a["email"]] = err
+                else:
+                    a["cpa"] = "yes"
+                    a["cpa_at"] = _now()
+                    ok += 1
+            _save_accounts(accs)
+            return self._json({"ok": ok,
+                               "failed": failed or None})
         if self.path == "/api/settings/test-cpa":
             # 连通性: GET <cpa>/v8/management/credentials
             # (v8 不在退回 /v0/management/api-keys) ——

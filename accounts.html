@@ -193,7 +193,7 @@
   </div>
 
   <div class="log-card" id="cpa-log">
-    <div class="log-title"><span>CPA 入池日志 (切代理 → OAuth → 窗口授权)</span>
+    <div class="log-title"><span>OAuth 授权日志 (本地算链接 → 窗口授权 → 同IP换token → 凭证)</span>
       <span style="display:flex;align-items:center;gap:8px">
         <button class="btn btn-outline btn-sm btn-danger" id="cpa-stop" style="display:none">⏹ 停止</button>
         <span id="cpa-log-state"></span></span></div>
@@ -219,7 +219,8 @@
         <option value="prolite">高级席位</option>
       </select>
       <button class="btn btn-outline btn-sm" id="join-sel" title="母号批量邀请 → 子号开窗刷新接受邀请">👑 加入空间</button>
-      <button class="btn btn-outline btn-sm" id="cpa-sel" title="CPA 全局代理切成账号绑定代理 → 取 Codex OAuth 链接 → 子号窗口授权 → 凭证入池">🔗 入CPA池</button>
+      <button class="btn btn-outline btn-sm" id="cpa-sel" title="本地算OAuth链接 → 开(原/同IP新)窗口授权 → 截回调 → 经账号代理换token → 生成CPA凭证">🔗 OAuth授权</button>
+      <button class="btn btn-outline btn-sm" id="cpa-push" title="把已生成的凭证 JSON 推入 CPA 号池 (auth-files)">📤 推入池</button>
       <button class="btn btn-outline btn-sm btn-danger" id="del-sel">删除选中</button>
       <button class="btn btn-ghost btn-sm" id="reload" title="刷新">⟳</button>
     </div>
@@ -371,10 +372,12 @@ function render() {
       ? `<span class="pill pill-ok" title="母号 ${esc(a.space_mother || "")} · 席位 ${esc(a.space_seat || "?")} · ${esc(a.space_at || "")}">${esc(a.space)}</span>`
       : `<span class="pill pill-dim">—</span>`;
     const cpa = a.cpa === "yes"
-      ? `<span class="pill pill-ok" title="Codex OAuth 凭证已入 CPA 池 ${esc(a.cpa_at||"")}">已入池</span>`
-      : a.cpa === "pending"
-        ? `<span class="pill pill-warn copyable" data-c="${esc(a.cpa_url||"")}" title="授权未完成, 点复制 OAuth 链接手动开 ${esc(a.cpa_at||"")}">⏳链接</span>`
-        : `<span class="pill pill-dim">—</span>`;
+      ? `<a class="pill pill-ok" href="/api/accounts/${a.id}/cred" title="已入CPA池 ${esc(a.cpa_at||"")} —— 点下载凭证 ${esc(a.cred_file||"")}">已入池</a>`
+      : a.cpa === "ready"
+        ? `<a class="pill" style="background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe" href="/api/accounts/${a.id}/cred" title="凭证已备好 ${esc(a.cred_at||"")} —— 点下载 ${esc(a.cred_file||"")}, 勾选后📤推入池">已生成</a>`
+        : a.cpa === "pending"
+          ? `<span class="pill pill-warn copyable" data-c="${esc(a.oauth_url||"")}" title="授权未完成, 点复制 OAuth 链接手动开">⏳授权</span>`
+          : `<span class="pill pill-dim">—</span>`;
     return `<tr>
       <td><input type="checkbox" class="ck" data-id="${a.id}" ${sel.has(a.id) ? "checked" : ""}></td>
       <td class="mono" style="color:var(--text-dim)">${idx}</td>
@@ -654,10 +657,24 @@ $("cpa-sel").onclick = e => {
   post("/api/accounts/cpa-oauth", { ids }).then(r => {
     e.target.disabled = false;
     if (r.error) return toast("✗ " + r.error);
-    toast(`CPA 入池启动: ${r.count} 个账号 —— 逐一切代理取链接开窗`);
+    toast(`OAuth 授权启动: ${r.count} 个账号 —— 开窗走完授权页`);
     $("cpa-log").style.display = "block";
     $("cpa-log-state").textContent = "运行中 …";
     if (!cpaPollT) cpaPollT = setInterval(pollCpa, 1500);
+  });
+};
+$("cpa-push").onclick = e => {
+  if (!sel.size) return toast("先勾选账号");
+  const ids = [...sel];
+  e.target.disabled = true;
+  post("/api/accounts/cpa-push", { ids }).then(r => {
+    e.target.disabled = false;
+    if (r.error) return toast("✗ " + r.error);
+    const fails = r.failed
+      ? Object.entries(r.failed).map(([k, v]) => k + ": " + v).join(" · ")
+      : "";
+    toast(`已推入池 ${r.ok} 个` + (fails ? " · ✗ " + fails : ""));
+    load();
   });
 };
 $("cpa-stop").onclick = async () => {
