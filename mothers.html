@@ -93,9 +93,18 @@ function billCell(b) {
   if (!b) return `<span class="pill pill-dim">未查</span>`;
   const bits = [];
   if (b.renewal) {
-    const d = b.days;
-    const cls = d != null && d <= 3 ? "pill-bad" : d != null && d <= 7 ? "pill-warn" : "pill-ok";
-    bits.push(`<span class="pill ${cls}" title="续费/到期 ${esc(b.renewal)}${d != null ? ` · 剩 ${d} 天` : ""}">${esc(b.renewal.slice(5))}${d != null ? ` 剩${d}天` : ""}</span>`);
+    // 剩余倒计时: <1天精确到分钟 (left_min), 老的记录回退 days
+    const m = b.left_min != null ? b.left_min : (b.days != null ? b.days * 1440 : null);
+    let leftTxt = "", cls = "pill-ok";
+    if (m != null) {
+      if (m <= 0) { leftTxt = "已到期"; cls = "pill-bad"; }
+      else if (m < 60) { leftTxt = `剩${m}分`; cls = "pill-bad"; }
+      else if (m < 1440) { leftTxt = `剩${Math.floor(m / 60)}时${m % 60}分`; cls = "pill-bad"; }
+      else if (m <= 4320) { leftTxt = `剩${Math.floor(m / 1440)}天`; cls = "pill-bad"; }
+      else if (m <= 10080) { leftTxt = `剩${Math.floor(m / 1440)}天`; cls = "pill-warn"; }
+      else leftTxt = `剩${Math.floor(m / 1440)}天`;
+    }
+    bits.push(`<span class="pill ${cls}" title="续费/到期 ${esc(b.renewal)}${leftTxt ? " · " + leftTxt : ""}">${esc(b.renewal.slice(5, 16))} ${leftTxt}</span>`);
   }
   if (b.price) bits.push(`<span class="pill pill-dim" title="现在新增 1 席的即时费用 (按剩余天数折算)">${esc(b.price)}/席</span>`);
   if (b.seats != null) bits.push(`<span class="pill pill-dim" title="当前席位数">${b.seats}席</span>`);

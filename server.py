@@ -1910,14 +1910,19 @@ def _mother_billing(name, ws_id=""):
                 if r.get("error"):
                     return None, r["error"]
                 days = None
+                left_min = None
                 renewal = r.get("renewal") or ""
                 if renewal:
                     try:
                         dt = datetime.datetime.fromisoformat(
                             renewal.replace("Z", "+00:00"))
-                        days = (dt.date()
-                                - datetime.date.today()).days
-                        renewal = dt.strftime("%Y-%m-%d")
+                        now = (datetime.datetime.now(dt.tzinfo)
+                               if dt.tzinfo
+                               else datetime.datetime.now())
+                        delta = dt - now
+                        left_min = int(delta.total_seconds() // 60)
+                        days = delta.days
+                        renewal = dt.strftime("%Y-%m-%d %H:%M")
                     except Exception:
                         pass
                 return {"seats": r.get("seats"),
@@ -1925,6 +1930,7 @@ def _mother_billing(name, ws_id=""):
                                           r.get("currency")),
                         "currency": r.get("currency") or "",
                         "renewal": renewal, "days": days,
+                        "left_min": left_min,
                         "ws_id": ws_id, "ws_name": ws_name,
                         "at": _now()}, None
             finally:
