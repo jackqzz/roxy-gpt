@@ -3,6 +3,7 @@
 阶段1: 代理池 — socks5 静态代理自管理, 无下层同步。
 导入/导出/测活/备注/封禁标记; bound[] 预留账号绑定。"""
 import base64
+import datetime
 import hashlib
 import io
 import json
@@ -1823,6 +1824,113 @@ def _list_workspaces(win_name):
                 br.close()
     except Exception as e:
         return None, None, str(e)[:200]
+
+
+# 母号空间账单: 席位价(新增1席) + 续费时间 + 当前席位 —— 只读 preview 不动订阅
+_BILLING_JS = """async (wsId) => {
+    const J = async (u, h) => {
+        const r = await fetch(u, {credentials:'include', headers: h||{}});
+        const t = await r.text();
+        let j = null; try { j = JSON.parse(t); } catch(e) {}
+        return {ok: r.ok, status: r.status, j, t};
+    };
+    const s = await J('/api/auth/session?exchange_workspace_token=true'
+        + '&workspace_id=' + wsId + '&reason=setCurrentAccount');
+    const tok = s.j && s.j.accessToken;
+    if (!tok) return {error: '拿不到空间 token'};
+    const H = {authorization: 'Bearer ' + tok,
+               'chatgpt-account-id': wsId};
+    const p0 = await J('/backend-api/subscriptions/update/preview'
+        + '?account_id=' + wsId + '&updated_seats=3', H);
+    if (!p0.ok) return {error: '预览失败 ' + p0.status + ': '
+        + String(p0.t || '').slice(0, 150)};
+    const cur = Number(p0.j && p0.j.current_seat_quantity);
+    if (!cur) return {error: '预览未返回当前席位数',
+        detail: JSON.stringify(p0.j || {}).slice(0, 300)};
+    const p1 = await J('/backend-api/subscriptions/update/preview'
+        + '?account_id=' + wsId + '&updated_seats=' + (cur + 1), H);
+    if (!p1.ok) return {error: '预览失败 ' + p1.status + ': '
+        + String(p1.t || '').slice(0, 150)};
+    const p = p1.j || {};
+    const ad = (p.amount_due && typeof p.amount_due === 'object')
+        ? p.amount_due : {};
+    return {ok: true, seats: cur,
+            amount: ad.amount ?? p.total_amount ?? null,
+            currency: String(p.currency || ad.currency || '')
+                .toUpperCase(),
+            renewal: p.renewal_date || p.next_billing_date || ''};
+}"""
+
+_CCY_SYM = {"USD": "$", "EUR": "€", "GBP": "£", "CNY": "¥",
+            "JPY": "JP¥", "HKD": "HK$"}
+_CCY_MINOR0 = {"BIF", "CLP", "DJF", "GNF", "JPY", "KMF", "KRW",
+               "MGA", "PYG", "RWF", "VND", "VUV", "XAF", "XOF", "XPF"}
+_CCY_MINOR3 = {"BHD", "IQD", "JOD", "KWD", "LYD", "OMR", "TND"}
+_CCY_MINOR4 = {"CLF", "UYW"}
+
+
+def _fmt_ccy(minor_amount, currency):
+    """预览接口的 amount 是最小单位 (cent) -> 格式化主单位价。"""
+    if minor_amount is None or not currency:
+        return ""
+    unit = 0 if currency in _CCY_MINOR0 else \
+        3 if currency in _CCY_MINOR3 else \
+        4 if currency in _CCY_MINOR4 else 2
+    amt = minor_amount / (10 ** unit)
+    return "%s%.2f" % (_CCY_SYM.get(currency, currency + " "), amt)
+
+
+def _mother_billing(name, ws_id=""):
+    """连母号窗口读她空间的账单。返回 (dict, err):
+    {seats, price, currency, renewal, days, ws_id, ws_name}"""
+    ws_url, err = _mother_open(name)
+    if err:
+        return None, err
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as pw:
+            br = pw.chromium.connect_over_cdp(ws_url)
+            try:
+                pg = _find_cgpt_page(br)
+                if not pg:
+                    return None, "窗口里没有 chatgpt.com 页面 —— 请先登录"
+                ws_name = ""
+                if not ws_id:
+                    out = pg.evaluate(_WS_LIST_JS)
+                    wss = out.get("workspaces") or []
+                    own = [w for w in wss
+                           if "owner" in (w.get("role") or "")]
+                    pick = (own or wss or [None])[0]
+                    if not pick:
+                        return None, "母号没有任何空间"
+                    ws_id, ws_name = pick["id"], pick.get("name") or ""
+                r = pg.evaluate(_BILLING_JS, ws_id)
+                if not isinstance(r, dict):
+                    return None, "账单读取返回异常"
+                if r.get("error"):
+                    return None, r["error"]
+                days = None
+                renewal = r.get("renewal") or ""
+                if renewal:
+                    try:
+                        dt = datetime.datetime.fromisoformat(
+                            renewal.replace("Z", "+00:00"))
+                        days = (dt.date()
+                                - datetime.date.today()).days
+                        renewal = dt.strftime("%Y-%m-%d")
+                    except Exception:
+                        pass
+                return {"seats": r.get("seats"),
+                        "price": _fmt_ccy(r.get("amount"),
+                                          r.get("currency")),
+                        "currency": r.get("currency") or "",
+                        "renewal": renewal, "days": days,
+                        "ws_id": ws_id, "ws_name": ws_name,
+                        "at": _now()}, None
+            finally:
+                br.close()
+    except Exception as e:
+        return None, str(e)[:200]
 
 
 # 子号侧: 检查是否已经是某空间成员
@@ -3740,6 +3848,34 @@ class H(BaseHTTPRequestHandler):
             m["ws_name"] = (req.get("ws_name") or "").strip()
             _save_mothers(ms)
             return self._json({"ok": True})
+        if self.path == "/api/mothers/billing":
+            """批量查母号空间账单: 席位价/续费时间/当前席位数。"""
+            req = self._body()
+            names = req.get("names") or []
+            if not names:
+                return self._json({"error": "没选母号"})
+            mothers = _load_mothers()
+            out = {}
+            changed = False
+            for name in names:
+                m = next((x for x in mothers
+                          if x.get("name") == name), None)
+                if not m:
+                    out[name] = {"error": "母号不存在"}
+                    continue
+                r, err = _mother_billing(name, m.get("ws") or "")
+                if err:
+                    out[name] = {"error": err}
+                    continue
+                m["bill"] = r
+                if not m.get("ws") and r.get("ws_id"):
+                    m["ws"] = r["ws_id"]
+                    m["ws_name"] = r.get("ws_name") or ""
+                changed = True
+                out[name] = r
+            if changed:
+                _save_mothers(mothers)
+            return self._json({"ok": True, "map": out})
         if self.path == "/api/accounts/join-space":
             req = self._body()
             if JOIN_JOB["running"]:

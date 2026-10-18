@@ -45,15 +45,17 @@
           <th style="width:36px"><input type="checkbox" id="ck-all"></th>
           <th>Roxy 窗口名</th>
           <th style="width:300px">目标空间</th>
+          <th style="width:220px">账单</th>
           <th style="width:110px">导入时间</th>
-          <th style="width:210px;text-align:right">操作</th>
+          <th style="width:260px;text-align:right">操作</th>
         </tr>
       </thead>
       <tbody id="tbody"></tbody>
     </table>
     <div class="row" style="margin-top:10px">
+      <button class="btn btn-outline btn-sm" id="bill-sel"><i data-ic="timer"></i>查账单选中</button>
       <button class="btn btn-outline btn-sm btn-danger" id="del-sel"><i data-ic="trash-2"></i>删除选中</button>
-      <span class="hint" style="margin-top:0">「列空间」连母号窗口拉她拥有的空间 → 选一个保存, 之后「加入空间」就往这个空间拉人。不选则自动取她 owner 的第一个。</span>
+      <span class="hint" style="margin-top:0">「列空间」连母号窗口拉她拥有的空间 → 选一个保存, 之后「加入空间」就往这个空间拉人。不选则自动取她 owner 的第一个。「查账单」读席位价/续费时间(只读 preview, 不改订阅)。</span>
     </div>
   </div>
 </div>
@@ -87,6 +89,20 @@ async function load() {
   render();
 }
 
+function billCell(b) {
+  if (!b) return `<span class="pill pill-dim">未查</span>`;
+  const bits = [];
+  if (b.renewal) {
+    const d = b.days;
+    const cls = d != null && d <= 3 ? "pill-bad" : d != null && d <= 7 ? "pill-warn" : "pill-ok";
+    bits.push(`<span class="pill ${cls}" title="续费/到期 ${esc(b.renewal)}${d != null ? ` · 剩 ${d} 天` : ""}">${esc(b.renewal.slice(5))}${d != null ? ` 剩${d}天` : ""}</span>`);
+  }
+  if (b.price) bits.push(`<span class="pill pill-dim" title="现在新增 1 席的即时费用 (按剩余天数折算)">${esc(b.price)}/席</span>`);
+  if (b.seats != null) bits.push(`<span class="pill pill-dim" title="当前席位数">${b.seats}席</span>`);
+  return bits.join(" ")
+    + `<div class="subtitle" style="font-size:11px;margin-top:3px">查于 ${esc((b.at || "").slice(5, 16))}${b.ws_name ? " · " + esc(b.ws_name) : ""}</div>`;
+}
+
 function render() {
   $("tbody").innerHTML = mothers.map(m => {
     const ws = m.ws
@@ -96,13 +112,33 @@ function render() {
       <td><input type="checkbox" class="ck" data-name="${esc(m.name)}" ${sel.has(m.name) ? "checked" : ""}></td>
       <td class="mono">${esc(m.name)}</td>
       <td>${ws}<span class="ws-slot" data-name="${esc(m.name)}"></span></td>
+      <td>${billCell(m.bill)}</td>
       <td class="mono" style="color:var(--text-dim)">${esc((m.added_at || "").slice(0, 10))}</td>
       <td style="text-align:right;white-space:nowrap">
+        <button class="btn btn-ghost btn-sm" data-act="bill" data-name="${esc(m.name)}">查账单</button>
         <button class="btn btn-ghost btn-sm" data-act="ws" data-name="${esc(m.name)}">列空间</button>
         <button class="btn btn-ghost btn-sm btn-danger" data-act="del" data-name="${esc(m.name)}">删</button>
       </td>
     </tr>`;
-  }).join("") || `<tr><td colspan="5" style="text-align:center;color:var(--text-dim);padding:32px">暂无母号 —— 上方导入 Roxy 窗口名</td></tr>`;
+  }).join("") || `<tr><td colspan="6" style="text-align:center;color:var(--text-dim);padding:32px">暂无母号 —— 上方导入 Roxy 窗口名</td></tr>`;
+}
+
+async function doBilling(names, btn) {
+  if (!names.length) return toast("先勾选母号");
+  btn.disabled = true; const old = btn.innerHTML;
+  btn.innerHTML = "查账单中…";
+  const r = await post("/api/mothers/billing", { names }).catch(() => null);
+  btn.disabled = false; btn.innerHTML = old;
+  if (!r || r.error) return toast("✗ " + ((r && r.error) || "请求失败"));
+  let ok = 0, fails = [];
+  Object.entries(r.map || {}).forEach(([name, v]) => {
+    const m = mothers.find(x => x.name === name);
+    if (v.error) fails.push(`${name}: ${v.error}`);
+    else if (m) { m.bill = v; if (!m.ws && v.ws_id) { m.ws = v.ws_id; m.ws_name = v.ws_name; } ok++; }
+  });
+  render();
+  toast(`✓ ${ok} 个母号账单已更新`
+    + (fails.length ? ` · ✗ ${fails.slice(0, 2).join(" · ")}` : ""));
 }
 
 $("imp-btn").onclick = async () => {
@@ -136,6 +172,9 @@ $("tbody").addEventListener("click", async e => {
     sel.delete(name);
     await load();
   }
+  if (b.dataset.act === "bill") {
+    doBilling([name], b);
+  }
   if (b.dataset.act === "ws") {
     b.disabled = true;
     b.textContent = "连接中…";
@@ -165,6 +204,8 @@ $("tbody").addEventListener("change", async e => {
   toast("✓ 空间已存");
   await load();
 });
+
+$("bill-sel").onclick = e => doBilling([...sel], e.target);
 
 $("del-sel").onclick = async () => {
   if (!sel.size) return toast("先勾选母号");
