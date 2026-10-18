@@ -162,6 +162,7 @@ const $ = id => document.getElementById(id);
 let accounts = [];
 let patWsId = "";   // Pat测试母号的空间 —— 命中它的 space 不计入"已加入"
 let patWsName = ""; // PAT 空间名 (退出空间选取时展示)
+let oauthTtlMin = 10; // OAuth 授权时效(分钟) —— 超时的 pending 后端自动转 expired
 let page = 1;
 const SIZE = 20;
 const sel = new Set();
@@ -212,6 +213,7 @@ function filtered() {
 async function load() {
   const r = await fetch("/api/accounts").then(r => r.json());
   accounts = r.accounts || [];
+  oauthTtlMin = r.oauth_ttl_min || 10;
   const m = await fetch("/api/mother").then(r => r.json())
     .catch(() => null);
   patWsId = (m && m.mother_workspace) || "";
@@ -300,8 +302,17 @@ function render() {
       : a.cpa === "ready"
         ? `<a class="pill" style="background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe" href="/api/accounts/${a.id}/cred" title="凭证已备好 ${esc(a.cred_at||"")} —— 点下载 ${esc(a.cred_file||"")}, 勾选后推入池">已生成</a>`
         : a.cpa === "pending"
-          ? `<span class="pill pill-warn copyable" data-c="${esc(a.oauth_url||"")}" title="授权未完成, 点复制 OAuth 链接手动开">${ui.icon("clock")}待授权</span>`
-          : `<span class="pill pill-dim">—</span>`;
+          ? (() => {
+              const left = a.oauth_at
+                ? Math.max(0, Math.ceil(
+                    (new Date(a.oauth_at).getTime()
+                     + oauthTtlMin * 60000 - Date.now()) / 60000))
+                : 0;
+              return `<span class="pill pill-warn copyable" data-c="${esc(a.oauth_url||"")}" title="授权未完成 · 链接约剩 ${left} 分钟 —— 点复制 OAuth 链接手动开">${ui.icon("clock")}待授权 ${left}m</span>`;
+            })()
+          : a.cpa === "expired"
+            ? `<span class="pill pill-bad" title="授权超时, 链接已失效 —— 重跑OAuth授权">${ui.icon("clock")}已过期</span>`
+            : `<span class="pill pill-dim">—</span>`;
     return `<tr>
       <td><input type="checkbox" class="ck" data-id="${a.id}" ${sel.has(a.id) ? "checked" : ""}></td>
       <td class="mono" style="color:var(--text-dim)">${idx}</td>

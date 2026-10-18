@@ -2777,6 +2777,34 @@ CPA_JOB = {"running": False, "log": [], "results": {},
            "stop": False}
 
 
+def _oauth_ttl_s():
+    """授权链接/回调码有效期 —— 超时就当死了, 不再等。"""
+    try:
+        return max(60, int(float(
+            _settings().get("oauth_ttl_min") or 10) * 60))
+    except Exception:
+        return 600
+
+
+def _oauth_expire(accs):
+    """惰性清理: cpa=pending 且 oauth_at 超 TTL → cpa=expired,
+    oauth_* 字段清掉 (授权码早死了, 留着没意义)。返回是否有改动。"""
+    cut = time.strftime("%Y-%m-%dT%H:%M:%S",
+                        time.localtime(time.time() - _oauth_ttl_s()))
+    changed = False
+    for a in accs:
+        if a.get("cpa") == "pending" \
+                and (not a.get("oauth_at") or a["oauth_at"] < cut):
+            a["cpa"] = "expired"
+            for k in ("oauth_url", "oauth_state",
+                      "oauth_verifier", "oauth_at"):
+                a.pop(k, None)
+            changed = True
+    if changed:
+        _save_accounts(accs)
+    return changed
+
+
 def _cpa_worker(ids):
     """逐账号本地 OAuth: 算链接 → 开(原/同IP新)子号窗口走授权
     → 截 localhost:1455 回调 → 经账号代理换 token
@@ -2816,7 +2844,9 @@ def _cpa_worker(ids):
                     a["oauth_state"] = state
                     a["oauth_url"] = url
                     a["oauth_verifier"] = verifier
-                    log("→ %s: OAuth 链接已生成" % email)
+                    a["oauth_at"] = _now()
+                    log("→ %s: OAuth 链接已生成 (%d分钟时效)"
+                        % (email, _oauth_ttl_s() // 60))
                     # 2) 开窗口: 优先复用原来的窗 (win 还在直接连),
                     #    没有就按绑定的同一代理新建 —— IP 不变
                     dir_id, cws, err = _roxy_open_for(email, p)
@@ -2856,7 +2886,7 @@ def _cpa_worker(ids):
                         cpg.on("requestfailed",
                                lambda r: _take(r.url))
                         cdp = cpg.context.new_cdp_session(cpg)
-                        deadline = time.time() + 300   # 5 分钟授权窗口
+                        deadline = time.time() + _oauth_ttl_s()
                         while time.time() < deadline:
                             if CPA_JOB["stop"]:
                                 break
@@ -2899,12 +2929,21 @@ def _cpa_worker(ids):
                                     pass
                             cpg.wait_for_timeout(2000)
                         if not code:
-                            done = "手动停止" if CPA_JOB["stop"] \
-                                else "等回调超时"
-                            a["cpa"] = "pending"
+                            if CPA_JOB["stop"]:
+                                # 手动停: 链接还在时效内, 留 pending 可手动兜底
+                                a["cpa"] = "pending"
+                                done = "手动停止"
+                            else:
+                                # 超时: 链接/码已死, 标过期清字段
+                                a["cpa"] = "expired"
+                                for k in ("oauth_url", "oauth_state",
+                                          "oauth_verifier", "oauth_at"):
+                                    a.pop(k, None)
+                                done = "授权超时 (链接已过时效)"
                             CPA_JOB["results"][aid] = done
-                            log("✗ %s: %s (授权页留在窗口里,"
-                                " 可手动继续后重跑)" % (email, done))
+                            log("✗ %s: %s%s" % (email, done,
+                                ", 授权页留在窗口里" if CPA_JOB["stop"]
+                                else ", 重跑OAuth授权"))
                             continue
                         log("  %s: 回调已截获, 走账号代理换 token"
                             % email)
@@ -2925,6 +2964,7 @@ def _cpa_worker(ids):
                         a.pop("oauth_url", None)
                         a.pop("oauth_state", None)
                         a.pop("oauth_verifier", None)
+                        a.pop("oauth_at", None)
                         CPA_JOB["results"][aid] = "凭证已生成"
                         log("✓ %s: rt/at 到手, 凭证 %s 已备好"
                             " —— 推送入池用「📤推入池」"
@@ -3208,10 +3248,12 @@ class H(BaseHTTPRequestHandler):
                 "pace_type_max": s.get("pace_type_max") or 240,
                 "pace_load_ms": s.get("pace_load_ms") or 5000,
                 "proxy_cool_min": s.get("proxy_cool_min") or 20,
+                "oauth_ttl_min": s.get("oauth_ttl_min") or 10,
                 "cpa_url": s.get("cpa_url") or "",
                 "cpa_key": s.get("cpa_key") or ""})
         if self.path == "/api/accounts":
             accs = _load_accounts()
+            _oauth_expire(accs)   # pending 超时 → expired
             px = _load_proxies()
             pmap = {p["id"]: p for p in px}
             out = []
@@ -3234,7 +3276,8 @@ class H(BaseHTTPRequestHandler):
                      "unbound": sum(1 for a in accs
                                     if not a.get("proxy_id"))}
             return self._json({"accounts": out, "stats": stats,
-                               "target": TARGET_URL})
+                               "target": TARGET_URL,
+                               "oauth_ttl_min": _oauth_ttl_s() // 60})
         if self.path == "/api/accounts/open/status":
             return self._json({"running": OPEN_JOB["running"],
                                "log": OPEN_JOB["log"][-80:],
@@ -3464,6 +3507,7 @@ class H(BaseHTTPRequestHandler):
                       "pace_step_min", "pace_step_max",
                       "pace_type_min", "pace_type_max",
                       "pace_load_ms", "proxy_cool_min",
+                      "oauth_ttl_min",
                       "cpa_url", "cpa_key"):
                 if k in req:
                     s[k] = req[k]
@@ -3824,6 +3868,7 @@ class H(BaseHTTPRequestHandler):
                 code = raw.split("code=")[-1].split("&")[0] \
                     if "code=" in raw else raw
             accs = _load_accounts()
+            _oauth_expire(accs)   # 先清过期的 —— 死链接不许再换
             pend = [x for x in accs if x.get("oauth_verifier")]
             a = None
             if state:
@@ -3836,11 +3881,13 @@ class H(BaseHTTPRequestHandler):
                           if x["id"] == req["id"]), None)
             if not a:
                 return self._json({"error":
-                    "对不上账号 (state 匹配失败)"
+                    "对不上账号 (state 匹配失败 —— 可能已过期,"
+                    " 重跑OAuth授权)"
                     if state else
                     "多个账号在等回调, 请贴带 state= 的完整链接"
                     if len(pend) > 1 else
-                    "没有在等回调的账号 (先跑🔗OAuth授权)"})
+                    "没有在等回调的账号 (先跑OAuth授权,"
+                    " 或链接已过期需重跑)"})
             if not a.get("oauth_verifier"):
                 return self._json(
                     {"error": "该账号没有进行中的 OAuth,"
