@@ -1101,9 +1101,70 @@ def _chatgpt_email_step(ws, a, log, should_stop=None):
             br.close()
 
 
-def _chatgpt_code_step(ws, a, log, upstream, should_stop=None):
-    """半自动·自动填码: 等验证码框 -> 轮询接码接口取新码 -> 填码提交。
-    创建密码页留给人工; 人工若先一步越过码页则自动退出。
+def _chatgpt_password_step(ws, a, log, should_stop=None, timeout=300):
+    """自动·创建密码: 等 input[name=new-password] -> 生成随机密码
+    (存账号) -> 填入提交。密码页可能出现在验证码前(由填码步骤内联
+    处理)或之后(本步骤兜); about-you/主界面出现即认为无需密码页。
+    返回 ok|no_pwd|stopped|err。"""
+    import random
+    from playwright.sync_api import sync_playwright
+    _st = _settings()
+    _tmin = int(_st.get("pace_type_min") or 90)
+    _tmax = int(_st.get("pace_type_max") or 240)
+    _smin = float(_st.get("pace_step_min") or 2.0)
+    _smax = float(_st.get("pace_step_max") or 6.0)
+
+    def hdelay():
+        time.sleep(random.uniform(_smin, _smax))
+
+    def tdelay():
+        return random.randint(_tmin, _tmax)
+
+    _PWD = "input[name=new-password]"
+    with sync_playwright() as pw:
+        br = pw.chromium.connect_over_cdp(ws)
+        try:
+            ctx = br.contexts[0] if br.contexts else None
+            pg = (ctx.pages[0] if ctx and ctx.pages
+                  else (ctx.new_page() if ctx else None))
+            if pg is None:
+                return "拿不到页面"
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                if should_stop and should_stop():
+                    return "stopped"
+                try:
+                    el = pg.query_selector(_PWD)
+                    if el and el.is_visible():
+                        hdelay()
+                        pwd = _gen_password()
+                        a["password"] = pwd
+                        el.click()
+                        pg.fill(_PWD, "")
+                        pg.type(_PWD, pwd, delay=tdelay())
+                        hdelay()
+                        if not _real_continue(pg):
+                            return "密码页提交按钮点不动"
+                        log("  🔑 创建密码页已自动提交 (密码存账号)")
+                        return "ok"
+                    # about-you / 主界面已现 = 流程越过密码页
+                    if pg.query_selector("input[name=name]") \
+                            or pg.query_selector(
+                                "#prompt-textarea,textarea"):
+                        return "no_pwd"
+                except Exception:
+                    pass
+                time.sleep(2)
+            return "no_pwd"
+        finally:
+            br.close()
+
+
+def _chatgpt_code_step(ws, a, log, upstream, should_stop=None,
+                       auto_password=False):
+    """自动·填码: 等验证码框 -> 轮询接码接口取新码 -> 填码提交。
+    auto_password 时等码途中遇到创建密码页顺手填掉。
+    人工若先一步越过码页则自动退出。
     返回 ok|ok_passed|no_mail|email_dead|stopped|err。"""
     import random
     from playwright.sync_api import sync_playwright
@@ -1145,10 +1206,11 @@ def _chatgpt_code_step(ws, a, log, upstream, should_stop=None):
             except Exception:
                 pass
             tried = set(stale)
-            # 等验证码框 —— 中途可能出现创建密码页 (人工), 或人工
-            # 直接越过码页; 最长等 10 分钟
+            # 等验证码框 —— 中途可能出现创建密码页 (auto_password
+            # 则顺手填掉, 否则留人工), 或人工直接越过码页; 最长等10分钟
             deadline = time.time() + 600
             saw_code = False
+            pwd_done = False
             while time.time() < deadline:
                 if stopped():
                     return "stopped"
@@ -1158,7 +1220,22 @@ def _chatgpt_code_step(ws, a, log, upstream, should_stop=None):
                     if cb and cb.is_visible():
                         saw_code = True
                         break
-                    if not pg.query_selector(_PWD):
+                    pel = pg.query_selector(_PWD)
+                    if pel and pel.is_visible() and auto_password \
+                            and not pwd_done:
+                        hdelay()
+                        pwd = _gen_password()
+                        a["password"] = pwd
+                        pel.click()
+                        pg.fill(_PWD, "")
+                        pg.type(_PWD, pwd, delay=tdelay())
+                        hdelay()
+                        if _real_continue(pg):
+                            pwd_done = True
+                            log("  🔑 创建密码页已自动提交"
+                                " (密码存账号)")
+                        continue
+                    if not pel:
                         # 无码框也无密码框:
                         #  见过码框后消失 = 人工已越过
                         if saw_code:
@@ -1406,231 +1483,6 @@ def _chatgpt_profile_step(ws, a, log, should_stop=None):
         finally:
             br.close()
 
-
-def _chatgpt_login(ws, a, log, upstream, should_stop=None):
-    """开窗后: Log in -> 填邮箱 -> Continue -> 等码 -> 填码 -> Continue
-    -> (新号) about-you 填姓名年龄 -> Continue。返回 ok|ok_new|no_mail|stopped|err。"""
-    import random
-    from playwright.sync_api import sync_playwright
-    email = a["email"]
-
-    def stopped():
-        return bool(should_stop and should_stop())
-
-    # 拟人节奏 —— 可在设置页配置, 默认步骤 2-6s / 击键 90-240ms
-    _st = _settings()
-    _smin = float(_st.get("pace_step_min") or 2.0)
-    _smax = float(_st.get("pace_step_max") or 6.0)
-    _tmin = int(_st.get("pace_type_min") or 90)
-    _tmax = int(_st.get("pace_type_max") or 240)
-    _loadms = int(_st.get("pace_load_ms") or 5000)
-
-    def hdelay(lo=None, hi=None):
-        time.sleep(random.uniform(
-            lo if lo is not None else _smin,
-            hi if hi is not None else _smax))
-
-    def tdelay():
-        return random.randint(_tmin, _tmax)
-
-    with sync_playwright() as pw:
-        br = pw.chromium.connect_over_cdp(ws)
-        try:
-            ctx = br.contexts[0] if br.contexts else None
-            pg = (ctx.pages[0] if ctx and ctx.pages
-                  else (ctx.new_page() if ctx else None))
-            if pg is None:
-                return "拿不到页面"
-            if "chatgpt.com" not in (pg.url or ""):
-                pg.goto(TARGET_URL, wait_until="domcontentloaded",
-                        timeout=60000)
-            pg.wait_for_timeout(_loadms)
-            hdelay()
-            # 1-3) 点 Log in -> 等邮箱框 -> 拟人填邮箱 (与半自动共用)
-            err = _email_fill_step(pg, email, log,
-                                   hdelay, tdelay, stopped)
-            if err:
-                return err
-            # 3.5) 提交前记旧码基线 —— 供应商接码接口有缓存滞后,
-            # 新邮件落地前会再把上一次的旧码返回一阵, 得排除
-            stale = set()
-            if a.get("mail_url"):
-                try:
-                    c0, e0 = _mail_code_once(a["mail_url"], upstream)
-                    if e0 == "dead":
-                        log("  ✗ 邮箱账号不可用 (602) —— 放弃")
-                        return "email_dead"
-                    if c0:
-                        stale.add(c0)
-                except Exception:
-                    pass
-            # 4) 真实点击 Continue (JS click 会被忽略)
-            if not _real_continue(pg):
-                return "提交按钮点不动"
-            log("  已提交邮箱, 等验证码页 ...")
-            # 5) 等验证码框或创建密码框 (新号可能先让设密码)
-            _PWD_INPUT = "input[name=new-password]"
-            try:
-                pg.wait_for_selector(
-                    CODE_INPUT + "," + _PWD_INPUT, timeout=60000)
-            except Exception:
-                if _looks_verify(pg):
-                    log("  ⚠ 人机验证 —— 请手动完成后继续等码")
-                    pg.wait_for_selector(
-                        CODE_INPUT + "," + _PWD_INPUT,
-                        timeout=120000)
-                else:
-                    return "没等到验证码输入框: " \
-                        + (pg.url or "")[:60] + " " \
-                        + _page_text(pg)[:80]
-            # 5.5) 创建密码页: 生成随机密码存账号 -> 提交 -> 再等码
-            try:
-                if pg.query_selector(_PWD_INPUT):
-                    hdelay()
-                    pwd = _gen_password()
-                    a["password"] = pwd
-                    pg.click(_PWD_INPUT)
-                    pg.type(_PWD_INPUT, pwd,
-                            delay=tdelay())
-                    hdelay()
-                    _real_continue(pg)
-                    log("  遇到创建密码页 —— 随机密码已生成"
-                        "(存账号), 已提交")
-                    pg.wait_for_selector(CODE_INPUT,
-                                         timeout=60000)
-            except Exception as e:
-                return "创建密码页处理失败: " + str(e)[:80]
-            log("  验证码页就绪, 查接码接口 ...")
-            if not a.get("mail_url"):
-                log("  ⚠ 该账号没有接码链接 —— 请手动收码填入")
-                return "no_mail"
-            # 6) 取码→填码→提交; 页面报 Incorrect code 就排除已试码
-            #    等供应商收进新邮件再重试; 后期点 Resend 触发新邮件
-            tried = set(stale)
-            passed = False
-            for attempt in range(4):
-                if stopped():
-                    return "stopped"
-                if attempt >= 2:
-                    try:
-                        pg.click('button:has-text("Resend")',
-                                 timeout=3000)
-                        log("  已点 Resend 触发新邮件")
-                        pg.wait_for_timeout(3000)
-                    except Exception:
-                        pass
-                code = _fetch_mail_code(
-                    a["mail_url"], upstream, log,
-                    timeout=240 if attempt == 0 else 150,
-                    exclude=tried, should_stop=should_stop)
-                if stopped():
-                    return "stopped"
-                if code == "dead":
-                    log("  ✗ 邮箱账号不可用 (602) —— 放弃该账号")
-                    return "email_dead"
-                if not code:
-                    log("  ✗ 接码超时 —— 请手动在窗口继续")
-                    return "code_timeout"
-                tried.add(code)
-                log("  📨 收到验证码: %s" % code)
-                hdelay()
-                try:
-                    boxes = [b for b in
-                             pg.query_selector_all(CODE_INPUT)
-                             if b.is_visible()]
-                    if len(boxes) == 1:
-                        boxes[0].click()
-                        boxes[0].fill("")
-                        boxes[0].type(code,
-                                      delay=tdelay())
-                    elif len(boxes) > 1:
-                        for i, bx in enumerate(boxes[:len(code)]):
-                            bx.click()
-                            bx.fill("")
-                            bx.type(code[i],
-                                    delay=tdelay())
-                    else:
-                        pg.keyboard.type(code,
-                                         delay=tdelay())
-                    hdelay()
-                    _real_continue(pg)
-                    log("  验证码已提交")
-                except Exception as e:
-                    log("  ⚠ 自动填码失败, 请手动输入 %s: %s"
-                        % (code, str(e)[:60]))
-                    break
-                # 等页面判定: 跳离验证码页 = 过; incorrect = 等新码
-                for _ in range(20):
-                    time.sleep(1)
-                    try:
-                        if "email-verification" not in (pg.url or ""):
-                            passed = True
-                            break
-                        txt = _page_text(pg).lower()
-                        if any(w in txt for w in
-                               ("incorrect", "invalid", "expired")):
-                            log("  ✗ 码被拒 (%s), 等新邮件进来 ..."
-                                % code)
-                            break
-                    except Exception:
-                        pass             # 正在跳转
-                if passed:
-                    break
-            if not passed:
-                log("  ⚠ 验证码反复被拒 —— 窗口留着, 请手动检查")
-                return "code_rejected"
-            # 7) about-you 资料页 (新注册才有): 姓名+年龄+Continue
-            is_new = False
-            saw_about = False
-            deadline = time.time() + 90
-            while time.time() < deadline:
-                if stopped():
-                    return "stopped"
-                try:
-                    # 密码页也可能在验证码之后才弹
-                    if pg.query_selector("input[name=new-password]"):
-                        pwd = _gen_password()
-                        a["password"] = pwd
-                        pg.click("input[name=new-password]")
-                        pg.type("input[name=new-password]", pwd,
-                                delay=tdelay())
-                        hdelay()
-                        _real_continue(pg)
-                        log("  验证码后补建密码 —— "
-                            "随机密码已存账号并提交")
-                        continue
-                    if pg.query_selector("input[name=name]"):
-                        saw_about = True
-                        # 姓名/年龄: extra 手动指定 > AI 生成 > 邮箱前缀
-                        gen = _gen_profile(email, log)
-                        name = (a.get("extra") or "").strip() \
-                            or (gen[0] if gen else "") \
-                            or re.sub(r"[^A-Za-z]", "",
-                                      email.split("@")[0]) \
-                                   .capitalize() or "User"
-                        age = str(gen[1] if gen
-                                  else random.randint(22, 38))
-                        # 真实键盘输入 (fill 不产生 keydown/keyup)
-                        r = _about_fill(pg, name, age,
-                                        log, hdelay, tdelay)
-                        if r == "need_human":
-                            return "about_you_need_human"
-                        if r != "ok":
-                            return r
-                        log("  资料页已填 (%s, %s)%s"
-                            % (name, age, " ← AI生成" if gen else ""))
-                        is_new = True
-                        break
-                    if "chatgpt.com" in (pg.url or ""):
-                        break               # 已回主站 = 完成
-                except Exception:
-                    pass
-                time.sleep(2)
-            if saw_about and not is_new:
-                return "about_you_timeout"   # 卡在资料页, 别报假成功
-            return "ok_new" if is_new else "ok"
-        finally:
-            br.close()
 
 
 # ---------------- PAT 检验 ----------------
@@ -3113,16 +2965,19 @@ TARGET_URL = "https://chatgpt.com"
 OPEN_WORKERS = 3          # 并行开窗/注册并发数 (每个窗口是一个真 Chromium)
 
 
-def _open_worker(accs, semiauto=False, watch_code=False,
-                 gen_profile=False, auto_email=False, auto_code=False,
-                 auto_profile=False):
-    """并行: 选代理 -> 绑定 -> Roxy 开窗 -> 跳 chatgpt.com (注册)
-    semiauto=True 时定位到主站即停, 登录注册全程人工;
-    watch_code/gen_profile/auto_email/auto_code/auto_profile
-    是半自动可选附加项
-    (接码监听 / AI资料 / 自动填邮箱 / 自动填码 / 自动填资料)。
+def _open_worker(accs):
+    """并行: 选代理 -> 绑定 -> Roxy 开窗 -> 跳 chatgpt.com -> 按设置
+    页「开窗自动化」勾选的步骤依次自动执行 (接码监听 / 资料生成 /
+    邮箱提交 / 填码 / 创建密码 / 填资料), 没勾的留人工。
     db_lock 保护代理选取/绑定和 JSON 落盘 —— 避免并发抢同一代理
     或互相覆盖写文件。"""
+    _st = _settings()
+    step_watch = _st.get("step_watch", True)
+    step_gen = _st.get("step_gen", True)
+    step_email = _st.get("step_email", True)
+    step_code = _st.get("step_code", True)
+    step_pwd = _st.get("step_password", True)
+    step_profile = _st.get("step_profile", True)
     OPEN_JOB["running"] = True
     OPEN_JOB["stop"] = False
     OPEN_JOB["log"] = []
@@ -3185,93 +3040,70 @@ def _open_worker(accs, semiauto=False, watch_code=False,
                 log(f"✗ {email}: 开窗失败 {err} (已解绑换代理重试即可)")
                 return
             a["win"] = dir_id
-            if semiauto:
-                r = _chatgpt_goto(ws)
-                if r == "ok":
-                    a["status"] = "opened"
-                    OPEN_JOB["results"][a["id"]] = "已定位, 请手动操作"
-                    log(f"✓ {email}: 已开到 chatgpt.com "
-                        f"(半自动, 请手动注册)")
-                    if watch_code and _mail_watch_start(a):
-                        log(f"  [{email}] 📨 接码监听已开 (10min)")
-                    if gen_profile:
-                        _prof_gen_start(a)
-                        log(f"  [{email}] 🤖 资料生成中 …")
-                    if auto_email:
-                        r2 = _chatgpt_email_step(
-                            ws, a, lambda m: log(f"  [{email}] {m}"),
-                            should_stop=_stopped)
-                        if r2 == "ok":
-                            log(f"  [{email}] ✉ 自动输入邮箱完成")
-                        else:
-                            log(f"  [{email}] ✉ 自动输入邮箱失败: {r2}"
-                                f" —— 请手动继续")
-                    if auto_code:
-                        r3 = _chatgpt_code_step(
-                            ws, a, lambda m: log(f"  [{email}] {m}"),
-                            _upstream(), should_stop=_stopped)
-                        if r3 == "ok":
-                            log(f"  [{email}] 🔢 验证码已提交"
-                                f" —— 剩余步骤交给你")
-                        elif r3 == "ok_passed":
-                            log(f"  [{email}] 验证码页已被人工越过")
-                        elif r3 == "email_dead":
-                            a["status"] = "email_dead"
-                            a["email_dead"] = True
-                            log(f"  [{email}] ✗ 邮箱不可用 (602)"
-                                f" —— 后续步骤全部跳过")
-                        elif r3 == "no_mail":
-                            log(f"  [{email}] 🔢 无接码链接, 跳过自动填码")
-                        elif r3 != "stopped":
-                            log(f"  [{email}] 🔢 自动填码失败: {r3}"
-                                f" —— 请手动继续")
-                    if auto_profile and not a.get("email_dead"):
-                        r4 = _chatgpt_profile_step(
-                            ws, a, lambda m: log(f"  [{email}] {m}"),
-                            should_stop=_stopped)
-                        if r4 == "ok":
-                            log(f"  [{email}] 📝 自动填资料完成"
-                                f" —— 注册应已落地")
-                        elif r4 == "ok_passed":
-                            log(f"  [{email}] 资料页已被人工越过")
-                        elif r4 != "stopped":
-                            log(f"  [{email}] 📝 自动填资料失败: {r4}"
-                                f" —— 请手动继续")
-                else:
-                    a["status"] = "login_failed"
-                    OPEN_JOB["results"][a["id"]] = r
-                    log(f"✗ {email}: 导航失败 — {r}")
-                return
-            log(f"→ {email}: 窗口已开, 登录 {TARGET_URL} ...")
-            r = _chatgpt_login(
-                ws, a, lambda m: log(f"  [{email}] {m}"), _upstream(),
-                should_stop=_stopped)
-            if r == "stopped":
-                a["status"] = "stopped"
-                OPEN_JOB["results"][a["id"]] = "已手动停止"
-                log(f"⏹ {email}: 已停止")
-                return
-            if r in ("ok", "ok_new"):
-                a["status"] = "opened"
-                a["reg"] = "new" if r == "ok_new" else "yes"
-                a["reg_at"] = _now()
-                OPEN_JOB["results"][a["id"]] = "ok"
-                log(f"✓ {email}: "
-                    + ("新注册完成" if r == "ok_new"
-                       else "登录完成 (已是注册号)"))
-            elif r == "no_mail":
-                a["status"] = "opened"
-                OPEN_JOB["results"][a["id"]] = "邮箱已提交, 无接码链接"
-                log(f"✓ {email}: 窗口已就绪 (缺接码链接, 手动收码)")
-            elif r == "email_dead":
-                a["status"] = "email_dead"
-                a["email_dead"] = True
-                OPEN_JOB["results"][a["id"]] = "邮箱不可用 (602)"
-                log(f"✗ {email}: 邮箱账号已失效 — 跳过")
-            else:
+            r = _chatgpt_goto(ws)
+            if r != "ok":
                 a["status"] = "login_failed"
                 OPEN_JOB["results"][a["id"]] = r
-                log(f"✗ {email}: 登录中断 — {r}")
+                log(f"✗ {email}: 导航失败 — {r}")
+                return
+            a["status"] = "opened"
+            OPEN_JOB["results"][a["id"]] = "已定位, 请手动操作"
+            log(f"✓ {email}: 已开到 chatgpt.com")
+            if step_watch and _mail_watch_start(a):
+                log(f"  [{email}] 📨 接码监听已开 (10min)")
+            if step_gen:
+                _prof_gen_start(a)
+                log(f"  [{email}] 🤖 资料生成中 …")
+            if step_email:
+                r2 = _chatgpt_email_step(
+                    ws, a, lambda m: log(f"  [{email}] {m}"),
+                    should_stop=_stopped)
+                if r2 == "ok":
+                    log(f"  [{email}] ✉ 自动输入邮箱完成")
+                else:
+                    log(f"  [{email}] ✉ 自动输入邮箱失败: {r2}"
+                        f" —— 请手动继续")
+            if step_code and not a.get("email_dead"):
+                r3 = _chatgpt_code_step(
+                    ws, a, lambda m: log(f"  [{email}] {m}"),
+                    _upstream(), should_stop=_stopped,
+                    auto_password=step_pwd)
+                if r3 == "ok":
+                    log(f"  [{email}] 🔢 验证码已提交")
+                elif r3 == "ok_passed":
+                    log(f"  [{email}] 验证码页已被人工越过")
+                elif r3 == "email_dead":
+                    a["status"] = "email_dead"
+                    a["email_dead"] = True
+                    log(f"  [{email}] ✗ 邮箱不可用 (602)"
+                        f" —— 后续步骤全部跳过")
+                elif r3 == "no_mail":
+                    log(f"  [{email}] 🔢 无接码链接, 跳过自动填码")
+                elif r3 != "stopped":
+                    log(f"  [{email}] 🔢 自动填码失败: {r3}"
+                        f" —— 请手动继续")
+            # 创建密码页也可能出现在验证码之后 (码前的已在填码步骤内联)
+            if step_pwd and not a.get("email_dead"):
+                r5 = _chatgpt_password_step(
+                    ws, a, lambda m: log(f"  [{email}] {m}"),
+                    should_stop=_stopped)
+                if r5 not in ("ok", "no_pwd", "stopped"):
+                    log(f"  [{email}] 🔑 创建密码失败: {r5}"
+                        f" —— 请手动继续")
+            if step_profile and not a.get("email_dead"):
+                r4 = _chatgpt_profile_step(
+                    ws, a, lambda m: log(f"  [{email}] {m}"),
+                    should_stop=_stopped)
+                if r4 == "ok":
+                    a["reg"] = "new"
+                    a["reg_at"] = _now()
+                    log(f"  [{email}] 📝 自动填资料完成"
+                        f" —— 注册应已落地")
+                elif r4 == "ok_passed":
+                    log(f"  [{email}] 资料页已被人工越过")
+                elif r4 != "stopped":
+                    log(f"  [{email}] 📝 自动填资料失败: {r4}"
+                        f" —— 请手动继续")
         except Exception as e:
             OPEN_JOB["results"][a["id"]] = str(e)[:120]
             log(f"✗ {email}: {str(e)[:120]}")
@@ -3363,6 +3195,12 @@ class H(BaseHTTPRequestHandler):
                 "pace_load_ms": s.get("pace_load_ms") or 5000,
                 "proxy_cool_min": s.get("proxy_cool_min") or 20,
                 "oauth_ttl_min": s.get("oauth_ttl_min") or 10,
+                "step_watch": s.get("step_watch", True),
+                "step_gen": s.get("step_gen", True),
+                "step_email": s.get("step_email", True),
+                "step_code": s.get("step_code", True),
+                "step_password": s.get("step_password", True),
+                "step_profile": s.get("step_profile", True),
                 "cpa_url": s.get("cpa_url") or "",
                 "cpa_key": s.get("cpa_key") or ""})
         if self.path == "/api/accounts":
@@ -3623,6 +3461,8 @@ class H(BaseHTTPRequestHandler):
                       "pace_type_min", "pace_type_max",
                       "pace_load_ms", "proxy_cool_min",
                       "oauth_ttl_min",
+                      "step_watch", "step_gen", "step_email",
+                      "step_code", "step_password", "step_profile",
                       "cpa_url", "cpa_key"):
                 if k in req:
                     s[k] = req[k]
@@ -3759,13 +3599,7 @@ class H(BaseHTTPRequestHandler):
             if len(accs) > 50:
                 return self._json({"error": "单次最多 50 个"}, 400)
             threading.Thread(
-                target=_open_worker,
-                args=(accs, bool(req.get("semiauto")),
-                      bool(req.get("watch_code", True)),
-                      bool(req.get("gen_profile", True)),
-                      bool(req.get("auto_email", True)),
-                      bool(req.get("auto_code", True)),
-                      bool(req.get("auto_profile", True))),
+                target=_open_worker, args=(accs,),
                 daemon=True).start()
             return self._json({"ok": True, "count": len(accs)})
         if self.path == "/api/accounts/open/stop":

@@ -59,7 +59,7 @@
   </div>
 
   <div class="drawer-card" id="mailwatch-box" style="display:none">
-    <div class="drawer-title"><i data-ic="mail"></i><span>半自动助手 · 接码监听 + 资料生成（出结果自动出现在这里, 点击可复制）</span></div>
+    <div class="drawer-title"><i data-ic="mail"></i><span>自动化助手 · 接码监听 + 资料生成（出结果自动出现在这里, 点击可复制）</span></div>
     <div id="mailwatch-list" style="font-size:13px"></div>
   </div>
 
@@ -84,12 +84,7 @@
       <span class="tb-sep"></span>
       <button class="btn btn-primary btn-sm" id="open-sel"><i data-ic="app-window"></i>开窗选中</button>
       <button class="btn btn-outline btn-sm" id="open-all"><i data-ic="layout-grid"></i>全部开窗</button>
-      <label class="semi-opt" title="只开窗定位到 chatgpt.com, 登录注册全程手动" style="font-weight:600"><i data-ic="settings"></i>半自动<input type="checkbox" id="semiauto" checked></label>
-      <label class="semi-opt" title="开窗后后台盯接码接口, 出码显示在下方接码面板"><i data-ic="mail"></i>接码<input type="checkbox" id="semi-watch" checked></label>
-      <label class="semi-opt" title="开窗时调 AI 模型按邮箱生成姓名+年龄, 面板可复制"><i data-ic="sparkle"></i>资料<input type="checkbox" id="semi-prof" checked></label>
-      <label class="semi-opt" title="自动点 Log in 并填入邮箱提交, 密码/验证码/资料页仍手动"><i data-ic="send"></i>邮箱<input type="checkbox" id="semi-email" checked></label>
-      <label class="semi-opt" title="等验证码框出现后自动轮询接码接口取新码填入并提交, 创建密码页仍手动"><i data-ic="hash"></i>填码<input type="checkbox" id="semi-code" checked></label>
-      <label class="semi-opt" title="等 about-you 资料页出现后自动填姓名+年龄并提交, 数据取资料生成结果"><i data-ic="pencil"></i>填资料<input type="checkbox" id="semi-prof2" checked></label>
+      <span class="subtitle" style="font-size:12px" title="到设置页勾选自动化步骤: 接码监听/资料生成/邮箱/填码/密码/资料">步骤在设置页配</span>
       <span style="flex:1"></span>
       <span class="subtitle" id="sel-hint" style="font-size:12px"></span>
       <button class="btn btn-ghost btn-sm" id="reload" title="刷新"><i data-ic="refresh-cw"></i></button>
@@ -401,13 +396,7 @@ $("job-stop").onclick = async () => {
 
 function startOpen(ids, btn) {
   btn.disabled = true;
-  post("/api/accounts/open",
-       { ids, semiauto: $("semiauto").checked,
-         watch_code: $("semi-watch").checked,
-         gen_profile: $("semi-prof").checked,
-         auto_email: $("semi-email").checked,
-         auto_code: $("semi-code").checked,
-         auto_profile: $("semi-prof2").checked }).then(r => {
+  post("/api/accounts/open", { ids }).then(r => {
     btn.disabled = false;
     if (r.error) return toast("✗ " + r.error);
     toast(`开窗任务启动: ${r.count} 个账号`);

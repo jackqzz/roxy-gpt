@@ -92,6 +92,32 @@
     </div>
   </div>
 
+  <!-- 开窗自动化 -->
+  <div class="card">
+    <div class="card-title"><i data-ic="app-window"></i>开窗自动化（开窗后自动执行哪些步骤 —— 没勾的留人工）</div>
+    <div class="row" style="flex-wrap:wrap;gap:10px 18px">
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px" title="开窗后后台盯接码接口, 出码显示在账号页接码面板">
+        <input type="checkbox" id="st-watch"><i data-ic="mail"></i>接码监听</label>
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px" title="开窗时调 AI 按邮箱预生成姓名+年龄, 接码面板可复制">
+        <input type="checkbox" id="st-gen"><i data-ic="sparkle"></i>资料预生成</label>
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px" title="自动点 Log in 填入邮箱并提交">
+        <input type="checkbox" id="st-email"><i data-ic="send"></i>邮箱提交</label>
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px" title="等验证码框后自动取新码填入提交 (需接码链接)">
+        <input type="checkbox" id="st-code"><i data-ic="hash"></i>自动填码</label>
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px" title="遇到创建密码页自动生成随机密码填入提交 (密码存账号)">
+        <input type="checkbox" id="st-pwd"><i data-ic="key"></i>创建密码</label>
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px" title="等 about-you 页后自动填姓名+年龄提交, 数据取资料生成结果">
+        <input type="checkbox" id="st-prof"><i data-ic="pencil"></i>填资料</label>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button class="btn btn-outline btn-sm" id="st-all" title="全选 = 全自动: 开窗后一路跑到注册落地"><i data-ic="check-circle"></i>全自动</button>
+      <button class="btn btn-outline btn-sm" id="st-none" title="全不选 = 纯手动: 只开窗定位到 chatgpt.com"><i data-ic="square"></i>全手动</button>
+      <button class="btn btn-primary btn-sm" id="st-save">保存</button>
+      <span class="subtitle" id="st-msg"></span>
+    </div>
+    <div class="hint">步骤按勾选组合即"半自动"——没有独立模式了。全自动/全手动按钮直接勾选并保存; 单个勾选改动要点保存。</div>
+  </div>
+
   <!-- 注册节奏 -->
   <div class="card">
     <div class="card-title"><i data-ic="timer"></i>注册拟人节奏（自动注册的等待/击键速度）</div>
@@ -268,6 +294,39 @@ $("ng-test").onclick = async e => {
     : "✗ " + ((r && r.error) || "请求失败");
 };
 
+// ---- 开窗自动化 ----
+const STEP_IDS = ["st-watch", "st-gen", "st-email", "st-code", "st-pwd", "st-prof"];
+const STEP_KEYS = ["step_watch", "step_gen", "step_email", "step_code", "step_password", "step_profile"];
+async function loadSteps() {
+  const r = await fetch("/api/settings").then(r => r.json());
+  STEP_KEYS.forEach((k, i) => { $(STEP_IDS[i]).checked = r[k] !== false; });
+}
+function stepsPayload() {
+  const o = {};
+  STEP_KEYS.forEach((k, i) => { o[k] = $(STEP_IDS[i]).checked; });
+  return o;
+}
+$("st-save").onclick = async () => {
+  const r = await post("/api/settings", stepsPayload());
+  if (r.error) return toast("✗ " + r.error);
+  $("st-msg").textContent = "✓ 已保存";
+  toast("✓ 自动化步骤已存");
+};
+$("st-all").onclick = async () => {
+  STEP_IDS.forEach(id => { $(id).checked = true; });
+  const r = await post("/api/settings", stepsPayload());
+  if (r.error) return toast("✗ " + r.error);
+  $("st-msg").textContent = "✓ 全自动已生效 (全步骤开启)";
+  toast("✓ 全自动: 全步骤已开");
+};
+$("st-none").onclick = async () => {
+  STEP_IDS.forEach(id => { $(id).checked = false; });
+  const r = await post("/api/settings", stepsPayload());
+  if (r.error) return toast("✗ " + r.error);
+  $("st-msg").textContent = "✓ 全手动已生效 (只开窗定位)";
+  toast("✓ 全手动: 只开窗");
+};
+
 // ---- 注册节奏 ----
 async function loadPace() {
   const r = await fetch("/api/settings").then(r => r.json());
@@ -297,6 +356,7 @@ loadUpstream();
 loadCpa();
 loadMother();
 loadNamegen();
+loadSteps();
 loadPace();
 </script>
 </body>
