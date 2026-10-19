@@ -3414,7 +3414,8 @@ class H(BaseHTTPRequestHandler):
                 {"id": k, **{x: v[x] for x in
                              ("email", "running", "code", "at", "dead")
                              if x in v}}
-                for k, v in MAIL_WATCH.items()],
+                for k, v in MAIL_WATCH.items()
+                if not v.get("hidden")],
                 "profiles": [
                     {"id": k, **v} for k, v in PROF_WATCH.items()]})
         if self.path == "/api/mother":
@@ -3780,9 +3781,12 @@ class H(BaseHTTPRequestHandler):
             return self._json({"ok": True})
         if self.path == "/api/mail-codes/stop":
             req = self._body()
-            w = MAIL_WATCH.get(req.get("id"))
+            aid = req.get("id")
+            w = MAIL_WATCH.get(aid)
             if w:
                 w["stop"] = True
+                w["hidden"] = True    # 点 X = 不想再看到它
+            PROF_WATCH.pop(aid, None)
             return self._json({"ok": True})
         if self.path == "/api/accounts/pat-check/stop":
             PAT_JOB["stop"] = True

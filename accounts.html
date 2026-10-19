@@ -528,17 +528,23 @@ async function pollMailWatch() {
               : `<span class="pill pill-dim">资料生成中 …</span>`;
     const st = w && w.running ? "" : `<span class="subtitle">(已停)</span>`;
     return `<div style="display:flex;align-items:center;gap:14px;padding:8px 0;border-bottom:1px solid var(--border)">
-      <span class="mono" style="min-width:230px">${esc(email)}</span>
+      <span class="mono copyable" data-c="${esc(email)}" title="点击复制邮箱" style="min-width:230px">${esc(email)}</span>
       ${code} ${prof} ${st}
-      ${w ? `<button class="btn btn-ghost btn-sm btn-danger" data-mw-stop="${w.id}" style="margin-left:auto">${ui.icon("x")}</button>` : ""}
+      <button class="btn btn-ghost btn-sm btn-danger" data-mw-stop="${id}" title="停止并移除这条" style="margin-left:auto">${ui.icon("x")}</button>
     </div>`;
   }).join("");
 }
 $("mailwatch-list").addEventListener("click", async e => {
-  const cp = e.target.closest(".copyable");
-  if (cp) { navigator.clipboard.writeText(cp.dataset.c); toast("已复制验证码 " + cp.dataset.c); return; }
   const b = e.target.closest("[data-mw-stop]");
-  if (b) { await post("/api/mail-codes/stop", { id: b.dataset.mwStop }); pollMailWatch(); }
+  if (b) {
+    b.disabled = true;
+    await post("/api/mail-codes/stop", { id: b.dataset.mwStop });
+    toast("已停止并移除");
+    pollMailWatch();
+    return;
+  }
+  const cp = e.target.closest(".copyable");
+  if (cp) { navigator.clipboard.writeText(cp.dataset.c); toast("已复制 " + cp.dataset.c); return; }
 });
 setInterval(pollMailWatch, 3000);
 pollMailWatch();
