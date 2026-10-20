@@ -2999,7 +2999,7 @@ def _cpa_worker(ids):
                     break
                 a = next((x for x in _load_accounts()
                           if x["id"] == aid), None)
-                if not a:
+                if not a or a.get("archived"):
                     continue
                 email = a["email"]
                 try:
@@ -3564,7 +3564,7 @@ def _goauth_worker(ids):
                     break
                 a = next((x for x in _load_gaccounts()
                           if x["id"] == aid), None)
-                if not a:
+                if not a or a.get("archived"):
                     continue
                 email = a["email"]
                 try:
@@ -4086,6 +4086,8 @@ class H(BaseHTTPRequestHandler):
                                 (f"{p['scheme']}://{p['host']}:{p['port']}"
                                  if p else None)})
             stats = {"total": len(accs),
+                     "archived": sum(1 for a in accs
+                                     if a.get("archived")),
                      "bound": sum(1 for a in accs if a.get("proxy_id")),
                      "opened": sum(1 for a in accs if a.get("win")),
                      "reg": sum(1 for a in accs
@@ -4138,6 +4140,8 @@ class H(BaseHTTPRequestHandler):
                     d["totp_left"] = 30 - int(time.time() % 30)
                 out.append(d)
             stats = {"total": len(accs),
+                     "archived": sum(1 for a in accs
+                                     if a.get("archived")),
                      "bound": sum(1 for a in accs if a.get("proxy_id")),
                      "opened": sum(1 for a in accs if a.get("win")),
                      "ready": sum(1 for a in accs
@@ -4522,6 +4526,43 @@ class H(BaseHTTPRequestHandler):
                 _save_accounts(accs)
             return self._json({"ok": True, "added": added,
                                "dup": dup, "bad": bad})
+        if self.path == "/api/accounts/archive":
+            # 归档 = 关/删 Roxy 窗口释放配额 + 停接码监听, 记录留着。
+            # 代理绑定保留 —— 恢复开窗还是同一条 IP。
+            req = self._body()
+            ids = set(req.get("ids") or [])
+            accs = _load_accounts()
+            n, werr = 0, []
+            for a in accs:
+                if a["id"] not in ids or a.get("archived"):
+                    continue
+                a["archived"] = True
+                a["archived_at"] = _now()
+                w = MAIL_WATCH.pop(a["id"], None)
+                if w:
+                    w["stop"] = True
+                PROF_WATCH.pop(a["id"], None)
+                if a.get("win"):
+                    e = _roxy_delete_window(a["win"])
+                    a["win"] = None
+                    if e:
+                        werr.append(f"{a['email']}: {e}")
+                n += 1
+            _save_accounts(accs)
+            return self._json({"ok": True, "archived": n,
+                               "window_errors": werr})
+        if self.path == "/api/accounts/restore":
+            req = self._body()
+            ids = set(req.get("ids") or [])
+            accs = _load_accounts()
+            n = 0
+            for a in accs:
+                if a["id"] in ids and a.get("archived"):
+                    a["archived"] = False
+                    a.pop("archived_at", None)
+                    n += 1
+            _save_accounts(accs)
+            return self._json({"ok": True, "restored": n})
         if self.path == "/api/accounts/delete":
             req = self._body()
             ids = set(req.get("ids") or [])
@@ -4581,7 +4622,8 @@ class H(BaseHTTPRequestHandler):
                 return self._json({"error": "已有开窗任务在跑"}, 409)
             ids = set(req.get("ids") or [])
             accs = [a for a in _load_accounts()
-                    if not ids or a["id"] in ids]
+                    if (not ids or a["id"] in ids)
+                    and not a.get("archived")]
             if not accs:
                 return self._json({"error": "没有要开的账号"})
             if len(accs) > 50:
@@ -5036,6 +5078,38 @@ class H(BaseHTTPRequestHandler):
                 _save_gaccounts(accs)
             return self._json({"ok": True, "added": added,
                                "dup": dup, "bad": bad})
+        if self.path == "/api/g/accounts/archive":
+            # 归档 = 关/删 gauto- 窗口释放配额, 记录+凭证+代理绑定全留
+            req = self._body()
+            ids = set(req.get("ids") or [])
+            accs = _load_gaccounts()
+            n, werr = 0, []
+            for a in accs:
+                if a["id"] not in ids or a.get("archived"):
+                    continue
+                a["archived"] = True
+                a["archived_at"] = _now()
+                if a.get("win"):
+                    e = _roxy_delete_window(a["win"])
+                    a["win"] = None
+                    if e:
+                        werr.append(f"{a['email']}: {e}")
+                n += 1
+            _save_gaccounts(accs)
+            return self._json({"ok": True, "archived": n,
+                               "window_errors": werr})
+        if self.path == "/api/g/accounts/restore":
+            req = self._body()
+            ids = set(req.get("ids") or [])
+            accs = _load_gaccounts()
+            n = 0
+            for a in accs:
+                if a["id"] in ids and a.get("archived"):
+                    a["archived"] = False
+                    a.pop("archived_at", None)
+                    n += 1
+            _save_gaccounts(accs)
+            return self._json({"ok": True, "restored": n})
         if self.path == "/api/g/accounts/delete":
             req = self._body()
             ids = set(req.get("ids") or [])
@@ -5096,7 +5170,8 @@ class H(BaseHTTPRequestHandler):
                 return self._json({"error": "已有开窗任务在跑"}, 409)
             ids = set(req.get("ids") or [])
             accs = [a for a in _load_gaccounts()
-                    if not ids or a["id"] in ids]
+                    if (not ids or a["id"] in ids)
+                    and not a.get("archived")]
             if not accs:
                 return self._json({"error": "没有要开的账号"})
             if len(accs) > 50:

@@ -31,7 +31,7 @@
   </div>
 
   <div class="stats-grid">
-    <div class="stat-card"><div class="stat-label">总账号</div><div class="stat-val" id="st-total">0</div><div class="stat-foot">库内全部</div></div>
+    <div class="stat-card"><div class="stat-label">总账号</div><div class="stat-val" id="st-total">0</div><div class="stat-foot" id="st-total-foot">库内全部</div></div>
     <div class="stat-card"><div class="stat-label">已绑代理</div><div class="stat-val" id="st-bound" style="color:#2563eb">0</div><div class="stat-foot">一条代理最多 3 号</div></div>
     <div class="stat-card"><div class="stat-label">已开窗口</div><div class="stat-val" id="st-opened" style="color:#059669">0</div><div class="stat-foot">Roxy gauto- 窗口</div></div>
     <div class="stat-card"><div class="stat-label">凭证已备</div><div class="stat-val" id="st-ready" style="color:#7c3aed">0</div><div class="stat-foot">antigravity JSON 待推</div></div>
@@ -55,7 +55,7 @@
     </div>
   </div>
 
-  <div class="toolbar">
+  <div class="toolbar" id="tb-main">
     <div class="toolbar-row">
       <input class="form-input" id="q" placeholder="搜索邮箱 / 代理 / 备注" style="width:200px">
       <span class="tb-sep"></span>
@@ -64,6 +64,7 @@
       <span class="subtitle" style="font-size:12px" title="开窗只定位到 accounts.google.com —— 登录全人工">开窗只到 Google 登录页</span>
       <span style="flex:1"></span>
       <span class="subtitle" id="sel-hint" style="font-size:12px"></span>
+      <button class="btn btn-outline btn-sm" id="view-arch" title="归档的账号在这 —— 窗口已删留记录, 可恢复/真删"><i data-ic="archive"></i>已归档 <span id="arch-n">0</span></button>
       <button class="btn btn-ghost btn-sm" id="reload" title="刷新"><i data-ic="refresh-cw"></i></button>
     </div>
     <div class="toolbar-row">
@@ -71,13 +72,24 @@
       <button class="btn btn-outline btn-sm" id="cpa-push" title="把已生成的 antigravity 凭证 JSON 推入 CPA 号池 (auth-files)"><i data-ic="cloud-upload"></i>推入池</button>
       <button class="btn btn-outline btn-sm" id="cpa-export" title="导出选中账号的凭证 JSON (zip 打包)"><i data-ic="download"></i>导凭证</button>
       <span class="tb-sep"></span>
-      <button class="btn btn-outline btn-sm btn-danger" id="del-sel"><i data-ic="trash-2"></i>删除选中</button>
+      <button class="btn btn-outline btn-sm" id="del-sel" title="归档 = 删掉 gauto- 窗口释放配额, 账号记录+凭证+代理绑定保留"><i data-ic="archive"></i>归档选中</button>
     </div>
     <div class="toolbar-row" id="oauth-cb-row">
       <i data-ic="link" style="color:var(--text-muted)"></i>
       <span class="subtitle" style="font-size:12px;white-space:nowrap">回调兜底</span>
       <input class="form-input" id="oauth-cb" placeholder="自动截码失败? 把浏览器地址栏 http://localhost:51121/oauth-callback?code=...&state=... 整串贴进来" style="flex:1;font-size:12px">
       <button class="btn btn-outline btn-sm" id="oauth-cb-go">提交回调</button>
+    </div>
+  </div>
+
+  <!-- 归档视图工具条 -->
+  <div class="toolbar" id="tb-arch" style="display:none">
+    <div class="toolbar-row">
+      <button class="btn btn-outline btn-sm" id="arch-back"><i data-ic="rotate-ccw"></i>返回列表</button>
+      <span class="subtitle" id="arch-hint" style="font-size:13px"></span>
+      <span style="flex:1"></span>
+      <button class="btn btn-outline btn-sm" id="arch-restore" title="恢复回正常列表 —— 窗口没了, 下次开窗重建同IP"><i data-ic="rotate-ccw"></i>恢复选中</button>
+      <button class="btn btn-outline btn-sm btn-danger" id="arch-del" title="真删: 记录+凭证+绑定一并清掉, 不可恢复"><i data-ic="trash-2"></i>真删选中</button>
     </div>
   </div>
 
@@ -128,6 +140,7 @@ let oauthTtlMin = 10;
 let page = 1;
 const SIZE = 20;
 const sel = new Set();
+let archView = false;   // false=正常列表, true=已归档视图
 
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g,
@@ -146,8 +159,9 @@ async function post(path, body) {
 
 function filtered() {
   const q = $("q").value.trim().toLowerCase();
-  if (!q) return accounts;
-  return accounts.filter(a =>
+  let list = accounts.filter(a => !!a.archived === archView);
+  if (!q) return list;
+  return list.filter(a =>
     a.email.includes(q) || (a.proxy || "").includes(q) ||
     (a.note || "").toLowerCase().includes(q) ||
     (a.extra || "").toLowerCase().includes(q));
@@ -164,6 +178,9 @@ async function load() {
   $("st-opened").textContent = s.opened ?? 0;
   $("st-ready").textContent = s.ready ?? 0;
   $("st-pushed").textContent = s.pushed ?? 0;
+  const an = s.archived ?? 0;
+  $("arch-n").textContent = an;
+  $("st-total-foot").textContent = an ? `库内全部 · 含归档 ${an}` : "库内全部";
   render();
   // 2FA 码 30s 轮转 —— 卡在最近一次轮转点重拉, 不给用户过期码
   clearTimeout(totpSyncT);
@@ -217,22 +234,27 @@ function render() {
           : a.cpa === "expired"
             ? `<span class="pill pill-bad" title="授权超时, 链接已失效 —— 重跑OAuth授权">${ui.icon("clock")}已过期</span>`
             : `<span class="pill pill-dim">—</span>`;
+    const acts = a.archived
+      ? `<button class="btn btn-ghost btn-sm" data-act="restore" data-id="${a.id}">恢复</button>
+         <button class="btn btn-ghost btn-sm btn-danger" data-act="harddel" data-id="${a.id}">真删</button>`
+      : `<button class="btn btn-ghost btn-sm" data-act="open" data-id="${a.id}">开窗</button>
+        <button class="btn btn-ghost btn-sm" data-act="oauth" data-id="${a.id}" title="单号跑 antigravity OAuth">${ui.icon("key")}</button>
+        ${a.proxy_id ? `<button class="btn btn-ghost btn-sm" data-act="unbind" data-id="${a.id}">解绑</button>` : ""}
+        <button class="btn btn-ghost btn-sm" data-act="arch" data-id="${a.id}" title="归档: 删窗留记录">归档</button>`;
+    const archPill = a.archived
+      ? ` <span class="pill pill-dim" title="归档于 ${esc(a.archived_at || "?")} —— 窗口已删, 代理绑定保留">${ui.icon("archive")}${esc((a.archived_at || "").slice(5, 10))}</span>`
+      : "";
     return `<tr>
       <td><input type="checkbox" class="ck" data-id="${a.id}" ${sel.has(a.id) ? "checked" : ""}></td>
       <td class="mono" style="color:var(--text-dim)">${idx}</td>
-      <td class="mono copyable" data-c="${esc(a.email)}" title="点击复制">${esc(a.email)}</td>
+      <td class="mono copyable" data-c="${esc(a.email)}" title="点击复制">${esc(a.email)}${archPill}</td>
       <td class="mono">${pw}</td>
       <td>${px}</td>
       <td>${win}</td>
       <td>${st}</td>
       <td>${cpa}</td>
       <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(a.note || a.extra || "")}">${esc(a.note || a.extra || "")}</td>
-      <td style="text-align:right;white-space:nowrap">
-        <button class="btn btn-ghost btn-sm" data-act="open" data-id="${a.id}">开窗</button>
-        <button class="btn btn-ghost btn-sm" data-act="oauth" data-id="${a.id}" title="单号跑 antigravity OAuth">${ui.icon("key")}</button>
-        ${a.proxy_id ? `<button class="btn btn-ghost btn-sm" data-act="unbind" data-id="${a.id}">解绑</button>` : ""}
-        <button class="btn btn-ghost btn-sm btn-danger" data-act="del" data-id="${a.id}">删</button>
-      </td>
+      <td style="text-align:right;white-space:nowrap">${acts}</td>
     </tr>`;
   }).join("") || `<tr><td colspan="10" style="text-align:center;color:var(--text-dim);padding:32px">暂无账号 —— 点右上角「导入账号」</td></tr>`;
   $("pager").style.display = list.length > SIZE ? "flex" : "none";
@@ -372,15 +394,57 @@ $("tbody").addEventListener("click", e => {
   if (b.dataset.act === "oauth") startOauth([id], b);
   if (b.dataset.act === "unbind")
     post("/api/g/accounts/unbind", { id }).then(() => load());
-  if (b.dataset.act === "del") {
-    if (!confirm("删除这个G账号? (绑的代理会解绑, gauto- 窗口也会删掉)")) return;
+  if (b.dataset.act === "arch") {
+    post("/api/g/accounts/archive", { ids: [id] }).then(r => {
+      if (r.error) return toast("✗ " + r.error);
+      toast("已归档" + (r.window_errors && r.window_errors.length
+        ? " · 窗口删除失败" : ""));
+      sel.delete(id); load();
+    });
+  }
+  if (b.dataset.act === "restore") {
+    post("/api/g/accounts/restore", { ids: [id] }).then(r => {
+      if (r.error) return toast("✗ " + r.error);
+      toast("已恢复"); sel.delete(id); load();
+    });
+  }
+  if (b.dataset.act === "harddel") {
+    const a = accounts.find(x => x.id === id);
+    if (!confirm(`真删 ${a ? a.email : id} ? 记录+凭证+绑定全清, 不可恢复`)) return;
     post("/api/g/accounts/delete", { ids: [id] }).then(r => {
       if (r.error) return toast("✗ " + r.error);
       toast(`已删 ${r.deleted} 个`);
-      load();
+      sel.delete(id); load();
     });
   }
 });
+
+// ---- 归档视图切换 ----
+function setView(v) {
+  archView = v;
+  sel.clear(); page = 1;
+  $("tb-main").style.display = v ? "none" : "";
+  $("tb-arch").style.display = v ? "" : "none";
+  $("arch-hint").textContent = "";
+  render();
+}
+$("view-arch").onclick = () => setView(true);
+$("arch-back").onclick = () => setView(false);
+$("arch-restore").onclick = async () => {
+  if (!sel.size) return toast("先勾选要恢复的账号");
+  const r = await post("/api/g/accounts/restore", { ids: [...sel] });
+  if (r.error) return toast("✗ " + r.error);
+  toast(`✓ 恢复 ${r.restored} 个`);
+  sel.clear(); load();
+};
+$("arch-del").onclick = async () => {
+  if (!sel.size) return toast("先勾选要真删的账号");
+  if (!confirm(`真删 ${sel.size} 个G账号? 记录+凭证+绑定全清, 不可恢复`)) return;
+  const r = await post("/api/g/accounts/delete", { ids: [...sel] });
+  if (r.error) return toast("✗ " + r.error);
+  toast(`已删 ${r.deleted} 个`);
+  sel.clear(); load();
+};
 $("open-sel").onclick = e => {
   if (!sel.size) return toast("先勾选账号");
   startOpen([...sel], e.target);
@@ -410,10 +474,10 @@ $("cpa-export").onclick = () => {
 };
 $("del-sel").onclick = async () => {
   if (!sel.size) return toast("先勾选账号");
-  if (!confirm(`删除 ${sel.size} 个G账号? (绑的代理会解绑, gauto- 窗口也会删掉)`)) return;
-  const r = await post("/api/g/accounts/delete", { ids: [...sel] });
+  const r = await post("/api/g/accounts/archive", { ids: [...sel] });
   if (r.error) return toast("✗ " + r.error);
-  toast(`已删 ${r.deleted} 个` + (r.windows_deleted ? ` · 关窗 ${r.windows_deleted}` : ""));
+  toast(`已归档 ${r.archived} 个` + (r.window_errors && r.window_errors.length
+    ? ` · ${r.window_errors.length} 个窗口删除失败` : ""));
   sel.clear(); load();
 };
 

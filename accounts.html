@@ -34,7 +34,7 @@
   </div>
 
   <div class="stats-grid">
-    <div class="stat-card"><div class="stat-label">总账号</div><div class="stat-val" id="st-total">0</div><div class="stat-foot">库内全部</div></div>
+    <div class="stat-card"><div class="stat-label">总账号</div><div class="stat-val" id="st-total">0</div><div class="stat-foot" id="st-total-foot">库内全部</div></div>
     <div class="stat-card"><div class="stat-label">已注册</div><div class="stat-val" id="st-reg" style="color:#7c3aed">0</div><div class="stat-foot">完成注册/登录验证</div></div>
     <div class="stat-card"><div class="stat-label">已绑代理</div><div class="stat-val" id="st-bound" style="color:#2563eb">0</div><div class="stat-foot">一条代理最多 3 号</div></div>
     <div class="stat-card"><div class="stat-label">已开窗口</div><div class="stat-val" id="st-opened" style="color:#059669">0</div><div class="stat-foot">Roxy auto- 窗口</div></div>
@@ -77,7 +77,7 @@
     </div>
   </div>
 
-  <div class="toolbar">
+  <div class="toolbar" id="tb-main">
     <div class="toolbar-row">
       <input class="form-input" id="q" placeholder="搜索邮箱 / 代理 / 备注" style="width:200px">
       <select class="form-select" id="f-space" style="font-size:12px" title="按已加入的空间筛选"></select>
@@ -87,6 +87,7 @@
       <span class="subtitle" style="font-size:12px" title="到设置页勾选自动化步骤: 接码监听/资料生成/邮箱/填码/密码/资料">步骤在设置页配</span>
       <span style="flex:1"></span>
       <span class="subtitle" id="sel-hint" style="font-size:12px"></span>
+      <button class="btn btn-outline btn-sm" id="view-arch" title="归档的账号在这 —— 窗口已删留记录, 可恢复/真删"><i data-ic="archive"></i>已归档 <span id="arch-n">0</span></button>
       <button class="btn btn-ghost btn-sm" id="reload" title="刷新"><i data-ic="refresh-cw"></i></button>
     </div>
     <div class="toolbar-row">
@@ -105,7 +106,18 @@
       <button class="btn btn-outline btn-sm" id="cpa-push" title="把已生成的凭证 JSON 推入 CPA 号池 (auth-files)"><i data-ic="cloud-upload"></i>推入池</button>
       <button class="btn btn-outline btn-sm" id="cpa-export" title="导出选中账号的 CPA 凭证 JSON (zip 打包)"><i data-ic="download"></i>导凭证</button>
       <span class="tb-sep"></span>
-      <button class="btn btn-outline btn-sm btn-danger" id="del-sel"><i data-ic="trash-2"></i>删除选中</button>
+      <button class="btn btn-outline btn-sm" id="del-sel" title="归档 = 删掉 Roxy 窗口释放配额, 账号记录+凭证+代理绑定保留"><i data-ic="archive"></i>归档选中</button>
+    </div>
+  </div>
+
+  <!-- 归档视图工具条 (替代上面两条) -->
+  <div class="toolbar" id="tb-arch" style="display:none">
+    <div class="toolbar-row">
+      <button class="btn btn-outline btn-sm" id="arch-back"><i data-ic="rotate-ccw"></i>返回列表</button>
+      <span class="subtitle" id="arch-hint" style="font-size:13px"></span>
+      <span style="flex:1"></span>
+      <button class="btn btn-outline btn-sm" id="arch-restore" title="恢复回正常列表 —— 窗口没了, 下次开窗重建同IP"><i data-ic="rotate-ccw"></i>恢复选中</button>
+      <button class="btn btn-outline btn-sm btn-danger" id="arch-del" title="真删: 记录+绑定一并清掉, 不可恢复"><i data-ic="trash-2"></i>真删选中</button>
     </div>
   </div>
 
@@ -161,6 +173,7 @@ let oauthTtlMin = 10; // OAuth 授权时效(分钟) —— 超时的 pending 后
 let page = 1;
 const SIZE = 20;
 const sel = new Set();
+let archView = false;   // false=正常列表, true=已归档视图
 
 
 function esc(s) {
@@ -193,7 +206,7 @@ function accWsNames(a) {
 function filtered() {
   const q = $("q").value.trim().toLowerCase();
   const fs = $("f-space").value;
-  let list = accounts;
+  let list = accounts.filter(a => !!a.archived === archView);
   // "未加入" = 除PAT外没有任何空间成员记录
   if (fs === "__none__") list = list.filter(a =>
     !accWsNames(a).some(n => n !== patWsName));
@@ -219,6 +232,9 @@ async function load() {
   $("st-bound").textContent = s.bound ?? 0;
   $("st-opened").textContent = s.opened ?? 0;
   $("st-unbound").textContent = s.unbound ?? 0;
+  const an = s.archived ?? 0;
+  $("arch-n").textContent = an;
+  $("st-total-foot").textContent = an ? `库内全部 · 含归档 ${an}` : "库内全部";
   if (r.target) $("target-url").textContent = r.target.replace(/^https?:\/\//, "");
   // 空间筛选下拉 (实况成员也入选项, PAT 标注; 保留当前选择)
   const fsv = $("f-space").value;
@@ -308,10 +324,20 @@ function render() {
           : a.cpa === "expired"
             ? `<span class="pill pill-bad" title="授权超时, 链接已失效 —— 重跑OAuth授权">${ui.icon("clock")}已过期</span>`
             : `<span class="pill pill-dim">—</span>`;
+    const acts = a.archived
+      ? `<button class="btn btn-ghost btn-sm" data-act="restore" data-id="${a.id}">恢复</button>
+         <button class="btn btn-ghost btn-sm btn-danger" data-act="harddel" data-id="${a.id}">真删</button>`
+      : `<button class="btn btn-ghost btn-sm" data-act="open" data-id="${a.id}">开窗</button>
+        ${a.mail_url ? `<button class="btn btn-ghost btn-sm" data-act="watch" data-id="${a.id}" title="开接码监听">${ui.icon("mail")}</button>` : ""}
+        ${a.proxy_id ? `<button class="btn btn-ghost btn-sm" data-act="unbind" data-id="${a.id}">解绑</button>` : ""}
+        <button class="btn btn-ghost btn-sm" data-act="arch" data-id="${a.id}" title="归档: 删窗留记录">归档</button>`;
+    const archPill = a.archived
+      ? ` <span class="pill pill-dim" title="归档于 ${esc(a.archived_at || "?")} —— 窗口已删, 代理绑定保留">${ui.icon("archive")}${esc((a.archived_at || "").slice(5, 10))}</span>`
+      : "";
     return `<tr>
       <td><input type="checkbox" class="ck" data-id="${a.id}" ${sel.has(a.id) ? "checked" : ""}></td>
       <td class="mono" style="color:var(--text-dim)">${idx}</td>
-      <td class="mono copyable" data-c="${esc(a.email)}" title="点击复制">${esc(a.email)}</td>
+      <td class="mono copyable" data-c="${esc(a.email)}" title="点击复制">${esc(a.email)}${archPill}</td>
       <td class="mono">${pw}</td>
       <td>${px}</td>
       <td>${win}</td>
@@ -320,12 +346,7 @@ function render() {
       <td>${sp}</td>
       <td>${cpa}</td>
       <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(a.note || a.extra || "")}">${esc(a.note || a.extra || "")}</td>
-      <td style="text-align:right;white-space:nowrap">
-        <button class="btn btn-ghost btn-sm" data-act="open" data-id="${a.id}">开窗</button>
-        ${a.mail_url ? `<button class="btn btn-ghost btn-sm" data-act="watch" data-id="${a.id}" title="开接码监听">${ui.icon("mail")}</button>` : ""}
-        ${a.proxy_id ? `<button class="btn btn-ghost btn-sm" data-act="unbind" data-id="${a.id}">解绑</button>` : ""}
-        <button class="btn btn-ghost btn-sm btn-danger" data-act="del" data-id="${a.id}">删</button>
-      </td>
+      <td style="text-align:right;white-space:nowrap">${acts}</td>
     </tr>`;
   }).join("") || `<tr><td colspan="12" style="text-align:center;color:var(--text-dim);padding:32px">暂无账号 —— 点右上角「导入账号」</td></tr>`;
   $("pager").style.display = list.length > SIZE ? "flex" : "none";
@@ -443,14 +464,55 @@ $("tbody").addEventListener("click", async e => {
   } else if (act === "unbind") {
     await post("/api/accounts/unbind", { id });
     await load();
-  } else if (act === "del") {
-    if (!confirm(`删除账号 ${a.email} ? (同时解绑代理${a.win ? "并删除其 Roxy 窗口" : ""})`)) return;
+  } else if (act === "arch") {
+    const r = await post("/api/accounts/archive", { ids: [id] });
+    if (r.error) return toast("✗ " + r.error);
+    toast(`已归档 ${a.email}` + (a.win ? " (窗口已删)" : ""));
+    sel.delete(id);
+    await load();
+  } else if (act === "restore") {
+    const r = await post("/api/accounts/restore", { ids: [id] });
+    if (r.error) return toast("✗ " + r.error);
+    toast(`已恢复 ${a.email}`);
+    sel.delete(id);
+    await load();
+  } else if (act === "harddel") {
+    if (!confirm(`真删账号 ${a.email} ? 记录+凭证+代理绑定全清, 不可恢复`)) return;
     const r = await post("/api/accounts/delete", { ids: [id] });
     if (r.windows_deleted) toast(`已删账号 + ${r.windows_deleted} 个窗口`);
     sel.delete(id);
     await load();
   }
 });
+
+// ---- 归档视图切换 ----
+function setView(v) {
+  archView = v;
+  sel.clear(); page = 1;
+  $("tb-main").style.display = v ? "none" : "";
+  $("tb-arch").style.display = v ? "" : "none";
+  $("arch-hint").textContent = "";
+  render();
+}
+$("view-arch").onclick = () => setView(true);
+$("arch-back").onclick = () => setView(false);
+$("arch-restore").onclick = async () => {
+  if (!sel.size) return toast("先勾选要恢复的账号");
+  const r = await post("/api/accounts/restore", { ids: [...sel] });
+  if (r.error) return toast("✗ " + r.error);
+  toast(`✓ 恢复 ${r.restored} 个`);
+  sel.clear();
+  await load();
+};
+$("arch-del").onclick = async () => {
+  if (!sel.size) return toast("先勾选要真删的账号");
+  if (!confirm(`真删 ${sel.size} 个账号? 记录+凭证+代理绑定全清, 不可恢复`)) return;
+  const r = await post("/api/accounts/delete", { ids: [...sel] });
+  if (r.error) return toast("✗ " + r.error);
+  toast(`已删 ${r.deleted} 个`);
+  sel.clear();
+  await load();
+};
 
 $("do-import").onclick = async () => {
   const text = $("import-text").value;
@@ -477,9 +539,11 @@ $("open-all").onclick = e => {
 };
 $("del-sel").onclick = async () => {
   if (!sel.size) return toast("先勾选账号");
-  if (!confirm(`删除选中 ${sel.size} 个账号? (同时解绑代理并删除其 Roxy 窗口)`)) return;
-  const r = await post("/api/accounts/delete", { ids: [...sel] });
-  if (r.windows_deleted) toast(`已删账号 + ${r.windows_deleted} 个窗口`);
+  const r = await post("/api/accounts/archive", { ids: [...sel] });
+  if (r.error) return toast("✗ " + r.error);
+  toast(`已归档 ${r.archived} 个` +
+    (r.window_errors && r.window_errors.length
+      ? ` · ${r.window_errors.length} 个窗口删除失败` : ""));
   sel.clear();
   await load();
 };
