@@ -809,9 +809,20 @@ $("cpa-push").onclick = e => {
     load();
   });
 };
-$("cpa-export").onclick = () => {
+$("cpa-export").onclick = async () => {
   if (!sel.size) return toast("先勾选有凭证的账号");
-  window.location = "/api/accounts/cred-export?ids=" + [...sel].join(",");
+  const r = await fetch("/api/accounts/cred-export?ids=" + [...sel].join(","));
+  if (!r.ok) {
+    const j = await r.json().catch(() => null);
+    return toast("✗ " + ((j && j.error) || `导出失败 ${r.status}`));
+  }
+  const blob = await r.blob();
+  const cd = r.headers.get("content-disposition") || "";
+  const name = (cd.match(/filename="([^"]+)"/) || [])[1] || "cpa-creds.zip";
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = name; a.click();
+  URL.revokeObjectURL(a.href);
+  toast("✓ 凭证包已下载");
 };
 $("oauth-cb-go").onclick = async () => {
   const url = $("oauth-cb").value.trim();

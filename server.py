@@ -4507,7 +4507,6 @@ class H(BaseHTTPRequestHandler):
                 and (not ids or a["id"] in ids)]
             if not items:
                 return self._json({"error": "没有可导出的凭证"}, 404)
-            import io, zipfile
             buf = io.BytesIO()
             with zipfile.ZipFile(buf, "w",
                                  zipfile.ZIP_DEFLATED) as z:
@@ -4588,7 +4587,8 @@ class H(BaseHTTPRequestHandler):
                 and (not ids or a["id"] in ids)]
             if not items:
                 return self._json(
-                    {"error": "没有可导出的凭证 (先跑🔗OAuth授权)"})
+                    {"error": "没有可导出的凭证 (先跑🔗OAuth授权)"},
+                    404)
             buf = io.BytesIO()
             with zipfile.ZipFile(buf, "w",
                                  zipfile.ZIP_DEFLATED) as z:
