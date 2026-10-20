@@ -204,7 +204,7 @@ function render() {
     const cpa = a.cpa === "yes"
       ? `<a class="pill pill-ok" href="/api/g/accounts/${a.id}/cred" title="已入CPA池 ${esc(a.cpa_at||"")} —— 点下载凭证 ${esc(a.cred_file||"")}">已入池</a>`
       : a.cpa === "ready"
-        ? `<a class="pill" style="background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe" href="/api/g/accounts/${a.id}/cred" title="凭证已备好 ${esc(a.cred_at||"")} · project ${esc((a.cred||{}).project_id||"?")} —— 点下载, 勾选后推入池">已生成</a>`
+        ? `<a class="pill" style="background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe" href="/api/g/accounts/${a.id}/cred" title="凭证已备好 ${esc(a.cred_at||"")} · project ${esc((a.cred||{}).project_id||"缺·CPA首刷自补")}${a.cred_warn ? " ⚠ " + esc(a.cred_warn) : ""} —— 点下载, 勾选后推入池">已生成${a.cred_warn ? "⚠" : ""}</a>`
         : a.cpa === "pending"
           ? (() => {
               const left = a.oauth_at

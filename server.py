@@ -3185,15 +3185,41 @@ def _g_project_id(p, at, log=None):
                 pid = rp.strip()
             if pid:
                 return pid, None
+            # LRO 报 done 但还没回填 —— 开通生效有传播延迟,
+            # 等几秒回头再查 loadCodeAssist 几次
+            if log:
+                log("  onboard done 但没回填 pid, "
+                    "重查 loadCodeAssist ...")
+            for _ in range(3):
+                time.sleep(3)
+                try:
+                    st2, j2 = _gcode_call(
+                        p, "loadCodeAssist",
+                        {"metadata": json.loads(
+                            GCODE_META_ONBOARD)}, at)
+                except Exception:
+                    continue
+                if st2 != 200:
+                    continue
+                cp2 = j2.get("cloudaicompanionProject")
+                if isinstance(cp2, str):
+                    pid = cp2.strip()
+                elif isinstance(cp2, dict):
+                    pid = (cp2.get("id") or "").strip()
+                if pid:
+                    return pid, None
             return None, "onboardUser 完成但响应里没 project_id"
         time.sleep(2)
     return None, "onboardUser 轮询超时"
 
 
 def _gcred(j, email, pid, proxy_url):
-    """token 响应 → CPA antigravity 凭证 JSON (照池内现存文件格式)。"""
+    """token 响应 → CPA antigravity 凭证 JSON (照池内现存文件格式)。
+    pid 拿不到时整个 project_id 键省略 —— 写 "" 会让 CPA 的
+    ensureAntigravityProjectID (!=nil 判断) 永不懒取; 键缺席才会
+    在下次刷新时用 access_token 重查补上。"""
     now = time.time()
-    return {
+    cred = {
         "type": "antigravity",
         "email": email,
         "access_token": j.get("access_token") or "",
@@ -3204,8 +3230,10 @@ def _gcred(j, email, pid, proxy_url):
                                      now + int(j.get("expires_in")
                                                or 0))),
         "timestamp": int(now * 1000),
-        "project_id": pid or "",
         "proxy_url": proxy_url}
+    if pid:
+        cred["project_id"] = pid
+    return cred
 
 
 def _gcred_name(cred):
@@ -3242,16 +3270,24 @@ def _goauth_finish(p, a, code, log):
             % (email, a["email"]))
     pid, err = _g_project_id(p, j["access_token"], log)
     if err:
-        return "project_id: " + err
-    cred = _gcred(j, a["email"], pid, _proxy_url(p, "url"))
+        # rt/at 已到手 —— project_id 缺不阻塞出凭证:
+        # 键省略, CPA 下次刷新用 proxy_url 同IP懒补
+        a["cred_warn"] = "project_id: " + err + " (CPA刷新时自补)"
+        log("  ⚠ project_id 拿不到 (%s) —— 凭证照出, "
+            "CPA 首刷时自补" % err)
+    else:
+        a.pop("cred_warn", None)
+    cred = _gcred(j, a["email"], pid or "", _proxy_url(p, "url"))
     a["cred"] = cred
     a["cred_file"] = _gcred_name(cred)
     a["cred_at"] = _now()
     a["cpa"] = "ready"
     for k in ("oauth_url", "oauth_state", "oauth_at"):
         a.pop(k, None)
-    log("✓ %s: token+project_id(%s) 到手, 凭证 %s 已备好"
-        % (a["email"], pid, a["cred_file"]))
+    log("✓ %s: token%s 到手, 凭证 %s 已备好"
+        % (a["email"],
+           "+project_id(%s)" % pid if pid else "(project_id待补)",
+           a["cred_file"]))
     return None
 
 
