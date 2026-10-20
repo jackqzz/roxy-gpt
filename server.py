@@ -4140,6 +4140,8 @@ class H(BaseHTTPRequestHandler):
             return self.send_error(404)
         self.send_response(200)
         self.send_header("content-type", ctype)
+        # 本地管理页随时在改: 禁启发式缓存, 否则旧页面缺新功能
+        self.send_header("Cache-Control", "no-cache")
         self.send_header("content-length", str(len(b)))
         self.end_headers()
         self.wfile.write(b)
