@@ -79,9 +79,57 @@
     });
   }
 
-  window.ui = { icon, hydrateIcons, renderNav };
+  // ---- 页面状态持久化: [data-persist] 控件刷新后保留值 ----
+  // 存 localStorage, key 按 页面路径#控件id; select 的选项还没灌进来时
+  // 先把值挂 _pending, 页面灌完选项调 ui.persistReapply() 落上。
+  const PKEY = "ui.persist:" + location.pathname;
+
+  function persistLoad() {
+    try { return JSON.parse(localStorage.getItem(PKEY) || "{}"); }
+    catch (e) { return {}; }
+  }
+  function persistSave(el) {
+    const all = persistLoad();
+    all[el.id] = el.type === "checkbox" ? el.checked : el.value;
+    try { localStorage.setItem(PKEY, JSON.stringify(all)); }
+    catch (e) {}
+  }
+  function persistApply(el, v) {
+    if (el.type === "checkbox") { el.checked = !!v; return; }
+    if (el.tagName === "SELECT" &&
+        ![...el.options].some(o => o.value === v)) {
+      el._pendingPersist = v;          // 选项还没灌进来
+      return;
+    }
+    el.value = v;
+    el._pendingPersist = null;
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+  function persistReapply() {
+    document.querySelectorAll("select[data-persist]").forEach(el => {
+      if (el._pendingPersist == null) return;
+      const v = el._pendingPersist;
+      if ([...el.options].some(o => o.value === v)) {
+        el.value = v;
+        el._pendingPersist = null;
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    });
+  }
+  function bindPersist() {
+    const saved = persistLoad();
+    document.querySelectorAll("[data-persist]").forEach(el => {
+      if (!el.id) return;
+      if (el.id in saved) persistApply(el, saved[el.id]);
+      el.addEventListener("change", () => persistSave(el));
+      el.addEventListener("input", () => persistSave(el));
+    });
+  }
+
+  window.ui = { icon, hydrateIcons, renderNav, persistReapply };
   document.addEventListener("DOMContentLoaded", () => {
     renderNav();
     hydrateIcons();
+    bindPersist();
   });
 })();

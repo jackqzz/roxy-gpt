@@ -67,7 +67,7 @@
       placeholder="38.15.28.178:42635:user:pass&#10;socks5://user:pass@154.64.133.60:39935"></textarea>
     <div style="display:flex;align-items:center;gap:10px;margin-top:10px;flex-wrap:wrap">
       <button class="btn btn-primary btn-sm" id="do-import">确认导入</button>
-      <select id="import-scheme" class="form-select" style="font-size:12px">
+      <select id="import-scheme" data-persist class="form-select" style="font-size:12px">
         <option value="socks5" selected>无前缀行按 socks5</option>
         <option value="http">无前缀行按 http</option>
       </select>
@@ -78,12 +78,12 @@
   <!-- 工具栏 -->
   <div class="toolbar">
     <div class="toolbar-row">
-      <input class="form-input" id="q" placeholder="搜索 host / 账密 / 备注" style="width:200px">
+      <input class="form-input" id="q" data-persist placeholder="搜索 host / 账密 / 备注" style="width:200px">
       <span class="tb-sep"></span>
       <button class="btn btn-outline btn-sm" id="check-sel"><i data-ic="shield-check"></i>测活选中</button>
       <button class="btn btn-outline btn-sm" id="check-all"><i data-ic="shield-check"></i>测活全部</button>
       <span class="tb-sep"></span>
-      <select id="exp-fmt" class="form-select" style="font-size:12px">
+      <select id="exp-fmt" data-persist class="form-select" style="font-size:12px">
         <option value="colon">host:port:user:pass</option>
         <option value="url">socks5://user:pass@host:port</option>
         <option value="json">完整 JSON (备份)</option>

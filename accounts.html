@@ -79,8 +79,8 @@
 
   <div class="toolbar" id="tb-main">
     <div class="toolbar-row">
-      <input class="form-input" id="q" placeholder="搜索邮箱 / 代理 / 备注" style="width:200px">
-      <select class="form-select" id="f-space" style="font-size:12px" title="按已加入的空间筛选"></select>
+      <input class="form-input" id="q" data-persist placeholder="搜索邮箱 / 代理 / 备注" style="width:200px">
+      <select class="form-select" id="f-space" data-persist style="font-size:12px" title="按已加入的空间筛选"></select>
       <span class="tb-sep"></span>
       <button class="btn btn-primary btn-sm" id="open-sel"><i data-ic="app-window"></i>开窗选中</button>
       <button class="btn btn-outline btn-sm" id="open-all"><i data-ic="layout-grid"></i>全部开窗</button>
@@ -93,8 +93,8 @@
     <div class="toolbar-row">
       <button class="btn btn-outline btn-sm" id="pat-sel"><i data-ic="shield-check"></i>PAT检验</button>
       <span class="tb-sep"></span>
-      <select class="form-select" id="join-mother" style="font-size:12px;max-width:150px" title="邀请子号进谁的空间 (空间母号页导入)"></select>
-      <select class="form-select" id="join-seat" style="font-size:12px" title="席位类型: 标准 default / 高级 prolite (codex用量计费空间固定usage_based)">
+      <select class="form-select" id="join-mother" data-persist style="font-size:12px;max-width:150px" title="邀请子号进谁的空间 (空间母号页导入)"></select>
+      <select class="form-select" id="join-seat" data-persist style="font-size:12px" title="席位类型: 标准 default / 高级 prolite (codex用量计费空间固定usage_based)">
         <option value="prolite">高级席位</option>
         <option value="default">标准席位</option>
       </select>
@@ -245,6 +245,7 @@ async function load() {
         `<option value="${esc(x)}" ${x === fsv ? "selected" : ""}>${esc(x)}${x === patWsName ? " (PAT)" : ""}</option>`).join("");
   if (fsv && ![...$("f-space").options].some(o => o.value === fsv && o.value))
     $("f-space").value = "";
+  ui.persistReapply();   // data-persist 的待应用值 (f-space 等动态选项)
   // 加入空间母号下拉
   loadMothers();
   render();
@@ -259,6 +260,7 @@ async function loadMothers() {
     ? mothersCache.map(m =>
         `<option value="${esc(m.name)}" ${m.name === cur ? "selected" : ""}>${esc(m.name)}${m.ws_name ? " · " + esc(m.ws_name) : ""}</option>`).join("")
     : `<option value="">先到母号页导入</option>`;
+  ui.persistReapply();
 }
 
 function render() {
