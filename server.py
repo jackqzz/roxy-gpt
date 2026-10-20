@@ -3954,7 +3954,14 @@ def _open_workers():
         return OPEN_WORKERS
 
 
-REG_WAIT_SECS = 30 * 60   # 开窗后等人工确认注册结果的最长时长
+REG_WAIT_SECS = 30 * 60   # 开窗后等注册完成确认的最长时长
+
+# 注册落地信号: chatgpt.com 页 /api/auth/session 带 user = 已登录。
+# (登出页也可能渲染输入框, DOM 不可靠; session 空/401 即未完成)
+_REG_DONE_JS = ("fetch('/api/auth/session',{credentials:'include'})"
+                ".then(r=>r.ok?r.json():null)"
+                ".then(s=>s&&s.user?'session':null)"
+                ".catch(()=>null)")
 
 
 def _open_worker(accs):
@@ -4096,9 +4103,10 @@ def _open_worker(accs):
                 elif r4 != "stopped":
                     log(f"  [{email}] 📝 自动填资料失败: {r4}"
                         f" —— 请手动继续")
-            # 串行关键: 系统不知道半自动/手动注册何时完成 →
-            # 未标记注册的号原地等待, 人工在接码面板点
-            # 「完成注册/跳过」才放行下一个窗口 (并发=1 即真串行)。
+            # 串行关键: 未标记注册的号原地等待, 直到 ——
+            # A) 页面实况认到已登录主界面 (api/auth/session 有 user)
+            # B) 人工在接码面板点「完成注册/跳过」
+            # C) 窗口连不上(关了)/超时/手动停止 → 放行
             # reg_skip 进窗先清, 防上次跳过状态卡死本次等待。
             if not a.get("reg") and not a.get("email_dead") \
                     and not _stopped():
@@ -4110,25 +4118,80 @@ def _open_worker(accs):
                     a["id"], {"email": email, "running": False,
                               "code": None, "at": None,
                               "dead": False, "stop": False})
-                log(f"  [{email}] ⏸ 等人工确认注册结果 "
-                    "(接码面板「完成注册/跳过」)")
+                log(f"  [{email}] ⏸ 等注册完成信号 "
+                    "(登录态自动识别 / 面板「完成注册/跳过」)")
                 t0 = time.time()
-                while not _stopped() \
-                        and time.time() - t0 < REG_WAIT_SECS:
-                    cur = next((x for x in _load_accounts()
-                                if x["id"] == a["id"]), None) or {}
-                    if cur.get("reg") in ("new", "yes"):
-                        a["reg"] = cur["reg"]
-                        a["reg_at"] = cur.get("reg_at")
-                        log(f"  [{email}] ✓ 注册已确认 → 下一个")
-                        break
-                    if cur.get("reg_skip") or cur.get("email_dead"):
-                        if cur.get("email_dead"):
-                            a["email_dead"] = True
-                            a["status"] = "email_dead"
-                        log(f"  [{email}] ⏭ 已跳过/失效 → 下一个")
-                        break
-                    time.sleep(3)
+                done_how = None
+                from playwright.sync_api import sync_playwright
+                try:
+                    with sync_playwright() as pw:
+                        brw, bad_cdp = None, 0
+                        while not _stopped() \
+                                and time.time() - t0 < REG_WAIT_SECS:
+                            # 信号B: 人工标记 (面板按钮写账号记录)
+                            cur = next((x for x in _load_accounts()
+                                        if x["id"] == a["id"]),
+                                       None) or {}
+                            if cur.get("reg") in ("new", "yes"):
+                                a["reg"] = cur["reg"]
+                                a["reg_at"] = cur.get("reg_at")
+                                done_how = "人工确认"
+                                break
+                            if cur.get("reg_skip") \
+                                    or cur.get("email_dead"):
+                                if cur.get("email_dead"):
+                                    a["email_dead"] = True
+                                    a["status"] = "email_dead"
+                                done_how = "人工跳过/邮箱失效"
+                                break
+                            # 信号A: 页面实况 —— 任一 chatgpt.com
+                            # 标签页带登录态即判完成
+                            try:
+                                if brw is None:
+                                    brw = pw.chromium \
+                                        .connect_over_cdp(ws)
+                                hit = None
+                                for ctx0 in brw.contexts:
+                                    for pg0 in ctx0.pages:
+                                        if "chatgpt.com" not in \
+                                                (pg0.url or ""):
+                                            continue
+                                        try:
+                                            hit = pg0.evaluate(
+                                                _REG_DONE_JS)
+                                        except Exception:
+                                            pass
+                                        if hit:
+                                            break
+                                    if hit:
+                                        break
+                                bad_cdp = 0
+                                if hit:
+                                    a["reg"] = "new"
+                                    a["reg_at"] = _now()
+                                    done_how = "登录态自动识别"
+                                    break
+                            except Exception:
+                                bad_cdp += 1
+                                try:
+                                    brw.close()
+                                except Exception:
+                                    pass
+                                brw = None
+                                if bad_cdp >= 3:
+                                    done_how = "窗口已关/连不上"
+                                    break
+                            time.sleep(3)
+                except Exception as e2:
+                    log(f"  [{email}] 等待轮询异常: "
+                        f"{str(e2)[:80]}")
+                if done_how:
+                    log(f"  [{email}] ✓ {done_how} → 下一个")
+                    if a.get("reg") in ("new", "yes"):
+                        OPEN_JOB["results"][a["id"]] = \
+                            f"已注册({done_how})"
+                    elif done_how == "人工跳过/邮箱失效":
+                        OPEN_JOB["results"][a["id"]] = "已跳过"
                 else:
                     log(f"  [{email}] ⏸ 等确认结束 "
                         f"(超时 {REG_WAIT_SECS // 60}min 或已停止)"
