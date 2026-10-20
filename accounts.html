@@ -210,6 +210,7 @@ function filtered() {
   // "未加入" = 除PAT外没有任何空间成员记录
   if (fs === "__none__") list = list.filter(a =>
     !accWsNames(a).some(n => n !== patWsName));
+  else if (fs === "__left__") list = list.filter(a => a.space_left);
   else if (fs) list = list.filter(a => accWsNames(a).includes(fs));
   if (!q) return list;
   return list.filter(a =>
@@ -241,6 +242,7 @@ async function load() {
   const spaces = [...new Set(accounts.flatMap(accWsNames))].sort();
   $("f-space").innerHTML = `<option value="">全部空间</option>`
     + `<option value="__none__">未加入空间</option>`
+    + `<option value="__left__">已退出空间</option>`
     + spaces.map(x =>
         `<option value="${esc(x)}" ${x === fsv ? "selected" : ""}>${esc(x)}${x === patWsName ? " (PAT)" : ""}</option>`).join("");
   if (fsv && ![...$("f-space").options].some(o => o.value === fsv && o.value))
@@ -308,6 +310,8 @@ function render() {
           && !(a.ws_list || []).find(w => w.id === a.ws_id)
           && a.ws_id !== a.space_ws)
         h += ` <span class="pill pill-dim" title="PAT母号空间 ${esc(a.ws_id)}">${esc(patWsName)}(PAT)</span>`;
+      if (a.space_left && a.space_left.ws !== a.space_ws)
+        h += ` <span class="pill pill-dim" style="opacity:.65;text-decoration:line-through" title="已于 ${esc(a.space_left.at || "")} 退出${a.space_left.by === "gone" ? " (实况发现已不在)" : ""}">${esc(a.space_left.name || "空间")}·已退</span>`;
       return h || `<span class="pill pill-dim">—</span>`;
     })();
     const cpa = a.cpa === "yes"

@@ -1190,8 +1190,81 @@ def _email_fill_step(pg, email, log, hdelay, tdelay, stopped=None):
     return None
 
 
-def _chatgpt_goto(ws):
-    """半自动: 只把窗口导航到 chatgpt.com 就交还人工。"""
+# -------- Roxy 窗口页顶助手条 (GPT): 邮箱/密码/实时接码/生成资料 --------
+# 码和资料都是后端异步到的 (MAIL_WATCH 接码轮询 / PROF_WATCH AI生成),
+# 所以页内脚本每 3s 轮询 /api/helper?email= 拿最新值 (CORS/PNA 已开)。
+_HELPER_JS = r"""(()=>{
+const E=@E@,ID="__ghbar2",
+API="http://127.0.0.1:8322/api/helper?email="+encodeURIComponent(E);
+let D={},bar=null,elCd=null,elPw=null,elNm=null,elAg=null,dead=false;
+const cp=(t,c)=>{const old=c.textContent;const lg=()=>{const ta=document.createElement("textarea");ta.value=t;ta.style.cssText="position:fixed;opacity:0;top:0";document.body.appendChild(ta);ta.select();try{document.execCommand("copy")}catch(e){}ta.remove()};const ok=()=>{c.textContent="✓ 已复制";setTimeout(()=>{c.textContent=old},900)};if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(t).then(ok).catch(()=>{lg();ok()})}else{lg();ok()}};
+const chip=(txt,tip,fn,st)=>{const c=document.createElement("span");c.textContent=txt;c.title=tip||"";c.style.cssText="background:rgba(255,255,255,.13);border:1px solid rgba(255,255,255,.28);border-radius:6px;padding:3px 9px;cursor:pointer;white-space:nowrap;font-family:ui-monospace,monospace;font-size:12px"+(st||"");c.addEventListener("click",ev=>{ev.preventDefault();ev.stopPropagation();fn(c)});return c};
+const render=()=>{if(!bar)return;
+  if(D.password&&!elPw){elPw=chip("密码 •••","复制密码",
+    c=>cp(D.password,c));bar.insertBefore(elPw,bar.lastChild)}
+  if(elCd){
+    if(D.mail_dead){elCd.textContent="邮箱失效";
+      elCd.title="接码接口判定该邮箱不可用 (602)"}
+    else if(D.code){elCd.textContent="码 "+D.code;
+      elCd.title="收到于 "+(D.code_at||"")+" —— 点复制"}
+    else{elCd.textContent=D.mail_running?"等码中…":"码 --";
+      elCd.title="还没收到验证码"}}
+  if(D.name&&elNm){elNm.textContent=D.name;elNm.style.display=""}
+  if(D.age!=null&&elAg){elAg.textContent=D.age+"岁";
+    elAg.style.display=""}};
+const poll=async()=>{try{const r=await fetch(API);
+  if(r.ok){const j=await r.json();if(j&&j.found){D=j;render()}}}
+catch(e){}};
+const mount=()=>{if(dead||document.getElementById(ID)||!document.body)
+  return;
+  bar=document.createElement("div");bar.id=ID;
+  bar.style.cssText="position:fixed;top:0;left:0;right:0;z-index:2147483647;display:flex;align-items:center;gap:8px;padding:6px 10px;background:rgba(15,23,42,.93);color:#e2e8f0;font:13px/1.4 -apple-system,system-ui,sans-serif;box-shadow:0 2px 8px rgba(0,0,0,.4);user-select:none";
+  const tag=document.createElement("b");tag.textContent="助手";
+  tag.style.cssText="color:#7dd3fc;font-size:12px";bar.appendChild(tag);
+  if(E)bar.appendChild(chip(E,"复制邮箱",c=>cp(E,c)));
+  if(D.password)bar.appendChild(elPw=chip("密码 •••","复制密码",
+    c=>cp(D.password,c)));
+  elCd=chip("码 --","邮箱验证码 —— 点复制",
+    c=>{if(D.code)cp(D.code,c)},";color:#fbbf24");
+  bar.appendChild(elCd);
+  elNm=chip("","复制姓名",c=>cp(D.name||"",c),
+    ";color:#86efac;display:none");bar.appendChild(elNm);
+  elAg=chip("","复制年龄",c=>cp(String(D.age||""),c),
+    ";color:#86efac;display:none");bar.appendChild(elAg);
+  const x=document.createElement("span");x.textContent="×";
+  x.title="收起助手条 (页面跳转会再出现)";
+  x.style.cssText="margin-left:auto;cursor:pointer;opacity:.65;font-size:15px;padding:0 4px";
+  x.addEventListener("click",ev=>{ev.stopPropagation();dead=true;
+    bar=null;elCd=elPw=elNm=elAg=null;x.parentNode.remove()});
+  bar.appendChild(x);document.body.appendChild(bar);render()};
+mount();poll();
+setInterval(poll,3000);
+setInterval(mount,2500);
+})();"""
+
+
+def _gpt_helper_js(a):
+    return _HELPER_JS.replace(
+        "@E@", json.dumps(a.get("email") or ""))
+
+
+def _gpt_inject_helper(pg, a):
+    """页顶挂助手条: add_init_script 管后续每次导航重建,
+    evaluate 管当前页。"""
+    js = _gpt_helper_js(a)
+    try:
+        pg.add_init_script(js)
+    except Exception:
+        pass
+    try:
+        pg.evaluate(js)
+    except Exception:
+        pass
+
+
+def _chatgpt_goto(ws, init_js=None):
+    """半自动: 把窗口导航到 chatgpt.com; init_js 提供时注入
+    页顶助手条 (add_init_script 管后续导航 + 当前页 evaluate)。"""
     from playwright.sync_api import sync_playwright
     with sync_playwright() as pw:
         br = pw.chromium.connect_over_cdp(ws)
@@ -1201,9 +1274,19 @@ def _chatgpt_goto(ws):
                   else (ctx.new_page() if ctx else None))
             if pg is None:
                 return "拿不到页面"
+            if init_js:
+                try:
+                    pg.add_init_script(init_js)
+                except Exception:
+                    pass
             if "chatgpt.com" not in (pg.url or ""):
                 pg.goto(TARGET_URL, wait_until="domcontentloaded",
                         timeout=60000)
+            if init_js:
+                try:
+                    pg.evaluate(init_js)
+                except Exception:
+                    pass
             return "ok"
         finally:
             br.close()
@@ -2471,6 +2554,7 @@ def _join_worker(ids, mname, seat="prolite"):
                             a["space_mother"] = mname
                             a["space_seat"] = r.get("seat") or seat
                             a["space_at"] = _now()
+                            a.pop("space_left", None)
                             _ws_list_add(
                                 a, ws_id, ws_name,
                                 "standard-user")
@@ -2611,6 +2695,10 @@ def _leave_worker(ids, ws_name=None, pairs=None):
                         if r.get("status") == 200:
                             wsn = r.get("name") \
                                 or ws_name or target[:8]
+                            a["space_left"] = {"ws": target,
+                                               "name": wsn,
+                                               "at": _now(),
+                                               "by": "self"}
                             if a.get("space_ws") == target:
                                 for k in ("space", "space_ws",
                                           "space_mother",
@@ -3033,6 +3121,7 @@ def _cpa_worker(ids):
                     try:
                         # 授权链接开新标签页 —— 不覆盖原有标签
                         cpg = cbr.contexts[0].new_page()
+                        _gpt_inject_helper(cpg, a)
                         cpg.goto(url, wait_until="domcontentloaded",
                                  timeout=60000)
                         try:
@@ -3901,7 +3990,7 @@ def _open_worker(accs):
                 log(f"✗ {email}: 开窗失败 {err} (已解绑换代理重试即可)")
                 return
             a["win"] = dir_id
-            r = _chatgpt_goto(ws)
+            r = _chatgpt_goto(ws, _gpt_helper_js(a))
             if r != "ok":
                 a["status"] = "login_failed"
                 OPEN_JOB["results"][a["id"]] = r
@@ -4004,13 +4093,30 @@ class H(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
-    def _json(self, obj, code=200):
+    def _json(self, obj, code=200, cors=False):
         b = json.dumps(obj, ensure_ascii=False).encode()
         self.send_response(code)
         self.send_header("content-type", "application/json; charset=utf-8")
+        if cors:
+            self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("content-length", str(len(b)))
         self.end_headers()
         self.wfile.write(b)
+
+    def do_OPTIONS(self):
+        # 页内助手条轮询 /api/helper: 公网页 -> 127.0.0.1 私有网络,
+        # Chrome PNA 预检要求 Access-Control-Allow-Private-Network
+        if self.path.startswith("/api/helper"):
+            self.send_response(204)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods",
+                             "GET, OPTIONS")
+            self.send_header("Access-Control-Allow-Private-Network",
+                             "true")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+        else:
+            self.send_error(404)
 
     def _body(self):
         n = int(self.headers.get("content-length") or 0)
@@ -4125,6 +4231,26 @@ class H(BaseHTTPRequestHandler):
                 if not v.get("hidden")],
                 "profiles": [
                     {"id": k, **v} for k, v in PROF_WATCH.items()]})
+        if self.path.startswith("/api/helper"):
+            # 页内助手条轮询源: 邮箱验证码/接码状态/资料/密码 实时值
+            qs = urllib.parse.parse_qs(
+                urllib.parse.urlparse(self.path).query)
+            em = (qs.get("email") or [""])[0].lower()
+            a = next((x for x in _load_accounts()
+                      if (x.get("email") or "").lower() == em), None)
+            if not a:
+                return self._json({"found": False}, cors=True)
+            mw = MAIL_WATCH.get(a["id"]) or {}
+            pv = PROF_WATCH.get(a["id"]) or {}
+            return self._json({
+                "found": True,
+                "code": mw.get("code"), "code_at": mw.get("at"),
+                "mail_dead": bool(mw.get("dead") or a.get("email_dead")),
+                "mail_running": bool(mw.get("running")),
+                "name": pv.get("name")
+                        or (a.get("extra") or "").strip() or None,
+                "age": pv.get("age"),
+                "password": a.get("password") or None}, cors=True)
         if self.path == "/api/g/accounts":
             accs = _load_gaccounts()
             _goauth_expire(accs)
@@ -4813,6 +4939,19 @@ class H(BaseHTTPRequestHandler):
                                 continue
                             ws = lst.get("workspaces") or []
                             a["ws_list"] = ws
+                            # 实况里已不在记录的空间 → 标已退出
+                            # (被母号移除/别处退的也能对上)
+                            if a.get("space_ws") and not any(
+                                    w.get("id") == a["space_ws"]
+                                    for w in ws):
+                                a["space_left"] = {
+                                    "ws": a["space_ws"],
+                                    "name": a.get("space") or "",
+                                    "at": _now(), "by": "gone"}
+                                for k in ("space", "space_ws",
+                                          "space_mother", "space_at",
+                                          "space_seat"):
+                                    a.pop(k, None)
                             out[aid] = {"list": ws}
                         finally:
                             try:
