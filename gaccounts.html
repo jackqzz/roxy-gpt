@@ -44,8 +44,8 @@
       <button class="btn btn-ghost btn-sm" id="import-close"><i data-ic="x"></i>关闭</button>
     </div>
     <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">
-      每行一个：<code>email----密码</code> · <code>email----密码----辅助邮箱等</code> · <code>email:密码</code> · <code>email</code>
-      （已注册好的 Google 账号; 导入后开窗登录 → OAuth授权 拿 antigravity 凭证）
+      每行一个：<code>email----密码--------2FA密钥</code> · <code>email----密码</code> · <code>email:密码</code>
+      （密钥形如 <code>wcfn y3q4 ioik 6rh6 i7ho bdab eyfz oaph</code> —— 自动识别, 列表里直接显示实时验证码）
     </div>
     <textarea class="import-textarea" id="import-text"
       placeholder="user1@gmail.com----Passw0rd1----recovery@x.com&#10;user2@gmail.com:Passw0rd2"></textarea>
@@ -151,6 +151,7 @@ function filtered() {
     (a.extra || "").toLowerCase().includes(q));
 }
 
+let totpSyncT = null;
 async function load() {
   const r = await fetch("/api/g/accounts").then(r => r.json());
   accounts = r.accounts || [];
@@ -162,6 +163,12 @@ async function load() {
   $("st-ready").textContent = s.ready ?? 0;
   $("st-pushed").textContent = s.pushed ?? 0;
   render();
+  // 2FA 码 30s 轮转 —— 卡在最近一次轮转点重拉, 不给用户过期码
+  clearTimeout(totpSyncT);
+  const lefts = accounts.filter(a => a.totp_code)
+    .map(a => a.totp_left || 30);
+  if (lefts.length)
+    totpSyncT = setTimeout(load, Math.max(2, Math.min(...lefts)) * 1000 + 800);
 }
 
 function render() {
@@ -184,9 +191,16 @@ function render() {
         : a.status === "login_failed" || a.status === "email_dead"
           ? `<span class="pill pill-bad">${esc(a.status)}</span>`
           : `<span class="pill pill-dim">${esc(a.status || "new")}</span>`;
-    const pw = a.password
-      ? `<span class="copyable" data-c="${esc(a.password)}" title="点击复制密码">••••••</span>`
-      : "—";
+    const pw = (() => {
+      let h = a.password
+        ? `<span class="copyable" data-c="${esc(a.password)}" title="点击复制密码">••••••</span>`
+        : "—";
+      if (a.totp_code)
+        h += ` <span class="pill copyable" style="background:#fef3c7;color:#92400e;border:1px solid #fde68a" data-c="${a.totp_code}" title="2FA 实时验证码 · 剩 ${a.totp_left}s 轮换 —— 点复制 (密钥 ${esc(a.totp)})">${a.totp_code}</span>`;
+      else if (a.totp)
+        h += ` <span class="pill pill-dim" title="2FA 密钥已存, 码计算失败">2FA</span>`;
+      return h;
+    })();
     const cpa = a.cpa === "yes"
       ? `<a class="pill pill-ok" href="/api/g/accounts/${a.id}/cred" title="已入CPA池 ${esc(a.cpa_at||"")} —— 点下载凭证 ${esc(a.cred_file||"")}">已入池</a>`
       : a.cpa === "ready"

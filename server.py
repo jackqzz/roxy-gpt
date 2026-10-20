@@ -5,6 +5,7 @@
 import base64
 import datetime
 import hashlib
+import hmac
 import io
 import json
 import os
@@ -12,6 +13,7 @@ import re
 import secrets
 import socket
 import ssl
+import struct
 import threading
 import time
 import zipfile
@@ -528,14 +530,19 @@ def _parse_account_line(line):
     if not m:
         return None, "没有邮箱"
     email = m.group(0).lower()
-    password, mail_url, extra = "", "", ""
+    password, mail_url, extra, totp = "", "", "", ""
 
     def _classify(tok):
-        nonlocal password, mail_url, extra
+        nonlocal password, mail_url, extra, totp
         if re.match(r"^https?://", tok, re.I) and not mail_url:
             mail_url = tok
+        elif _TOTP_SPACED.match(tok.strip()):
+            # 4+ 组带空格的 base32 —— 只会是 TOTP 密钥, 抢占任何槽位
+            totp = re.sub(r"\s+", "", tok).lower()
         elif not password:
             password = tok
+        elif _TOTP_BARE.match(tok.strip()):
+            totp = tok.strip().lower()
         else:
             extra = (extra + "----" + tok) if extra else tok
 
@@ -553,13 +560,41 @@ def _parse_account_line(line):
         if tail:
             _classify(tail)
     return {"email": email, "password": password,
-            "mail_url": mail_url, "extra": extra}, None
+            "mail_url": mail_url, "extra": extra,
+            "totp": totp}, None
 
 
-def _new_account(email, password, mail_url="", extra=""):
+# Google 2FA TOTP secret: 4-10 组 4 位 base32 带空格
+# (wcfn y3q4 ioik 6rh6 ...), 或裸 16/24/32 位 base32
+_TOTP_SPACED = re.compile(
+    r"^([a-zA-Z2-7]{4}\s+){3,9}[a-zA-Z2-7]{4}$")
+_TOTP_BARE = re.compile(r"^[a-zA-Z2-7]{16}$|^[a-zA-Z2-7]{24}$"
+                        r"|^[a-zA-Z2-7]{32}$")
+
+
+def _looks_totp(tok):
+    t = tok.strip()
+    return bool(_TOTP_SPACED.match(t) or _TOTP_BARE.match(t))
+
+
+def _totp_code(secret, offset=0):
+    """RFC6238 TOTP → 当前 6 位码 (sha1/30s)。失败返回 None。"""
+    try:
+        key = base64.b32decode(
+            re.sub(r"\s+", "", secret).upper())
+        c = struct.pack(">Q", int(time.time() // 30) + offset)
+        h = hmac.new(key, c, hashlib.sha1).digest()
+        o = h[-1] & 0xF
+        n = (struct.unpack(">I", h[o:o + 4])[0] & 0x7FFFFFFF) % 10**6
+        return "%06d" % n
+    except Exception:
+        return None
+
+
+def _new_account(email, password, mail_url="", extra="", totp=""):
     return {"id": "ac_" + uuid.uuid4().hex[:10],
             "email": email, "password": password,
-            "mail_url": mail_url, "extra": extra,
+            "mail_url": mail_url, "extra": extra, "totp": totp,
             "proxy_id": None, "win": None, "status": "new",
             "note": "", "created_at": _now()}
 
@@ -3783,10 +3818,14 @@ class H(BaseHTTPRequestHandler):
             out = []
             for a in accs:
                 p = pmap.get(a.get("proxy_id") or "")
-                out.append({**a,
-                            "proxy":
-                                (f"{p['scheme']}://{p['host']}:{p['port']}"
-                                 if p else None)})
+                d = {**a,
+                     "proxy":
+                         (f"{p['scheme']}://{p['host']}:{p['port']}"
+                          if p else None)}
+                if a.get("totp"):
+                    d["totp_code"] = _totp_code(a["totp"])
+                    d["totp_left"] = 30 - int(time.time() % 30)
+                out.append(d)
             stats = {"total": len(accs),
                      "bound": sum(1 for a in accs if a.get("proxy_id")),
                      "opened": sum(1 for a in accs if a.get("win")),
@@ -4161,7 +4200,7 @@ class H(BaseHTTPRequestHandler):
             if not a:
                 return self._json({"error": "账号不存在"}, 404)
             for k in ("note", "password", "extra", "status",
-                      "mail_url"):
+                      "mail_url", "totp"):
                 if k in req:
                     a[k] = req[k]
             _save_accounts(accs)
@@ -4575,7 +4614,7 @@ class H(BaseHTTPRequestHandler):
             if not a:
                 return self._json({"error": "账号不存在"}, 404)
             for k in ("note", "password", "extra", "status",
-                      "mail_url"):
+                      "mail_url", "totp"):
                 if k in req:
                     a[k] = req[k]
             _save_gaccounts(accs)
