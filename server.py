@@ -2328,7 +2328,7 @@ def _pat_worker(ids):
                     accs_all = _load_accounts()
                     for x in accs_all:
                         if x["id"] == aid:
-                            x.update(a)
+                            x.clear(); x.update(a)
                             break
                     _save_accounts(accs_all)
             try:
@@ -2579,7 +2579,7 @@ def _join_worker(ids, mname, seat="prolite"):
                     accs_all = _load_accounts()
                     for x in accs_all:
                         if x["id"] == aid:
-                            x.update(a)
+                            x.clear(); x.update(a)
                             break
                     _save_accounts(accs_all)
             try:
@@ -2749,7 +2749,7 @@ def _leave_worker(ids, ws_name=None, pairs=None):
                     accs_all = _load_accounts()
                     for x in accs_all:
                         if x["id"] == aid:
-                            x.update(a)
+                            x.clear(); x.update(a)
                             break
                     _save_accounts(accs_all)
     finally:
@@ -3247,7 +3247,7 @@ def _cpa_worker(ids):
                     accs_all = _load_accounts()
                     for x in accs_all:
                         if x["id"] == aid:
-                            x.update(a)
+                            x.clear(); x.update(a)
                             break
                     _save_accounts(accs_all)
     finally:
@@ -3805,7 +3805,7 @@ def _goauth_worker(ids):
                     accs_all = _load_gaccounts()
                     for x in accs_all:
                         if x["id"] == aid:
-                            x.update(a)
+                            x.clear(); x.update(a)
                             break
                     _save_gaccounts(accs_all)
     finally:
@@ -3835,7 +3835,7 @@ def _gopen_worker(accs):
             all_ = _load_gaccounts()
             for x in all_:
                 if x["id"] == a["id"]:
-                    x.update(a)
+                    x.clear(); x.update(a)
                     break
             _save_gaccounts(all_)
 
@@ -3954,7 +3954,7 @@ def _open_worker(accs):
             accs_all = _load_accounts()
             for x in accs_all:
                 if x["id"] == a["id"]:
-                    x.update(a)
+                    x.clear(); x.update(a)
                     break
             _save_accounts(accs_all)
 
@@ -4978,7 +4978,7 @@ class H(BaseHTTPRequestHandler):
                         accs_all = _load_accounts()
                         for x in accs_all:
                             if x["id"] == aid:
-                                x.update(a)
+                                x.clear(); x.update(a)
                                 break
                         _save_accounts(accs_all)
             return self._json({"ok": True, "map": out})
