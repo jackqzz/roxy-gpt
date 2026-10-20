@@ -23,7 +23,7 @@
   <div class="page-header">
     <div class="title-group">
       <h1>G账号库 <span style="font-size:13px;font-weight:400;color:var(--text-muted)">antigravity</span></h1>
-      <div class="subtitle">自动选绑定数最少的代理 → Roxy 开窗 (gauto-邮箱) → 打开 Google 登录页 · 登录全人工, 授权走「OAuth授权」全链同IP</div>
+      <div class="subtitle">自动选绑定数最少的代理 → Roxy 开窗 (gauto-邮箱) → 打开 Google 登录页, 页顶助手条可抄 邮箱/密码/2FA验证码 · 登录全人工, 授权走「OAuth授权」全链同IP</div>
     </div>
     <div class="header-actions">
       <button class="btn btn-primary" id="btn-import"><i data-ic="plus"></i>导入账号</button>
@@ -67,11 +67,17 @@
       <button class="btn btn-ghost btn-sm" id="reload" title="刷新"><i data-ic="refresh-cw"></i></button>
     </div>
     <div class="toolbar-row">
-      <button class="btn btn-outline btn-sm" id="oauth-sel" title="本地算 Google OAuth 链接 → 开(原/同IP新) gauto- 窗口授权 → 截 localhost:51121 回调 → 经账号代理换token+project_id → 生成 antigravity 凭证"><i data-ic="key"></i>OAuth授权</button>
+      <button class="btn btn-outline btn-sm" id="oauth-sel" title="本地算 Google OAuth 链接 → 开(原/同IP新) gauto- 窗口授权 → :51121 常驻接收器自动接回调(手动贴也支持) → 经账号代理换token+project_id → 生成 antigravity 凭证"><i data-ic="key"></i>OAuth授权</button>
       <button class="btn btn-outline btn-sm" id="cpa-push" title="把已生成的 antigravity 凭证 JSON 推入 CPA 号池 (auth-files)"><i data-ic="cloud-upload"></i>推入池</button>
       <button class="btn btn-outline btn-sm" id="cpa-export" title="导出选中账号的凭证 JSON (zip 打包)"><i data-ic="download"></i>导凭证</button>
       <span class="tb-sep"></span>
       <button class="btn btn-outline btn-sm btn-danger" id="del-sel"><i data-ic="trash-2"></i>删除选中</button>
+    </div>
+    <div class="toolbar-row" id="oauth-cb-row">
+      <i data-ic="link" style="color:var(--text-muted)"></i>
+      <span class="subtitle" style="font-size:12px;white-space:nowrap">回调兜底</span>
+      <input class="form-input" id="oauth-cb" placeholder="自动截码失败? 把浏览器地址栏 http://localhost:51121/oauth-callback?code=...&state=... 整串贴进来" style="flex:1;font-size:12px">
+      <button class="btn btn-outline btn-sm" id="oauth-cb-go">提交回调</button>
     </div>
   </div>
 
@@ -110,10 +116,6 @@
         <button class="btn btn-outline btn-sm btn-danger" id="job-stop" style="display:none"><i data-ic="square"></i>停止</button>
         <span id="job-log-state"></span></span></div>
     <pre id="job-log-pre"></pre>
-    <div id="oauth-cb-row" style="display:none;gap:8px;margin-top:8px;align-items:center">
-      <input class="form-input" id="oauth-cb" placeholder="自动截码失败? 手动兜底: 浏览器地址栏复制 http://localhost:51121/oauth-callback?code=...&state=... 整串贴进来" style="flex:1;font-size:12px">
-      <button class="btn btn-outline btn-sm" id="oauth-cb-go">提交回调</button>
-    </div>
   </div>
 </div>
 </div>
@@ -195,10 +197,8 @@ function render() {
       let h = a.password
         ? `<span class="copyable" data-c="${esc(a.password)}" title="点击复制密码">••••••</span>`
         : "—";
-      if (a.totp_code)
-        h += ` <span class="pill copyable" style="background:#fef3c7;color:#92400e;border:1px solid #fde68a" data-c="${a.totp_code}" title="2FA 实时验证码 · 剩 ${a.totp_left}s 轮换 —— 点复制 (密钥 ${esc(a.totp)})">${a.totp_code}</span>`;
-      else if (a.totp)
-        h += ` <span class="pill pill-dim" title="2FA 密钥已存, 码计算失败">2FA</span>`;
+      if (a.totp)
+        h += ` <span class="pill copyable" style="background:#fef3c7;color:#92400e;border:1px solid #fde68a" data-c="${a.totp_code || a.totp}" title="已存 2FA 密钥 · 开窗后页顶助手条显示实时码 —— 这里点一下也可复制当前码 (剩 ${a.totp_left || "?"}s 轮换)">2FA</span>`;
       return h;
     })();
     const cpa = a.cpa === "yes"
@@ -271,7 +271,6 @@ function renderJobTab() {
   $("job-stop").style.display = d.running ? "" : "none";
   $("job-log-pre").textContent = (d.log || []).join("\n");
   $("job-log-pre").scrollTop = $("job-log-pre").scrollHeight;
-  $("oauth-cb-row").style.display = curTab === "oauth" ? "flex" : "none";
 }
 
 async function pollJobs() {

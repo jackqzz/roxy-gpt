@@ -476,8 +476,10 @@ def _roxy_open_for(email, proxy, kernel="Chrome", prefix="auto"):
     return dir_id, ws, None
 
 
-def _roxy_goto_url(ws, url):
-    """通过 CDP 让已开的 Roxy 窗口跳转到指定 url。"""
+def _roxy_goto_url(ws, url, init_js=None):
+    """通过 CDP 让已开的 Roxy 窗口跳转到指定 url。
+    init_js 提供时 add_init_script (管后续每次导航) + 当前页 evaluate
+    —— 用于 Google 页顶助手条注入。"""
     from playwright.sync_api import sync_playwright
     with sync_playwright() as pw:
         br = pw.chromium.connect_over_cdp(ws)
@@ -487,7 +489,17 @@ def _roxy_goto_url(ws, url):
                   else (ctx.new_page() if ctx else None))
             if pg is None:
                 raise RuntimeError("拿不到窗口页面")
+            if init_js:
+                try:
+                    pg.add_init_script(init_js)
+                except Exception:
+                    pass
             pg.goto(url, wait_until="domcontentloaded", timeout=60000)
+            if init_js:
+                try:
+                    pg.evaluate(init_js)
+                except Exception:
+                    pass
         finally:
             br.close()          # 断开 CDP, 不关浏览器进程
 
@@ -3243,6 +3255,98 @@ def _goauth_finish(p, a, code, log):
     return None
 
 
+# -------- OAuth 回调: 常驻 127.0.0.1:51121 接收器 --------
+# Google 授权完成后浏览器重定向 localhost:51121/oauth-callback?code=..
+# —— 我们直接接住, 不依赖 Playwright 事件; 端口被占才退回页面监听。
+GOAUTH_CB = {}          # state -> {"code","at"}
+_GCB_SRV = {"srv": None}
+
+
+def _goauth_cb_server(log=print):
+    if _GCB_SRV["srv"]:
+        return True
+
+    class _CB(BaseHTTPRequestHandler):
+        def do_GET(self):
+            p = urllib.parse.urlparse(self.path)
+            qs = urllib.parse.parse_qs(p.query)
+            code = (qs.get("code") or [None])[0]
+            state = (qs.get("state") or [""])[0]
+            if p.path == "/oauth-callback" and code:
+                GOAUTH_CB[state] = {"code": code, "at": time.time()}
+                body = ("<div style='font-family:sans-serif;text-align:"
+                        "center;margin-top:22vh'><h2>✓ 授权已接收</h2>"
+                        "<p>系统已拿到回调, 这个标签页可以关了</p></div>"
+                        ).encode()
+                self.send_response(200)
+                self.send_header("Content-Type",
+                                 "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            else:
+                self.send_error(404)
+
+        def log_message(self, *a):
+            pass
+
+    try:
+        srv = ThreadingHTTPServer(("127.0.0.1", 51121), _CB)
+    except OSError as e:
+        log("⚠ :51121 回调接收器绑定失败 (%s) —— "
+            "自动截码退化为页面监听" % e)
+        return False
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    _GCB_SRV["srv"] = srv
+    return True
+
+
+def _goauth_cb_take(state):
+    """worker 按自己的 state 取回调 code; 顺带清 >30min 陈旧记录。"""
+    now = time.time()
+    for k in [k for k, v in GOAUTH_CB.items()
+              if now - v["at"] > 1800]:
+        GOAUTH_CB.pop(k, None)
+    hit = GOAUTH_CB.pop(state, None)
+    return (hit or {}).get("code")
+
+
+# -------- Roxy 窗口页顶助手条: 复制 邮箱/密码/2FA 实时码 --------
+_GHELPER_JS = r"""(()=>{
+const E=@E@,P=@P@,S=@S@,ID="__ghbar";
+let cur="",keyP=null,el=null,dead=false;
+const b32d=s=>{s=(s||"").toUpperCase().replace(/[^A-Z2-7]/g,"");const A="ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";let b=0,v=0;const o=[];for(const c of s){v=(v<<5)|A.indexOf(c);b+=5;if(b>=8){o.push((v>>(b-8))&255);b-=8}}return new Uint8Array(o)};
+const cp=(t,c)=>{const old=c.textContent;const lg=()=>{const ta=document.createElement("textarea");ta.value=t;ta.style.cssText="position:fixed;opacity:0;top:0";document.body.appendChild(ta);ta.select();try{document.execCommand("copy")}catch(e){}ta.remove()};const ok=()=>{c.textContent="✓ 已复制";setTimeout(()=>{c.textContent=old},900)};if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(t).then(ok).catch(()=>{lg();ok()})}else{lg();ok()}};
+const chip=(txt,tip,fn,st)=>{const c=document.createElement("span");c.textContent=txt;c.title=tip||"";c.style.cssText="background:rgba(255,255,255,.13);border:1px solid rgba(255,255,255,.28);border-radius:6px;padding:3px 9px;cursor:pointer;white-space:nowrap;font-family:ui-monospace,monospace;font-size:12px"+(st||"");c.addEventListener("click",ev=>{ev.preventDefault();ev.stopPropagation();fn(c)});return c};
+const tick=async()=>{if(!el)return;const left=30-Math.floor(Date.now()/1e3)%30;try{if(!keyP)keyP=crypto.subtle.importKey("raw",b32d(S),{name:"HMAC",hash:"SHA-1"},false,["sign"]);const ctr=new Uint8Array(8);new DataView(ctr.buffer).setUint32(4,Math.floor(Date.now()/3e4));const h=new Uint8Array(await crypto.subtle.sign("HMAC",await keyP,ctr));const o=h[h.length-1]&15;cur=(((h[o]&127)<<24|h[o+1]<<16|h[o+2]<<8|h[o+3])%1e6).toString().padStart(6,"0");el.textContent="验证 "+cur+" ·"+left+"s"}catch(e){el.textContent="验证 --"}};
+const mount=()=>{if(dead||document.getElementById(ID)||!document.body)return;const bar=document.createElement("div");bar.id=ID;bar.style.cssText="position:fixed;top:0;left:0;right:0;z-index:2147483647;display:flex;align-items:center;gap:8px;padding:6px 10px;background:rgba(15,23,42,.93);color:#e2e8f0;font:13px/1.4 -apple-system,system-ui,sans-serif;box-shadow:0 2px 8px rgba(0,0,0,.4);user-select:none";const tag=document.createElement("b");tag.textContent="助手";tag.style.cssText="color:#7dd3fc;font-size:12px";bar.appendChild(tag);if(E)bar.appendChild(chip(E,"复制邮箱",c=>cp(E,c)));if(P)bar.appendChild(chip("密码 •••","复制密码",c=>cp(P,c)));if(S){el=chip("验证 --","当前 2FA 验证码 —— 点复制",c=>cp(cur,c),";color:#fbbf24");bar.appendChild(el);tick()}const x=document.createElement("span");x.textContent="×";x.title="收起助手条 (页面跳转会再出现)";x.style.cssText="margin-left:auto;cursor:pointer;opacity:.65;font-size:15px;padding:0 4px";x.addEventListener("click",ev=>{ev.stopPropagation();dead=true;el=null;bar.remove()});bar.appendChild(x);document.body.appendChild(bar)};
+mount();
+if(S)setInterval(tick,1000);
+setInterval(mount,2500);
+})();"""
+
+
+def _g_helper_js(a):
+    return (_GHELPER_JS
+            .replace("@E@", json.dumps(a.get("email") or ""))
+            .replace("@P@", json.dumps(a.get("password") or ""))
+            .replace("@S@", json.dumps(a.get("totp") or "")))
+
+
+def _g_inject_helper(pg, a):
+    """页顶挂助手条: add_init_script 管后续每次导航重建,
+    evaluate 管当前页。"""
+    js = _g_helper_js(a)
+    try:
+        pg.add_init_script(js)
+    except Exception:
+        pass
+    try:
+        pg.evaluate(js)
+    except Exception:
+        pass
+
+
 GOAUTH_JOB = {"running": False, "log": [], "results": {},
               "stop": False}
 
@@ -3261,6 +3365,8 @@ def _goauth_worker(ids):
         GOAUTH_JOB["log"].append(
             "%s %s" % (time.strftime("%H:%M:%S"), m))
 
+    if _goauth_cb_server(log):
+        log("→ :51121 回调接收器在听 —— 浏览器跳转自动接码")
     from playwright.sync_api import sync_playwright
     try:
         with sync_playwright() as pw:
@@ -3314,6 +3420,7 @@ def _goauth_worker(ids):
                         ctx = cbr.contexts[0] if cbr.contexts else None
                         cpg = (ctx.pages[0] if ctx and ctx.pages
                                else (ctx.new_page() if ctx else None))
+                        _g_inject_helper(cpg, a)   # 页顶助手条
                         cpg.goto(url, wait_until="domcontentloaded",
                                  timeout=60000)
                         code = None
@@ -3337,6 +3444,12 @@ def _goauth_worker(ids):
                         deadline = time.time() + _oauth_ttl_s()
                         while time.time() < deadline:
                             if GOAUTH_JOB["stop"]:
+                                break
+                            # 主路: :51121 常驻接收器已直接接到回调
+                            code = _goauth_cb_take(state)
+                            if code:
+                                log("  %s: :51121 接收器拿到回调"
+                                    % email)
                                 break
                             if hit["u"]:
                                 code = (urllib.parse.parse_qs(
@@ -3481,10 +3594,12 @@ def _gopen_worker(accs):
                     f" (已解绑换代理重试即可)")
                 return
             a["win"] = dir_id
-            r = _roxy_goto_url(ws, GOOGLE_START_URL)
+            r = _roxy_goto_url(ws, GOOGLE_START_URL,
+                               _g_helper_js(a))
             a["status"] = "opened"
             GOPEN_JOB["results"][a["id"]] = "已开到 Google 登录页"
-            log(f"✓ {email}: 已开到 accounts.google.com —— "
+            log(f"✓ {email}: 已开到 accounts.google.com, "
+                f"页顶助手条可抄 邮箱/密码/2FA码 —— "
                 f"登录/授权全人工; 要跑 antigravity 授权点「OAuth授权」")
         except Exception as e:
             GOPEN_JOB["results"][a["id"]] = str(e)[:120]
@@ -4803,4 +4918,6 @@ class H(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     print(f"roxy-accounts @ http://127.0.0.1:{PORT}")
+    if _goauth_cb_server():
+        print("google oauth callback @ http://127.0.0.1:51121")
     ThreadingHTTPServer(("127.0.0.1", PORT), H).serve_forever()
