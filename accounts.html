@@ -158,6 +158,8 @@
     <div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">为每个号选取要退出的空间（把子号自己从该空间移除）</div>
     <div id="leave-rows" style="max-height:320px;overflow-y:auto"></div>
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
+      <button class="btn btn-outline btn-sm" id="leave-refresh" title="选项是按存量记录列的 —— 觉得漏了/不对, 开窗拉一次实况再选"><i data-ic="refresh-cw"></i>查空间</button>
+      <span style="flex:1"></span>
       <button class="btn btn-outline btn-sm" id="leave-cancel">取消</button>
       <button class="btn btn-primary btn-sm" id="leave-go">退出所选</button>
     </div>
@@ -654,19 +656,11 @@ $("leave-sel").onclick = () => {
   openLeaveModal(ids);
 };
 
+let leaveIds = [];
 function openLeaveModal(ids) {
+  leaveIds = ids;
   $("leave-modal").style.display = "flex";
-  renderLeaveRows(ids);   // 先用已有记录渲染, 后台再拉实况刷新
-  post("/api/accounts/ws-list", { ids }).then(r => {
-    if (r && r.map) {
-      // 把实况写回 accounts, 重绘选项
-      Object.entries(r.map).forEach(([id, v]) => {
-        const a = accounts.find(x => x.id === id);
-        if (a && v.list) a.ws_list = v.list;
-      });
-      renderLeaveRows(ids);
-    }
-  });
+  renderLeaveRows(ids);   // 只按存量记录渲染 —— 选项缺了再点「查空间」
 }
 
 function renderLeaveRows(ids) {
@@ -692,7 +686,7 @@ function renderLeaveRows(ids) {
       ? opts.map(o =>
           `<label title="${esc(o.ws)}"><input type="radio" name="lv-${id}" value="${o.ws}" ${o.ws === keep ? "checked" : ""}>${esc(o.label)}</label>`).join("")
         + `<label><input type="radio" name="lv-${id}" value="" ${keep === "" ? "checked" : ""}>跳过</label>`
-      : `<span style="color:var(--text-dim)">无空间记录 / 读取失败</span>`;
+      : `<span style="color:var(--text-dim)">无空间记录 —— 可点「查空间」拉实况</span>`;
     return `<div class="lv-row">
       <span class="mono" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis" title="${esc(a.email)}">${esc(a.email)}</span>
       <span style="display:flex;flex-wrap:wrap;justify-content:flex-end">${radios}</span>
@@ -720,6 +714,22 @@ $("ws-refresh").onclick = e => {
   });
 };
 
+// 弹窗内手动拉实况 (选项缺了才点 —— 不自动查)
+$("leave-refresh").onclick = async e => {
+  const btn = e.currentTarget;
+  btn.disabled = true;
+  toast(`正在拉 ${leaveIds.length} 个号的空间成员…`);
+  const r = await post("/api/accounts/ws-list", { ids: leaveIds })
+    .catch(() => null);
+  btn.disabled = false;
+  if (!r || r.error) return toast("✗ " + (r && r.error || "请求失败"));
+  Object.entries(r.map || {}).forEach(([id, v]) => {
+    const a = accounts.find(x => x.id === id);
+    if (a && v.list) a.ws_list = v.list;
+  });
+  renderLeaveRows(leaveIds);
+  render();
+};
 $("leave-cancel").onclick = () => $("leave-modal").style.display = "none";
 $("leave-go").onclick = () => {
   const pairs = {};

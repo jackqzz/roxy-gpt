@@ -2662,33 +2662,31 @@ def _leave_worker(ids, ws_name=None, pairs=None):
                                      wait_until="domcontentloaded",
                                      timeout=60000)
                             cpg.wait_for_timeout(3000)
-                        # 解析目标空间 id
+                        # 解析目标空间 id —— 只按存量记录
+                        # (a.space_ws / a.ws_list), 实况拉取
+                        # 归「查空间」按钮, 这里不再开窗 evaluate
                         target = (pairs or {}).get(aid)
-                        live = []
-                        if not target:
-                            try:
-                                lst = cpg.evaluate(_WS_LIST_JS)
-                                live = lst.get("workspaces") or []
-                            except Exception:
-                                pass
-                            if ws_name:
-                                for w in live:
+                        if not target and ws_name:
+                            if (a.get("space") or "") == ws_name \
+                                    and a.get("space_ws"):
+                                target = a["space_ws"]
+                            if not target:
+                                for w in a.get("ws_list") or []:
                                     if (w.get("name") or "") \
                                             == ws_name:
-                                        target = w["id"]
+                                        target = w.get("id")
                                         break
-                                if not target and \
-                                        (a.get("space") or "") \
-                                        == ws_name:
-                                    target = a.get("space_ws")
                         if not target:
+                            known = ", ".join(
+                                w.get("name")
+                                for w in (a.get("ws_list") or [])
+                                if w.get("name")) \
+                                or (a.get("space") or "无")
                             LEAVE_JOB["results"][aid] = \
                                 "不在该空间"
-                            log("✗ %s: 不在空间 %s (实际在: %s)"
-                                % (email, ws_name or "?",
-                                   ", ".join(w.get("name")
-                                             for w in live)
-                                   or "无"))
+                            log("✗ %s: 不在空间 %s (记录在: %s)"
+                                " —— 记录过期先「查空间」"
+                                % (email, ws_name or "?", known))
                             continue
                         r = cpg.evaluate(_LEAVE_WS_JS, target)
                         code = r.get("code")
