@@ -588,14 +588,40 @@ async function pollMailWatch() {
       : p.err ? `<span class="pill pill-bad">${esc(p.err)}</span>`
               : `<span class="pill pill-dim">资料生成中 …</span>`;
     const st = w && w.running ? "" : `<span class="subtitle">(已停)</span>`;
+    const ra = accounts.find(x => x.id === id);
+    const doneUI = ra && ra.reg
+      ? `<span class="pill pill-ok" title="已标记注册完成 ${esc(ra.reg_at||"")}">✓已注册</span>`
+      : `<button class="btn btn-outline btn-sm" data-mw-done="${id}" title="注册已完成 —— 标记并放行下一个开窗">✓完成注册</button>
+         <button class="btn btn-ghost btn-sm" data-mw-skip="${id}" title="这个不注册了 —— 不标记, 放行下一个">跳过</button>`;
     return `<div style="display:flex;align-items:center;gap:14px;padding:8px 0;border-bottom:1px solid var(--border)">
       <span class="mono copyable" data-c="${esc(email)}" title="点击复制邮箱" style="min-width:230px">${esc(email)}</span>
       ${code} ${prof} ${st}
+      ${doneUI}
       <button class="btn btn-ghost btn-sm btn-danger" data-mw-stop="${id}" title="停止并移除这条" style="margin-left:auto">${ui.icon("x")}</button>
     </div>`;
   }).join("");
 }
 $("mailwatch-list").addEventListener("click", async e => {
+  const done = e.target.closest("[data-mw-done]");
+  if (done) {
+    done.disabled = true;
+    const r = await post("/api/accounts/reg-mark",
+      { ids: [done.dataset.mwDone], mark: "done" });
+    if (r.error) return toast("✗ " + r.error);
+    toast("✓ 已标记注册完成 —— 放行下一个");
+    await load();
+    pollMailWatch();
+    return;
+  }
+  const skip = e.target.closest("[data-mw-skip]");
+  if (skip) {
+    skip.disabled = true;
+    const r = await post("/api/accounts/reg-mark",
+      { ids: [skip.dataset.mwSkip], mark: "skip" });
+    if (r.error) return toast("✗ " + r.error);
+    toast("已跳过 —— 放行下一个");
+    return;
+  }
   const b = e.target.closest("[data-mw-stop]");
   if (b) {
     b.disabled = true;

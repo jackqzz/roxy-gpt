@@ -3923,6 +3923,9 @@ def _open_workers():
         return OPEN_WORKERS
 
 
+REG_WAIT_SECS = 30 * 60   # 开窗后等人工确认注册结果的最长时长
+
+
 def _open_worker(accs):
     """并行: 选代理 -> 绑定 -> Roxy 开窗 -> 跳 chatgpt.com -> 按设置
     页「开窗自动化」勾选的步骤依次自动执行 (接码监听 / 资料生成 /
@@ -4062,6 +4065,43 @@ def _open_worker(accs):
                 elif r4 != "stopped":
                     log(f"  [{email}] 📝 自动填资料失败: {r4}"
                         f" —— 请手动继续")
+            # 串行关键: 系统不知道半自动/手动注册何时完成 →
+            # 未标记注册的号原地等待, 人工在接码面板点
+            # 「完成注册/跳过」才放行下一个窗口 (并发=1 即真串行)。
+            # reg_skip 进窗先清, 防上次跳过状态卡死本次等待。
+            if not a.get("reg") and not a.get("email_dead") \
+                    and not _stopped():
+                a.pop("reg_skip", None)
+                _persist(a)
+                # 没开接码监听的也留一条面板行 ——
+                # 不然「完成注册/跳过」没地方点
+                MAIL_WATCH.setdefault(
+                    a["id"], {"email": email, "running": False,
+                              "code": None, "at": None,
+                              "dead": False, "stop": False})
+                log(f"  [{email}] ⏸ 等人工确认注册结果 "
+                    "(接码面板「完成注册/跳过」)")
+                t0 = time.time()
+                while not _stopped() \
+                        and time.time() - t0 < REG_WAIT_SECS:
+                    cur = next((x for x in _load_accounts()
+                                if x["id"] == a["id"]), None) or {}
+                    if cur.get("reg") in ("new", "yes"):
+                        a["reg"] = cur["reg"]
+                        a["reg_at"] = cur.get("reg_at")
+                        log(f"  [{email}] ✓ 注册已确认 → 下一个")
+                        break
+                    if cur.get("reg_skip") or cur.get("email_dead"):
+                        if cur.get("email_dead"):
+                            a["email_dead"] = True
+                            a["status"] = "email_dead"
+                        log(f"  [{email}] ⏭ 已跳过/失效 → 下一个")
+                        break
+                    time.sleep(3)
+                else:
+                    log(f"  [{email}] ⏸ 等确认结束 "
+                        f"(超时 {REG_WAIT_SECS // 60}min 或已停止)"
+                        " → 放行")
         except Exception as e:
             OPEN_JOB["results"][a["id"]] = str(e)[:120]
             log(f"✗ {email}: {str(e)[:120]}")
@@ -4792,6 +4832,26 @@ class H(BaseHTTPRequestHandler):
                 w["hidden"] = True    # 点 X = 不想再看到它
             PROF_WATCH.pop(aid, None)
             return self._json({"ok": True})
+        if self.path == "/api/accounts/reg-mark":
+            # 人工确认注册结果 —— 开窗 worker 轮询这个放行 (真串行)。
+            # done: reg=yes 已注册;  skip: reg_skip 本次放行不标记注册
+            req = self._body()
+            ids = req.get("ids") or []
+            mark = req.get("mark")
+            if mark not in ("done", "skip"):
+                return self._json({"error": "mark 须 done|skip"}, 400)
+            accs = _load_accounts()
+            n = 0
+            for a in accs:
+                if a["id"] in ids:
+                    if mark == "done":
+                        a["reg"] = "yes"
+                        a["reg_at"] = _now()
+                    else:
+                        a["reg_skip"] = True
+                    n += 1
+            _save_accounts(accs)
+            return self._json({"ok": True, "marked": n})
         if self.path == "/api/accounts/pat-check/stop":
             PAT_JOB["stop"] = True
             return self._json({"ok": True})
