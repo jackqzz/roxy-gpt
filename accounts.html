@@ -84,6 +84,7 @@
       <span class="tb-sep"></span>
       <button class="btn btn-primary btn-sm" id="open-sel"><i data-ic="app-window"></i>开窗选中</button>
       <button class="btn btn-outline btn-sm" id="open-all"><i data-ic="layout-grid"></i>全部开窗</button>
+      <button class="btn btn-outline btn-sm" id="close-sel" title="关掉选中账号的浏览器进程 —— 窗口配置留着, 下次开窗原窗秒起 (不是归档, 不删窗)"><i data-ic="x"></i>关窗选中</button>
       <span class="subtitle" style="font-size:12px" title="到设置页勾选自动化步骤: 接码监听/资料生成/邮箱/填码/密码/资料">步骤在设置页配</span>
       <span style="flex:1"></span>
       <span class="subtitle" id="sel-hint" style="font-size:12px"></span>
@@ -544,6 +545,17 @@ $("open-all").onclick = e => {
   if (!ids.length) return toast("没有账号");
   if (!confirm(`为全部 ${ids.length} 个账号开窗?`)) return;
   startOpen(ids, e.target);
+};
+$("close-sel").onclick = async e => {
+  if (!sel.size) return toast("先勾选账号");
+  e.target.disabled = true;
+  const r = await post("/api/accounts/close-win", { ids: [...sel] })
+    .catch(() => null);
+  e.target.disabled = false;
+  if (!r || r.error) return toast("✗ " + (r && r.error || "请求失败"));
+  toast(`✓ 已关 ${r.ok} 个浏览器` +
+    (r.failed ? ` · ✗${Object.keys(r.failed).length}: ` +
+      Object.values(r.failed).slice(0, 2).join(" · ") : ""));
 };
 $("del-sel").onclick = async () => {
   if (!sel.size) return toast("先勾选账号");

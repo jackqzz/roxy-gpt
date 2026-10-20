@@ -2756,13 +2756,19 @@ def _leave_worker(ids, ws_name=None, pairs=None):
             + (" (手动停止)" if LEAVE_JOB["stop"] else ""))
 
 
+def _roxy_close_window(dir_id):
+    """只关浏览器进程 —— 窗口配置留着 (不删, 下次 open 秒起)。"""
+    cfg = _roxy_cfg()
+    return _roxy_call("/browser/close",
+                      {"workspaceId": cfg["workspace_id"],
+                       "dirId": dir_id}, timeout=30).get("error")
+
+
 def _roxy_delete_window(dir_id):
     """关+删一个 Roxy 窗口 (先 close 再 delete, dirIds 是数组)。
     返回 err|None —— 尽力而为, 调用方不因此中断。"""
     cfg = _roxy_cfg()
-    _roxy_call("/browser/close",
-               {"workspaceId": cfg["workspace_id"], "dirId": dir_id},
-               timeout=30)
+    _roxy_close_window(dir_id)
     r = _roxy_call("/browser/delete",
                    {"workspaceId": cfg["workspace_id"],
                     "dirIds": [dir_id]}, timeout=30)
@@ -4758,6 +4764,21 @@ class H(BaseHTTPRequestHandler):
             _save_accounts(accs)
             return self._json({"ok": True, "archived": n,
                                "window_errors": werr})
+        if self.path == "/api/accounts/close-win":
+            # 批量关浏览器进程 —— 窗口配置/代理绑定/记录都不动,
+            # 下次开窗原窗秒起。跟「归档」(删窗) 是两回事。
+            req = self._body()
+            ids = set(req.get("ids") or [])
+            ok, failed = 0, {}
+            for a in _load_accounts():
+                if a["id"] not in ids or not a.get("win"):
+                    continue
+                e = _roxy_close_window(a["win"])
+                if e:
+                    failed[a["email"]] = e
+                else:
+                    ok += 1
+            return self._json({"ok": ok, "failed": failed or None})
         if self.path == "/api/accounts/restore":
             req = self._body()
             ids = set(req.get("ids") or [])
@@ -5338,6 +5359,20 @@ class H(BaseHTTPRequestHandler):
             _save_gaccounts(accs)
             return self._json({"ok": True, "archived": n,
                                "window_errors": werr})
+        if self.path == "/api/g/accounts/close-win":
+            # 批量关 gauto- 浏览器进程 —— 窗口配置留着不动
+            req = self._body()
+            ids = set(req.get("ids") or [])
+            ok, failed = 0, {}
+            for a in _load_gaccounts():
+                if a["id"] not in ids or not a.get("win"):
+                    continue
+                e = _roxy_close_window(a["win"])
+                if e:
+                    failed[a["email"]] = e
+                else:
+                    ok += 1
+            return self._json({"ok": ok, "failed": failed or None})
         if self.path == "/api/g/accounts/restore":
             req = self._body()
             ids = set(req.get("ids") or [])

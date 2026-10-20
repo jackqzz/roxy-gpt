@@ -61,6 +61,7 @@
       <span class="tb-sep"></span>
       <button class="btn btn-primary btn-sm" id="open-sel"><i data-ic="app-window"></i>开窗选中</button>
       <button class="btn btn-outline btn-sm" id="open-all"><i data-ic="layout-grid"></i>全部开窗</button>
+      <button class="btn btn-outline btn-sm" id="close-sel" title="关掉选中账号的浏览器进程 —— gauto- 窗口配置留着, 下次开窗原窗秒起 (不是归档, 不删窗)"><i data-ic="x"></i>关窗选中</button>
       <span class="subtitle" style="font-size:12px" title="开窗只定位到 accounts.google.com —— 登录全人工">开窗只到 Google 登录页</span>
       <span style="flex:1"></span>
       <span class="subtitle" id="sel-hint" style="font-size:12px"></span>
@@ -452,6 +453,17 @@ $("open-sel").onclick = e => {
 $("open-all").onclick = e => {
   if (!accounts.length) return toast("没有账号");
   startOpen(accounts.map(a => a.id), e.target);
+};
+$("close-sel").onclick = async e => {
+  if (!sel.size) return toast("先勾选账号");
+  e.target.disabled = true;
+  const r = await post("/api/g/accounts/close-win", { ids: [...sel] })
+    .catch(() => null);
+  e.target.disabled = false;
+  if (!r || r.error) return toast("✗ " + (r && r.error || "请求失败"));
+  toast(`✓ 已关 ${r.ok} 个浏览器` +
+    (r.failed ? ` · ✗${Object.keys(r.failed).length}: ` +
+      Object.values(r.failed).slice(0, 2).join(" · ") : ""));
 };
 $("oauth-sel").onclick = e => {
   if (!sel.size) return toast("先勾选账号");
