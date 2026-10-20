@@ -25,6 +25,10 @@
       <button class="btn btn-primary btn-sm" id="cpa-save">保存</button>
       <span class="subtitle" id="cpa-msg"></span>
     </div>
+    <div class="row" style="margin-top:8px">
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px" title="OAuth 凭证生成成功后自动推入 CPA 池 —— 关掉就只备好凭证, 手动「推入池」">
+        <input type="checkbox" id="cpa-autopush">OAuth 完成自动推入池</label>
+    </div>
     <div class="hint">
       与 GPT 侧的 CPA 配置独立 —— Google 凭证可以推到另一个池。
       OAuth 授权在 G账号页完成，凭证备好后「推入池」上传到这里。
@@ -80,6 +84,7 @@ async function load() {
     $("up-in").value = r.upstream_proxy || "";
   $("cpa-url").value = r.cpa_url || "";
   $("cpa-key").value = r.cpa_key || "";
+  $("cpa-autopush").checked = r.cpa_autopush !== false;
   $("pc-cool").value = r.proxy_cool_min ?? 20;
   $("pc-oauth-ttl").value = r.oauth_ttl_min ?? 10;
 }
@@ -87,7 +92,8 @@ async function load() {
 $("cpa-save").onclick = async () => {
   const r = await post(API,
     { cpa_url: $("cpa-url").value.trim(),
-      cpa_key: $("cpa-key").value.trim() });
+      cpa_key: $("cpa-key").value.trim(),
+      cpa_autopush: $("cpa-autopush").checked });
   if (r.error) return toast("✗ " + r.error);
   $("cpa-msg").textContent = "✓ 已保存";
   toast("✓ CPA 配置已存");

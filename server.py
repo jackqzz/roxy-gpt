@@ -3231,8 +3231,23 @@ def _cpa_worker(ids):
                         a.pop("oauth_at", None)
                         CPA_JOB["results"][aid] = "凭证已生成"
                         log("✓ %s: rt/at 到手, 凭证 %s 已备好"
-                            " —— 推送入池用「📤推入池」"
                             % (email, a["cred_file"]))
+                        # 设置开了自动推 → 直接入 CPA 池,
+                        # 失败留 ready 态可手动推
+                        if _settings().get("cpa_autopush", True):
+                            err2 = _cpa_push_cred(
+                                a["cred_file"], cred)
+                            if err2:
+                                log("  ⚠ %s: 自动推入池失败 %s"
+                                    " —— 凭证在, 可手动推"
+                                    % (email, err2))
+                            else:
+                                a["cpa"] = "yes"
+                                a["cpa_at"] = _now()
+                                CPA_JOB["results"][aid] = \
+                                    "凭证已生成+已入池"
+                                log("  ✓ %s: 已自动推入 CPA 池"
+                                    % email)
                     finally:
                         try:
                             cbr.close()
@@ -3529,6 +3544,16 @@ def _goauth_finish(p, a, code, log):
         % (a["email"],
            "+project_id(%s)" % pid if pid else "(project_id待补)",
            a["cred_file"]))
+    # G设置开了自动推 → 直接入 CPA 池, 失败留 ready 态可手动推
+    if _gsettings().get("cpa_autopush", True):
+        err = _cpa_push_cred(a["cred_file"], cred, st=_gsettings())
+        if err:
+            log("  ⚠ %s: 自动推入池失败 %s —— 凭证在, 可手动推"
+                % (a["email"], err))
+        else:
+            a["cpa"] = "yes"
+            a["cpa_at"] = _now()
+            log("  ✓ %s: 已自动推入 CPA 池" % a["email"])
     return None
 
 
@@ -4227,7 +4252,8 @@ class H(BaseHTTPRequestHandler):
                 "step_password": s.get("step_password", True),
                 "step_profile": s.get("step_profile", True),
                 "cpa_url": s.get("cpa_url") or "",
-                "cpa_key": s.get("cpa_key") or ""})
+                "cpa_key": s.get("cpa_key") or "",
+                "cpa_autopush": s.get("cpa_autopush", True)})
         if self.path == "/api/accounts":
             accs = _load_accounts()
             _oauth_expire(accs)   # pending 超时 → expired
@@ -4379,7 +4405,8 @@ class H(BaseHTTPRequestHandler):
                 "proxy_cool_min": s.get("proxy_cool_min") or 20,
                 "oauth_ttl_min": s.get("oauth_ttl_min") or 10,
                 "cpa_url": s.get("cpa_url") or "",
-                "cpa_key": s.get("cpa_key") or ""})
+                "cpa_key": s.get("cpa_key") or "",
+                "cpa_autopush": s.get("cpa_autopush", True)})
         m = re.fullmatch(r"/api/g/accounts/([0-9a-f-]+)/cred",
                          self.path)
         if m:
@@ -4635,7 +4662,7 @@ class H(BaseHTTPRequestHandler):
                       "oauth_ttl_min", "open_workers",
                       "step_watch", "step_gen", "step_email",
                       "step_code", "step_password", "step_profile",
-                      "cpa_url", "cpa_key"):
+                      "cpa_url", "cpa_key", "cpa_autopush"):
                 if k in req:
                     s[k] = req[k]
             _save_settings(s)
@@ -5259,7 +5286,7 @@ class H(BaseHTTPRequestHandler):
                             400)
                 s["upstream_proxy"] = raw
             for k in ("proxy_cool_min", "oauth_ttl_min",
-                      "cpa_url", "cpa_key"):
+                      "cpa_url", "cpa_key", "cpa_autopush"):
                 if k in req:
                     s[k] = req[k]
             _save_gsettings(s)
