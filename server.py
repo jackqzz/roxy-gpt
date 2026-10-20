@@ -3029,11 +3029,14 @@ def _cpa_worker(ids):
                     a["win"] = dir_id
                     cbr = pw.chromium.connect_over_cdp(cws)
                     try:
-                        cpg = _find_cgpt_page(cbr)
-                        if not cpg:
-                            cpg = cbr.contexts[0].new_page()
+                        # 授权链接开新标签页 —— 不覆盖原有标签
+                        cpg = cbr.contexts[0].new_page()
                         cpg.goto(url, wait_until="domcontentloaded",
                                  timeout=60000)
+                        try:
+                            cpg.bring_to_front()
+                        except Exception:
+                            pass
                         code = None
                         hit = {"u": None}
 
@@ -3603,11 +3606,15 @@ def _goauth_worker(ids):
                     cbr = pw.chromium.connect_over_cdp(cws)
                     try:
                         ctx = cbr.contexts[0] if cbr.contexts else None
-                        cpg = (ctx.pages[0] if ctx and ctx.pages
-                               else (ctx.new_page() if ctx else None))
+                        # 授权链接开新标签页 —— 不覆盖原有标签
+                        cpg = ctx.new_page() if ctx else None
                         _g_inject_helper(cpg, a)   # 页顶助手条
                         cpg.goto(url, wait_until="domcontentloaded",
                                  timeout=60000)
+                        try:
+                            cpg.bring_to_front()
+                        except Exception:
+                            pass
                         code = None
                         hit = {"u": None}
 
