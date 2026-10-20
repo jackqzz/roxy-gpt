@@ -13,3 +13,5 @@ __pycache__/
 .DS_Store
 mothers.json
 gaccounts.json
+gproxies.json
+gsettings.json

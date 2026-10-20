@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>G设置 · roxy-accounts</title>
+<link rel="stylesheet" href="/ui.css">
+<script src="/ui.js"></script>
+</head>
+<body>
+<nav class="sidebar" data-nav="g-settings"></nav>
+<div class="main">
+<div class="page-container" style="max-width:960px">
+  <div class="page-header">
+    <h1>G设置</h1>
+    <div class="subtitle">Google/antigravity 独立配置 —— CPA号池 · 上级代理 · 代理冷却 · OAuth时效 (gsettings.json), 与 GPT 设置互不影响</div>
+  </div>
+
+  <!-- CPA 号池 -->
+  <div class="card">
+    <div class="card-title"><i data-ic="link"></i>CPA 号池（CLIProxyAPI —— antigravity 凭证的下游池）</div>
+    <div class="row">
+      <input class="form-input" id="cpa-url" placeholder="CPA 地址, 如 http://127.0.0.1:8317" style="width:280px">
+      <input class="form-input" id="cpa-key" type="password" placeholder="管理 Key (management key)" style="width:220px">
+      <button class="btn btn-outline btn-sm" id="cpa-test">测试连通</button>
+      <button class="btn btn-primary btn-sm" id="cpa-save">保存</button>
+      <span class="subtitle" id="cpa-msg"></span>
+    </div>
+    <div class="hint">
+      与 GPT 侧的 CPA 配置独立 —— Google 凭证可以推到另一个池。
+      OAuth 授权在 G账号页完成，凭证备好后「推入池」上传到这里。
+    </div>
+  </div>
+
+  <!-- 上级代理 -->
+  <div class="card">
+    <div class="card-title"><i data-ic="settings"></i>上级代理（本机出网隧道 —— 代理测活/OAuth换token 经它转发）</div>
+    <div class="row">
+      <input class="form-input" id="up-in" placeholder="http://127.0.0.1:7897" style="width:260px">
+      <button class="btn btn-primary btn-sm" id="up-save">保存</button>
+      <button class="btn btn-outline btn-sm" id="up-test">测试连通</button>
+      <span class="subtitle" id="up-msg"></span>
+    </div>
+    <div class="hint">留空 = 直连。本机无外网时必须配置，否则代理测活和 OAuth 回调换 token 全失败。链路: 本机 → 上级 → 账号代理 → Google。</div>
+  </div>
+
+  <!-- 冷却 / OAuth时效 -->
+  <div class="card">
+    <div class="card-title"><i data-ic="timer"></i>节奏（G池独立）</div>
+    <div class="row">
+      <span class="subtitle">代理冷却(分钟)</span>
+      <input class="form-input" id="pc-cool" type="number" step="1" min="0" style="width:80px" title="代理被某账号取用/释放后, 其他账号要等这么久才能再拿到它 (同账号豁免)">
+      <span class="subtitle">OAuth时效(分钟)</span>
+      <input class="form-input" id="pc-oauth-ttl" type="number" step="1" min="1" style="width:80px" title="OAuth授权链接/回调码的有效期 —— 超时自动关闭授权任务, 账号标记已过期需重跑">
+      <button class="btn btn-primary btn-sm" id="pace-save">保存</button>
+      <span class="subtitle" id="pace-msg"></span>
+    </div>
+    <div class="hint">代理冷却 = IP 被取用/释放后对其他 G 账号的隔离期，同账号续用不拦截。OAuth时效 = Google 授权链接的有效窗口。</div>
+  </div>
+</div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const API = "/api/g/settings";
+function toast(msg) {
+  const t = $("toast"); t.textContent = msg; t.style.opacity = 1;
+  clearTimeout(t._h); t._h = setTimeout(() => t.style.opacity = 0, 1800);
+}
+async function post(path, body) {
+  const r = await fetch(path, { method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body) });
+  return r.json();
+}
+
+async function load() {
+  const r = await fetch(API).then(r => r.json());
+  if (document.activeElement !== $("up-in"))
+    $("up-in").value = r.upstream_proxy || "";
+  $("cpa-url").value = r.cpa_url || "";
+  $("cpa-key").value = r.cpa_key || "";
+  $("pc-cool").value = r.proxy_cool_min ?? 20;
+  $("pc-oauth-ttl").value = r.oauth_ttl_min ?? 10;
+}
+
+$("cpa-save").onclick = async () => {
+  const r = await post(API,
+    { cpa_url: $("cpa-url").value.trim(),
+      cpa_key: $("cpa-key").value.trim() });
+  if (r.error) return toast("✗ " + r.error);
+  $("cpa-msg").textContent = "✓ 已保存";
+  toast("✓ CPA 配置已存");
+};
+$("cpa-test").onclick = async e => {
+  e.target.disabled = true;
+  $("cpa-msg").textContent = "测中…";
+  const r = await post(API + "/test-cpa",
+    { url: $("cpa-url").value.trim(),
+      key: $("cpa-key").value.trim() }).catch(() => null);
+  e.target.disabled = false;
+  $("cpa-msg").textContent = r && r.ok
+    ? `✓ 连通 ${r.ms}ms · ${r.ver} API` + (r.creds != null ? ` · 池内 ${r.creds} 条凭证` : "")
+    : "✗ " + ((r && r.error) || "请求失败");
+};
+
+$("up-save").onclick = async () => {
+  const r = await post(API,
+    { upstream_proxy: $("up-in").value.trim() });
+  if (r.error) { $("up-msg").textContent = "✗ " + r.error; return; }
+  $("up-msg").textContent = "✓ 已保存";
+  toast("上级代理已保存");
+};
+$("up-test").onclick = async () => {
+  $("up-msg").textContent = "测中…";
+  const r = await post(API + "/test-upstream", {});
+  $("up-msg").textContent = r.error
+    ? "✗ " + r.error
+    : `✓ 上级可达 ${r.ms}ms (${r.scheme})`;
+};
+
+$("pace-save").onclick = async () => {
+  const r = await post(API, {
+    proxy_cool_min: parseInt($("pc-cool").value) || 20,
+    oauth_ttl_min: parseInt($("pc-oauth-ttl").value) || 10 });
+  if (r.error) return toast("✗ " + r.error);
+  $("pace-msg").textContent = "✓ 已保存";
+  toast("✓ 节奏已存");
+};
+
+load();
+</script>
+</body>
+</html>

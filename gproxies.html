@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>G代理池 · roxy-accounts</title>
+<link rel="stylesheet" href="/ui.css">
+<script src="/ui.js"></script>
+<style>
+  textarea.import-textarea {
+    width: 100%; height: 120px; resize: vertical; font-size: 12px;
+    font-family: ui-monospace, Menlo, Monaco, monospace;
+    border: 1px solid var(--border); border-radius: var(--radius); padding: 10px;
+    background: #f8fafc; color: var(--text-main); outline: none;
+  }
+  textarea.import-textarea:focus { border-color: var(--primary); background: #fff; }
+</style>
+</head>
+<body>
+<nav class="sidebar" data-nav="g-proxies"></nav>
+<div class="main">
+<div class="page-container">
+  <div class="page-header">
+    <div class="title-group">
+      <h1>G代理池 <span style="font-size:13px;font-weight:400;color:var(--text-muted)">google 专用 · 与 GPT 池完全隔离</span></h1>
+      <div class="subtitle">Google/antigravity 账号专用代理池 · 绑定/冷却/测活独立 (gproxies.json) —— 首启已从 GPT 池播种, 之后各管各</div>
+    </div>
+    <div class="header-actions">
+      <button class="btn btn-primary" id="btn-import"><i data-ic="plus"></i>导入代理</button>
+    </div>
+  </div>
+
+  <div class="stats-grid">
+    <div class="stat-card">
+      <div class="stat-label">总代理数</div>
+      <div class="stat-val" id="st-total">0</div>
+      <div class="stat-foot">池内全部</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">可用代理</div>
+      <div class="stat-val" id="st-avail" style="color:#059669">0</div>
+      <div class="stat-foot">未标记封禁</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">测活通过</div>
+      <div class="stat-val" id="st-alive" style="color:#2563eb">0</div>
+      <div class="stat-foot">socks5 握手+出口IP</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">已封禁</div>
+      <div class="stat-val" id="st-banned" style="color:#dc2626">0</div>
+      <div class="stat-foot">不再参与选取</div>
+    </div>
+  </div>
+
+  <!-- 导入抽屉 -->
+  <div class="drawer-card" id="import-box" style="display:none">
+    <div class="drawer-title">
+      <span>批量导入代理</span>
+      <button class="btn btn-ghost btn-sm" id="import-close"><i data-ic="x"></i>关闭</button>
+    </div>
+    <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">
+      每行一条，支持：<code>socks5://user:pass@host:port</code> ·
+      <code>host:port:user:pass</code> · <code>host:port</code> ·
+      <code>user:pass@host:port</code>（密码可含冒号，重复条目自动去重）
+    </div>
+    <textarea class="import-textarea" id="import-text"
+      placeholder="38.15.28.178:42635:user:pass&#10;socks5://user:pass@154.64.133.60:39935"></textarea>
+    <div style="display:flex;align-items:center;gap:10px;margin-top:10px;flex-wrap:wrap">
+      <button class="btn btn-primary btn-sm" id="do-import">确认导入</button>
+      <select id="import-scheme" class="form-select" style="font-size:12px">
+        <option value="socks5" selected>无前缀行按 socks5</option>
+        <option value="http">无前缀行按 http</option>
+      </select>
+      <span class="subtitle" id="import-msg"></span>
+    </div>
+  </div>
+
+  <!-- 工具栏 -->
+  <div class="toolbar">
+    <div class="toolbar-row">
+      <input class="form-input" id="q" placeholder="搜索 host / 账密 / 备注" style="width:200px">
+      <span class="tb-sep"></span>
+      <button class="btn btn-outline btn-sm" id="check-sel"><i data-ic="shield-check"></i>测活选中</button>
+      <button class="btn btn-outline btn-sm" id="check-all"><i data-ic="shield-check"></i>测活全部</button>
+      <span class="tb-sep"></span>
+      <select id="exp-fmt" class="form-select" style="font-size:12px">
+        <option value="colon">host:port:user:pass</option>
+        <option value="url">socks5://user:pass@host:port</option>
+        <option value="json">完整 JSON (备份)</option>
+      </select>
+      <button class="btn btn-outline btn-sm" id="exp-sel"><i data-ic="download"></i>导出选中</button>
+      <button class="btn btn-outline btn-sm" id="exp-all"><i data-ic="download"></i>导出全部</button>
+      <span class="tb-sep"></span>
+      <button class="btn btn-outline btn-sm btn-danger" id="del-sel"><i data-ic="trash-2"></i>删除选中</button>
+      <span style="flex:1"></span>
+      <span class="subtitle" id="sel-hint" style="font-size:12px"></span>
+      <button class="btn btn-ghost btn-sm" id="reload" title="刷新"><i data-ic="refresh-cw"></i></button>
+    </div>
+    <div class="toolbar-row">
+      <span class="subtitle" id="up-hint" style="font-size:12px"></span>
+    </div>
+  </div>
+
+  <div class="table-card">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th style="width:36px"><input type="checkbox" id="ck-all"></th>
+          <th style="width:44px">#</th>
+          <th>代理地址</th>
+          <th style="width:130px">认证</th>
+          <th style="width:120px">测活</th>
+          <th style="width:120px">出口 IP</th>
+          <th style="width:80px">封禁</th>
+          <th style="width:70px">绑定</th>
+          <th>备注</th>
+          <th style="width:170px;text-align:right">操作</th>
+        </tr>
+      </thead>
+      <tbody id="tbody"></tbody>
+    </table>
+    <div class="pager-footer" id="pager" style="display:none">
+      <span id="pg-info"></span>
+      <div style="display:flex;gap:6px">
+        <button class="btn btn-outline btn-sm" id="pg-prev">‹ 上一页</button>
+        <button class="btn btn-outline btn-sm" id="pg-next">下一页 ›</button>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const API = "/api/g";
+let proxies = [];
+let page = 1;
+const SIZE = 20;
+const sel = new Set();
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g,
+    c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function toast(msg) {
+  const t = $("toast"); t.textContent = msg; t.style.opacity = 1;
+  clearTimeout(t._h); t._h = setTimeout(() => t.style.opacity = 0, 1800);
+}
+async function post(path, body) {
+  const r = await fetch(path, { method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body) });
+  return r.json();
+}
+function urlOf(p) {
+  const auth = p.username ? `${p.username}:***@` : "";
+  return `${p.scheme}://${auth}${p.host}:${p.port}`;
+}
+function filtered() {
+  const q = $("q").value.trim().toLowerCase();
+  if (!q) return proxies;
+  return proxies.filter(p =>
+    (p.host + ":" + p.port).includes(q) ||
+    (p.username || "").toLowerCase().includes(q) ||
+    (p.note || "").toLowerCase().includes(q) ||
+    (p.exit_ip || "").includes(q));
+}
+
+async function load() {
+  const r = await fetch(API + "/proxies").then(r => r.json());
+  proxies = r.proxies || [];
+  const s = r.stats || {};
+  $("st-total").textContent = s.total ?? 0;
+  $("st-avail").textContent = s.avail ?? 0;
+  $("st-alive").textContent = s.alive ?? 0;
+  $("st-banned").textContent = s.banned ?? 0;
+  $("up-hint").textContent = r.upstream
+    ? `测活经上级 ${r.upstream} (G设置页可改)` : "测活直连 —— 本机无外网时全失败 (到G设置页配上级代理)";
+  sel.clear();
+  render();
+}
+
+function render() {
+  const list = filtered();
+  const pages = Math.max(1, Math.ceil(list.length / SIZE));
+  if (page > pages) page = pages;
+  const rows = list.slice((page - 1) * SIZE, page * SIZE);
+  $("tbody").innerHTML = rows.map((p, i) => {
+    const idx = (page - 1) * SIZE + i + 1;
+    let health;
+    if (p.alive === true)
+      health = `<span class="pill pill-ok">存活 ${p.latency_ms ?? "?"}ms</span>`;
+    else if (p.alive === false)
+      health = `<span class="pill pill-bad">失效</span>`;
+    else
+      health = `<span class="pill pill-dim">未测</span>`;
+    const ban = p.banned
+      ? `<span class="pill pill-bad">已封禁</span>`
+      : `<span class="pill pill-dim">—</span>`;
+    const bound = (p.bound || []).length;
+    const coolMs = p.cool_until ? (new Date(p.cool_until) - Date.now()) : 0;
+    const cool = coolMs > 0
+      ? ` <span class="pill pill-warn" title="${esc(p.cool_email || "?")} 取用/释放后冷却中 → ${esc(p.cool_until)}">${ui.icon("clock")}${Math.ceil(coolMs / 60000)}m</span>`
+      : "";
+    return `<tr>
+      <td><input type="checkbox" class="ck" data-id="${p.id}" ${sel.has(p.id) ? "checked" : ""}></td>
+      <td class="mono" style="color:var(--text-dim)">${idx}</td>
+      <td class="mono copyable" data-c="${esc(p.scheme)}://${p.host}:${p.port}" title="点击复制">${esc(p.scheme)}://${esc(p.host)}:${p.port}</td>
+      <td class="mono">${esc(p.username || "—")}</td>
+      <td>${health}</td>
+      <td class="mono">${esc(p.exit_ip || "—")}</td>
+      <td>${ban}</td>
+      <td class="mono">${bound || "—"}${cool}</td>
+      <td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(p.note || "")}">${esc(p.note || "")}</td>
+      <td style="text-align:right;white-space:nowrap">
+        <button class="btn btn-ghost btn-sm" data-act="check" data-id="${p.id}">测活</button>
+        <button class="btn btn-ghost btn-sm" data-act="note" data-id="${p.id}">备注</button>
+        <button class="btn btn-ghost btn-sm" data-act="ban" data-id="${p.id}">${p.banned ? "解封" : "封禁"}</button>
+        <button class="btn btn-ghost btn-sm btn-danger" data-act="del" data-id="${p.id}">删</button>
+      </td>
+    </tr>`;
+  }).join("") || `<tr><td colspan="10" style="text-align:center;color:var(--text-dim);padding:32px">暂无代理 —— 点右上角「导入代理」</td></tr>`;
+  $("pager").style.display = list.length > SIZE ? "flex" : "none";
+  $("pg-info").textContent = `第 ${page} / ${pages} 页 · 共 ${list.length} 条`;
+  $("sel-hint").textContent = sel.size ? `已选 ${sel.size} 条` : "";
+}
+
+// ---- 事件 ----
+$("btn-import").onclick = () => $("import-box").style.display = "block";
+$("import-close").onclick = () => $("import-box").style.display = "none";
+$("reload").onclick = load;
+$("q").oninput = () => { page = 1; render(); };
+$("pg-prev").onclick = () => { if (page > 1) { page--; render(); } };
+$("pg-next").onclick = () => {
+  const pages = Math.ceil(filtered().length / SIZE);
+  if (page < pages) { page++; render(); }
+};
+$("ck-all").onchange = e => {
+  filtered().slice((page - 1) * SIZE, page * SIZE)
+    .forEach(p => e.target.checked ? sel.add(p.id) : sel.delete(p.id));
+  render();
+};
+$("tbody").addEventListener("change", e => {
+  if (e.target.classList.contains("ck")) {
+    e.target.checked ? sel.add(e.target.dataset.id) : sel.delete(e.target.dataset.id);
+    $("sel-hint").textContent = sel.size ? `已选 ${sel.size} 条` : "";
+  }
+});
+$("tbody").addEventListener("click", async e => {
+  const cp = e.target.closest(".copyable");
+  if (cp) { navigator.clipboard.writeText(cp.dataset.c); toast("已复制 " + cp.dataset.c); return; }
+  const b = e.target.closest("button[data-act]");
+  if (!b) return;
+  const id = b.dataset.id, act = b.dataset.act;
+  const p = proxies.find(x => x.id === id);
+  if (act === "check") {
+    b.disabled = true; b.textContent = "测中…";
+    const r = await post(API + "/proxies/check", { ids: [id] });
+    if (r.error) toast("失败: " + r.error);
+    await load();
+  } else if (act === "note") {
+    const v = prompt("备注", p.note || "");
+    if (v === null) return;
+    await post(API + "/proxies/update", { id, note: v });
+    await load();
+  } else if (act === "ban") {
+    await post(API + "/proxies/update", { id, banned: !p.banned });
+    await load();
+  } else if (act === "del") {
+    if (!confirm(`删除代理 ${p.host}:${p.port} ?`)) return;
+    await post(API + "/proxies/delete", { ids: [id] });
+    sel.delete(id);
+    await load();
+  }
+});
+
+$("do-import").onclick = async () => {
+  const text = $("import-text").value;
+  if (!text.trim()) return;
+  const r = await post(API + "/proxies/import",
+    { text, scheme: $("import-scheme").value });
+  if (r.error) { $("import-msg").textContent = "✗ " + r.error; return; }
+  let msg = `✓ 导入 ${r.added} 条` +
+    (r.dup ? ` · 跳过重复 ${r.dup}` : "") +
+    (r.bad.length ? ` · ${r.bad.length} 行无法解析` : "");
+  $("import-msg").textContent = msg;
+  if (r.bad.length)
+    console.warn("解析失败行:", r.bad);
+  $("import-text").value = "";
+  await load();
+};
+
+async function check(ids, btn) {
+  btn.disabled = true;
+  const old = btn.textContent;
+  btn.textContent = "测活中…";
+  const r = await post(API + "/proxies/check", { ids: ids.length ? ids : undefined });
+  btn.disabled = false; btn.textContent = old;
+  if (r.error) { toast("✗ " + r.error); return; }
+  toast(`测活完成: ${r.passed}/${r.tested} 存活`);
+  await load();
+}
+$("check-sel").onclick = e => {
+  if (!sel.size) return toast("先勾选要测的代理");
+  check([...sel], e.target);
+};
+$("check-all").onclick = e => check([], e.target);
+
+function doExport(ids) {
+  const fmt = $("exp-fmt").value;
+  const q = ids.length ? "&ids=" + ids.join(",") : "";
+  location.href = `${API}/proxies/export?fmt=${fmt}${q}`;
+}
+$("exp-sel").onclick = () => {
+  if (!sel.size) return toast("先勾选要导出的代理");
+  doExport([...sel]);
+};
+$("exp-all").onclick = () => doExport([]);
+$("del-sel").onclick = async () => {
+  if (!sel.size) return toast("先勾选要删除的代理");
+  if (!confirm(`删除选中的 ${sel.size} 条代理?`)) return;
+  await post(API + "/proxies/delete", { ids: [...sel] });
+  sel.clear();
+  await load();
+};
+
+load();
+</script>
+</body>
+</html>

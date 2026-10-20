@@ -48,6 +48,53 @@ def _save_proxies(px):
         os.replace(tmp, PROXIES_FILE)
 
 
+# ---- Google 侧独立代理池: gproxies.json ----
+GPROXIES_FILE = os.path.join(BASE_DIR, "gproxies.json")
+_gpx_lock = threading.Lock()
+
+
+def _load_gproxies():
+    """独立 G 代理池。首次访问不存在时用 proxies.json 播种:
+    条目原样复制 (同 id —— 存量 gaccount.proxy_id 不失联),
+    bound 只保留 gaccounts 里 proxy_id 指向自己的邮箱,
+    GPT 的绑定/冷却不带过来。"""
+    if not os.path.exists(GPROXIES_FILE):
+        try:
+            src = json.load(open(PROXIES_FILE)).get("proxies") or []
+        except Exception:
+            src = []
+        gbound = {}
+        try:
+            for a in (json.load(open(GACCOUNTS_FILE))
+                      .get("accounts") or []):
+                if a.get("proxy_id"):
+                    gbound.setdefault(a["proxy_id"], []) \
+                        .append(a["email"])
+        except Exception:
+            pass
+        px = []
+        for p in src:
+            q = dict(p)
+            q["bound"] = list(gbound.get(p["id"]) or [])
+            q.pop("cool_email", None)
+            q.pop("cool_until", None)
+            px.append(q)
+        _save_gproxies(px)
+        return px
+    try:
+        return json.load(open(GPROXIES_FILE)).get("proxies") or []
+    except Exception:
+        return []
+
+
+def _save_gproxies(px):
+    with _gpx_lock:
+        tmp = GPROXIES_FILE + ".tmp"
+        json.dump({"proxies": px}, open(tmp, "w"),
+                  ensure_ascii=False, indent=1)
+        os.replace(tmp, GPROXIES_FILE)
+
+
 def _now():
     return time.strftime("%Y-%m-%dT%H:%M:%S")
 
@@ -243,10 +290,15 @@ def _dial_via_upstream(up, host, port, timeout):
     return _proxy_tunnel(up, host, port, timeout)
 
 
-def _dial_via_account_proxy(p, host, port, timeout):
+_UNSET = object()
+
+
+def _dial_via_account_proxy(p, host, port, timeout, up=_UNSET):
     """本机 → (上级代理 →) 账号代理 → host:port。
-    账号代理只有经上级链式才握手得通 (RST 直连)。"""
-    up = _upstream()
+    账号代理只有经上级链式才握手得通 (RST 直连)。
+    up 缺省走 GPT 设置; G 侧调用显式传 _gupstream()。"""
+    if up is _UNSET:
+        up = _upstream()
     if not up:
         q = dict(p)
         q["_label"] = "账号代理"
@@ -339,15 +391,63 @@ def _space_mothers():
     return [m for m in _load_mothers() if m["name"] != pat]
 
 
-def _upstream():
-    """settings.upstream_proxy -> _parse_proxy_line dict | None"""
-    raw = (_settings().get("upstream_proxy") or "").strip()
+def _upstream_of(s):
+    """settings dict -> 上级代理 dict | None"""
+    raw = (s.get("upstream_proxy") or "").strip()
     if not raw:
         return None
     if "://" not in raw:
         raw = "http://" + raw          # 裸 host:port 默认 http
     d, _ = _parse_proxy_line(raw, "http")
     return d
+
+
+def _upstream():
+    return _upstream_of(_settings())
+
+
+# ---- Google 侧独立设置: gsettings.json ----
+GSETTINGS_FILE = os.path.join(BASE_DIR, "gsettings.json")
+
+
+def _gsettings():
+    """独立 G 设置。不存在时用 settings.json 播种。"""
+    if not os.path.exists(GSETTINGS_FILE):
+        try:
+            s = json.load(open(SETTINGS_FILE))
+        except Exception:
+            s = {}
+        _save_gsettings(s)
+        return dict(s)
+    try:
+        return json.load(open(GSETTINGS_FILE))
+    except Exception:
+        return {}
+
+
+def _save_gsettings(s):
+    json.dump(s, open(GSETTINGS_FILE, "w"),
+              ensure_ascii=False, indent=1)
+
+
+def _gupstream():
+    return _upstream_of(_gsettings())
+
+
+def _gcool_secs():
+    try:
+        return int(float(
+            _gsettings().get("proxy_cool_min") or 20) * 60)
+    except Exception:
+        return 1200
+
+
+def _goauth_ttl_s():
+    try:
+        return max(60, int(float(
+            _gsettings().get("oauth_ttl_min") or 10) * 60))
+    except Exception:
+        return 600
 
 
 # ---------------- Roxy 配置 ----------------
@@ -624,13 +724,15 @@ def _cool_secs():
         return 1200
 
 
-def _touch_cool(p, email):
+def _touch_cool(p, email, secs=None):
     """账号取用/释放过这条代理 -> 对其他账号进入冷却期。
     同一账号 (bound 里 / 触发冷却的) 豁免。"""
     p["cool_email"] = email
     p["cool_until"] = time.strftime(
         "%Y-%m-%dT%H:%M:%S",
-        time.localtime(time.time() + _cool_secs()))
+        time.localtime(time.time()
+                       + (secs if secs is not None
+                          else _cool_secs())))
 
 
 def _cooling(p, email):
@@ -661,19 +763,19 @@ def _pick_proxy(px, email=None, limit=PICK_LIMIT):
     return avail[0] if avail else None
 
 
-def _bind_proxy(p, email):
+def _bind_proxy(p, email, secs=None):
     bound = p.setdefault("bound", [])
     if email not in bound:
         bound.append(email)
     p["last_used"] = _now()
-    _touch_cool(p, email)
+    _touch_cool(p, email, secs)
 
 
-def _unbind_proxy(p, email):
+def _unbind_proxy(p, email, secs=None):
     bound = p.get("bound") or []
     if email in bound:
         bound.remove(email)
-        _touch_cool(p, email)
+        _touch_cool(p, email, secs)
         return True
     return False
 
@@ -2582,10 +2684,11 @@ def _roxy_delete_window(dir_id):
 
 
 # ---------------- CPA 号池 (CLIProxyAPI) ----------------
-def _cpa_call(method, path, body=None, timeout=15):
+def _cpa_call(method, path, body=None, timeout=15, st=None):
     """调 CPA 管理接口, 返回 (status, json|None, err)。
-    需要设置页已配 cpa_url (+cpa_key)。"""
-    s = _settings()
+    需要设置页已配 cpa_url (+cpa_key)。
+    st 缺省用 GPT settings; G 侧传 _gsettings()。"""
+    s = st or _settings()
     base = (s.get("cpa_url") or "").strip().rstrip("/")
     if not base:
         return 0, None, "未配置 CPA 地址 (设置页)"
@@ -2594,7 +2697,7 @@ def _cpa_call(method, path, body=None, timeout=15):
     key = (s.get("cpa_key") or "").strip()
     hdrs = {"Authorization": "Bearer " + key} if key else {}
     url = base + path
-    up = _upstream() if url.startswith("https://") else None
+    up = _upstream_of(s) if url.startswith("https://") else None
     try:
         if method.upper() == "GET":
             st, b = _https_status_get(url, up, timeout,
@@ -2626,16 +2729,59 @@ def _cpa_list_creds():
     return j, err
 
 
-def _cpa_push_cred(name, cred):
+def _cpa_test(url, key, up):
+    """CPA 连通测试 → dict 结果 (v8 credentials, 降级 v0 api-keys)。"""
+    url = (url or "").strip().rstrip("/")
+    if not url:
+        return {"error": "先填 CPA 地址"}
+    if "://" not in url:
+        url = "http://" + url
+    hdrs = {"Authorization": "Bearer " + key} if key else None
+    t0 = time.time()
+    try:
+        st, body = _https_status_get(
+            url + "/v8/management/credentials", up, 12, headers=hdrs)
+        ver = "v8"
+        if st == 404:
+            st, body = _https_status_get(
+                url + "/v0/management/api-keys", up, 12, headers=hdrs)
+            ver = "v0"
+        ms = int((time.time() - t0) * 1000)
+        if st in (401, 403):
+            return {"error": f"管理 Key 无效或未授权 ({st})", "ms": ms}
+        if st != 200:
+            return {"error": f"HTTP {st}: "
+                             f"{body[:160].decode(errors='ignore')}",
+                    "ms": ms}
+        try:
+            j = json.loads(body)
+        except Exception:
+            j = None
+        n = None
+        if isinstance(j, list):
+            n = len(j)
+        elif isinstance(j, dict):
+            for kk in ("credentials", "items", "files",
+                       "api-keys", "api_keys", "data"):
+                if isinstance(j.get(kk), list):
+                    n = len(j[kk])
+                    break
+        return {"ok": True, "ms": ms, "ver": ver, "creds": n}
+    except Exception as e:
+        return {"error": str(e)[:200]}
+
+
+def _cpa_push_cred(name, cred, st=None):
     """推凭证 JSON 入 CPA 池 (v8/v0 auth-files?name=, 原始 JSON body)。
-    返回 err|None。"""
+    返回 err|None。st 缺省 GPT settings; G 侧传 _gsettings()。"""
     q = "?name=" + urllib.parse.quote(name)
-    st, j, err = _cpa_call(
-        "POST", "/v8/management/auth-files" + q, cred, timeout=30)
-    if st == 404:
-        st, j, err = _cpa_call(
+    st_, j, err = _cpa_call(
+        "POST", "/v8/management/auth-files" + q, cred,
+        timeout=30, st=st)
+    if st_ == 404:
+        st_, j, err = _cpa_call(
             "POST", "/v0/management/auth-files" + q, cred,
-            timeout=30)
+            timeout=30, st=st)
     return err
 
 
@@ -2684,11 +2830,11 @@ def _jwt_claims(tok):
 
 
 def _req_via(p, method, host, path, headers=None, body=b"",
-             timeout=30):
+             timeout=30, up=_UNSET):
     """经账号代理 p 发任意 HTTP 请求 → https://host/path。
     链式: 本机→上级代理→账号代理→目标 —— 与注册/授权同 IP。
     返回 (status, body)。"""
-    s = _dial_via_account_proxy(p, host, 443, timeout)
+    s = _dial_via_account_proxy(p, host, 443, timeout, up)
     s = ssl.create_default_context().wrap_socket(
         s, server_hostname=host)
     s.settimeout(timeout)
@@ -2732,13 +2878,13 @@ def _req_via(p, method, host, path, headers=None, body=b"",
     return st, body
 
 
-def _post_form_via(p, host, path, form, timeout=30):
+def _post_form_via(p, host, path, form, timeout=30, up=_UNSET):
     """经账号代理 p 发 x-www-form-urlencoded POST (token 交换用)。"""
     return _req_via(p, "POST", host, path,
                     {"Content-Type":
                      "application/x-www-form-urlencoded",
                      "Accept": "application/json"},
-                    form, timeout)
+                    form, timeout, up)
 
 
 def _oauth_exchange(p, code, verifier):
@@ -3091,7 +3237,8 @@ def _goauth_exchange(p, code):
         "redirect_uri": GOAUTH_REDIRECT,
         "grant_type": "authorization_code"}).encode()
     try:
-        st, body = _post_form_via(p, GOAUTH_TOKEN_HOST, "/token", form)
+        st, body = _post_form_via(p, GOAUTH_TOKEN_HOST, "/token",
+                                  form, up=_gupstream())
     except Exception as e:
         return None, str(e)[:160]
     try:
@@ -3112,7 +3259,7 @@ def _g_userinfo(p, at):
         st, body = _req_via(
             p, "GET", GOOGLE_USERINFO_HOST,
             "/oauth2/v1/userinfo?alt=json",
-            {"Authorization": "Bearer " + at})
+            {"Authorization": "Bearer " + at}, up=_gupstream())
         if st == 200 and body:
             return (json.loads(body).get("email") or "").strip() or None
     except Exception:
@@ -3129,7 +3276,7 @@ def _gcode_call(p, op, obj, at):
             "Content-Type": "application/json",
             "User-Agent": GCODE_UA,
             "X-Goog-Api-Client": GCODE_API_CLIENT,
-            "Client-Metadata": GCODE_META}, body)
+            "Client-Metadata": GCODE_META}, body, up=_gupstream())
     try:
         return st, json.loads(raw) if raw else {}
     except Exception:
@@ -3244,7 +3391,8 @@ def _gcred_name(cred):
 def _goauth_expire(accs):
     """同 _oauth_expire, 但落 gaccounts.json。"""
     cut = time.strftime("%Y-%m-%dT%H:%M:%S",
-                        time.localtime(time.time() - _oauth_ttl_s()))
+                        time.localtime(time.time()
+                                       - _goauth_ttl_s()))
     changed = False
     for a in accs:
         if a.get("cpa") == "pending" \
@@ -3416,7 +3564,7 @@ def _goauth_worker(ids):
                     continue
                 email = a["email"]
                 try:
-                    px = _load_proxies()
+                    px = _load_gproxies()
                     p = next((x for x in px
                               if x["id"] == a.get("proxy_id")),
                              None)
@@ -3432,9 +3580,9 @@ def _goauth_worker(ids):
                                 "没有可用代理" + cool
                             log("✗ %s: 没有可用代理%s" % (email, cool))
                             continue
-                        _bind_proxy(p, email)
+                        _bind_proxy(p, email, _gcool_secs())
                         a["proxy_id"] = p["id"]
-                        _save_proxies(px)
+                        _save_gproxies(px)
                         log("→ %s: 绑代理 %s:%s" % (
                             email, p["host"], p["port"]))
                     url, state = _goauth_gen()
@@ -3442,7 +3590,7 @@ def _goauth_worker(ids):
                     a["oauth_url"] = url
                     a["oauth_at"] = _now()
                     log("→ %s: Google OAuth 链接已生成 (%d分钟时效)"
-                        % (email, _oauth_ttl_s() // 60))
+                        % (email, _goauth_ttl_s() // 60))
                     dir_id, cws, err = _roxy_open_for(
                         email, p, prefix="gauto")
                     if err or not cws:
@@ -3477,7 +3625,7 @@ def _goauth_worker(ids):
                         cpg.on("requestfailed",
                                lambda r: _take(r.url))
                         cdp = cpg.context.new_cdp_session(cpg)
-                        deadline = time.time() + _oauth_ttl_s()
+                        deadline = time.time() + _goauth_ttl_s()
                         while time.time() < deadline:
                             if GOAUTH_JOB["stop"]:
                                 break
@@ -3596,7 +3744,7 @@ def _gopen_worker(accs):
         email = a["email"]
         try:
             with db_lock:
-                px = _load_proxies()
+                px = _load_gproxies()
                 p = next((x for x in px
                           if x["id"] == a.get("proxy_id")), None)
                 if p and not p.get("banned"):
@@ -3605,9 +3753,9 @@ def _gopen_worker(accs):
                     p = _pick_proxy(px, email)
                     bound = True
                     if p:
-                        _bind_proxy(p, email)
+                        _bind_proxy(p, email, _gcool_secs())
                         a["proxy_id"] = p["id"]
-                        _save_proxies(px)
+                        _save_gproxies(px)
             if not p:
                 cool = (" (冷却中 %d 条)" % PICK_LAST["cooled"]
                         if PICK_LAST["cooled"] else "")
@@ -3621,10 +3769,10 @@ def _gopen_worker(accs):
                 email, p, prefix="gauto")
             if err:
                 with db_lock:
-                    _unbind_proxy(p, email)
+                    _unbind_proxy(p, email, _gcool_secs())
                     p["alive"] = False
                     a["proxy_id"] = None
-                    _save_proxies(px)
+                    _save_gproxies(px)
                 GOPEN_JOB["results"][a["id"]] = err
                 log(f"✗ {email}: 开窗失败 {err}"
                     f" (已解绑换代理重试即可)")
@@ -3833,6 +3981,10 @@ PAGES = {"/": "index.html", "/index.html": "index.html",
          "/accounts": "accounts.html", "/accounts.html": "accounts.html",
          "/g": "gaccounts.html", "/g/accounts": "gaccounts.html",
          "/gaccounts.html": "gaccounts.html",
+         "/g/proxies": "gproxies.html",
+         "/gproxies.html": "gproxies.html",
+         "/g/settings": "gsettings.html",
+         "/gsettings.html": "gsettings.html",
          "/settings": "settings.html", "/settings.html": "settings.html"}
 STATICS = {"/ui.css": ("ui.css", "text/css; charset=utf-8"),
            "/ui.js": ("ui.js", "application/javascript; charset=utf-8")}
@@ -3964,7 +4116,7 @@ class H(BaseHTTPRequestHandler):
         if self.path == "/api/g/accounts":
             accs = _load_gaccounts()
             _goauth_expire(accs)
-            px = _load_proxies()
+            px = _load_gproxies()
             pmap = {p["id"]: p for p in px}
             out = []
             for a in accs:
@@ -3985,13 +4137,57 @@ class H(BaseHTTPRequestHandler):
                      "pushed": sum(1 for a in accs
                                    if a.get("cpa") == "yes")}
             return self._json({"accounts": out, "stats": stats,
-                               "oauth_ttl_min": _oauth_ttl_s() // 60})
+                               "oauth_ttl_min": _goauth_ttl_s() // 60})
         if self.path == "/api/g/open/status":
             return self._json({"running": GOPEN_JOB["running"],
                                "log": GOPEN_JOB["log"][-80:],
                                "results": GOPEN_JOB["results"]})
         if self.path == "/api/g/oauth/status":
             return self._json(GOAUTH_JOB)
+        if self.path == "/api/g/proxies":
+            px = _load_gproxies()
+            stats = {"total": len(px),
+                     "avail": sum(1 for p in px if not p.get("banned")),
+                     "banned": sum(1 for p in px if p.get("banned")),
+                     "alive": sum(1 for p in px if p.get("alive")),
+                     "bound": sum(len(p.get("bound") or [])
+                                  for p in px)}
+            return self._json({"proxies": px, "stats": stats,
+                               "upstream":
+                                   (_gsettings().get("upstream_proxy")
+                                    or "")})
+        if self.path.startswith("/api/g/proxies/export"):
+            q = urllib.parse.parse_qs(
+                urllib.parse.urlparse(self.path).query)
+            fmt = (q.get("fmt") or ["colon"])[0]
+            ids = set((q.get("ids") or [""])[0].split(",")) - {""}
+            px = [p for p in _load_gproxies()
+                  if not ids or p["id"] in ids]
+            if fmt == "json":
+                b = json.dumps(px, ensure_ascii=False,
+                               indent=1).encode()
+                ext, ct = "json", "application/json"
+            else:
+                b = ("\n".join(_proxy_url(p, fmt) for p in px)
+                     + "\n").encode()
+                ext, ct = "txt", "text/plain; charset=utf-8"
+            self.send_response(200)
+            self.send_header("content-type", ct)
+            self.send_header("content-disposition",
+                             'attachment; filename="gproxies.%s"'
+                             % ext)
+            self.send_header("content-length", str(len(b)))
+            self.end_headers()
+            self.wfile.write(b)
+            return
+        if self.path == "/api/g/settings":
+            s = _gsettings()
+            return self._json({
+                "upstream_proxy": s.get("upstream_proxy") or "",
+                "proxy_cool_min": s.get("proxy_cool_min") or 20,
+                "oauth_ttl_min": s.get("oauth_ttl_min") or 10,
+                "cpa_url": s.get("cpa_url") or "",
+                "cpa_key": s.get("cpa_key") or ""})
         m = re.fullmatch(r"/api/g/accounts/([0-9a-f-]+)/cred",
                          self.path)
         if m:
@@ -4705,6 +4901,106 @@ class H(BaseHTTPRequestHandler):
             return self._json({"ok": ok,
                                "failed": failed or None})
         # ---------- Google 账号 (antigravity) ----------
+        if self.path == "/api/g/proxies/import":
+            try:
+                req = self._body()
+            except Exception:
+                return self._json({"error": "请求体不是 JSON"}, 400)
+            text = req.get("text") or ""
+            default_scheme = req.get("scheme") or "socks5"
+            px = _load_gproxies()
+            seen = {_proxy_key(p) for p in px}
+            added, dup, bad = 0, 0, []
+            for i, line in enumerate(text.splitlines(), 1):
+                d, err = _parse_proxy_line(line, default_scheme)
+                if err in ("empty", "comment"):
+                    continue
+                if err:
+                    bad.append({"line": i, "err": err,
+                                "raw": line.strip()[:80]})
+                    continue
+                k = _proxy_key(d)
+                if k in seen:
+                    dup += 1
+                    continue
+                seen.add(k)
+                px.append(_new_proxy(**d))
+                added += 1
+            if added:
+                _save_gproxies(px)
+            return self._json({"ok": True, "added": added,
+                               "dup": dup, "bad": bad})
+        if self.path == "/api/g/proxies/update":
+            req = self._body()
+            px = _load_gproxies()
+            p = next((x for x in px if x["id"] == req.get("id")), None)
+            if not p:
+                return self._json({"error": "代理不存在"}, 404)
+            for k in ("note", "host", "port", "username",
+                      "password", "scheme"):
+                if k in req:
+                    p[k] = req[k]
+            if "banned" in req:
+                p["banned"] = bool(req["banned"])
+                if not p["banned"]:
+                    p["ban_reason"] = []
+            _save_gproxies(px)
+            return self._json({"ok": True})
+        if self.path == "/api/g/proxies/delete":
+            req = self._body()
+            ids = set(req.get("ids") or [])
+            px = _load_gproxies()
+            keep = [p for p in px if p["id"] not in ids]
+            _save_gproxies(keep)
+            return self._json({"ok": True,
+                               "deleted": len(px) - len(keep)})
+        if self.path == "/api/g/proxies/check":
+            req = self._body()
+            ids = set(req.get("ids") or [])
+            px = _load_gproxies()
+            todo = [p for p in px if not ids or p["id"] in ids]
+            if not todo:
+                return self._json({"error": "没有要测的代理"})
+            if len(todo) > 500:
+                return self._json({"error": "单次最多测 500 条"}, 400)
+            up = _gupstream()
+            results = {}
+
+            def _gone(p):
+                ok, ms, ip, err = _socks5_check(p, upstream=up)
+                results[p["id"]] = {"ok": ok, "ms": ms,
+                                    "exit_ip": ip, "err": err}
+                p["alive"] = ok
+                p["latency_ms"] = ms
+                p["exit_ip"] = ip
+                p["checked_at"] = _now()
+
+            with ThreadPoolExecutor(max_workers=16) as ex:
+                list(ex.map(_gone, todo))
+            _save_gproxies(px)
+            return self._json({"ok": True, "tested": len(todo),
+                               "passed": sum(1 for r in results.values()
+                                             if r["ok"]),
+                               "results": results})
+        if self.path == "/api/g/settings":
+            req = self._body()
+            s = _gsettings()
+            if "upstream_proxy" in req:
+                raw = (req.get("upstream_proxy") or "").strip()
+                if raw:
+                    test = raw if "://" in raw else "http://" + raw
+                    d, err = _parse_proxy_line(test, "http")
+                    if err:
+                        return self._json(
+                            {"error": f"上级代理格式无法解析: {err}"},
+                            400)
+                s["upstream_proxy"] = raw
+            for k in ("proxy_cool_min", "oauth_ttl_min",
+                      "cpa_url", "cpa_key"):
+                if k in req:
+                    s[k] = req[k]
+            _save_gsettings(s)
+            return self._json({"ok": True})
         if self.path == "/api/g/accounts/import":
             try:
                 req = self._body()
@@ -4737,20 +5033,20 @@ class H(BaseHTTPRequestHandler):
             ids = set(req.get("ids") or [])
             accs = _load_gaccounts()
             doomed = [a for a in accs if a["id"] in ids]
-            px = _load_proxies()
+            px = _load_gproxies()
             win_ok, win_err = 0, []
             for a in doomed:
                 p = next((x for x in px
                           if x["id"] == a.get("proxy_id")), None)
                 if p:
-                    _unbind_proxy(p, a["email"])
+                    _unbind_proxy(p, a["email"], _gcool_secs())
                 if a.get("win"):
                     e = _roxy_delete_window(a["win"])
                     if e:
                         win_err.append(f"{a['email']}: {e}")
                     else:
                         win_ok += 1
-            _save_proxies(px)
+            _save_gproxies(px)
             keep = [a for a in accs if a["id"] not in ids]
             _save_gaccounts(keep)
             return self._json({"ok": True,
@@ -4777,12 +5073,12 @@ class H(BaseHTTPRequestHandler):
                      None)
             if not a:
                 return self._json({"error": "账号不存在"}, 404)
-            px = _load_proxies()
+            px = _load_gproxies()
             p = next((x for x in px
                       if x["id"] == a.get("proxy_id")), None)
             if p:
-                _unbind_proxy(p, a["email"])
-                _save_proxies(px)
+                _unbind_proxy(p, a["email"], _gcool_secs())
+                _save_gproxies(px)
             a["proxy_id"] = None
             _save_gaccounts(accs)
             return self._json({"ok": True})
@@ -4843,7 +5139,7 @@ class H(BaseHTTPRequestHandler):
                 return self._json(
                     {"error": "没有匹配的待授权账号 (state 对不上,"
                               "可能已过期, 重跑OAuth授权)"}, 404)
-            p = next((x for x in _load_proxies()
+            p = next((x for x in _load_gproxies()
                       if x["id"] == a.get("proxy_id")), None)
             if not p:
                 return self._json(
@@ -4872,7 +5168,8 @@ class H(BaseHTTPRequestHandler):
                     failed[a["email"]] = "没有凭证 (先跑OAuth)"
                     continue
                 err = _cpa_push_cred(
-                    a.get("cred_file") or _gcred_name(cred), cred)
+                    a.get("cred_file") or _gcred_name(cred), cred,
+                    st=_gsettings())
                 if err:
                     failed[a["email"]] = err
                 else:
@@ -4888,53 +5185,32 @@ class H(BaseHTTPRequestHandler):
             # 顺带验证了管理 key 是否有效
             req = self._body()
             s = _settings()
-            url = (req.get("url") or s.get("cpa_url")
-                   or "").strip().rstrip("/")
+            url = req.get("url") or s.get("cpa_url") or ""
             key = req.get("key") or s.get("cpa_key") or ""
-            if not url:
-                return self._json({"error": "先填 CPA 地址"})
-            if "://" not in url:
-                url = "http://" + url
-            hdrs = {"Authorization": "Bearer " + key} if key else None
-            up = _upstream() if url.startswith("https://") else None
+            up = (_upstream() if str(url).startswith("https://")
+                  else None)
+            return self._json(_cpa_test(url, key, up))
+        if self.path == "/api/g/settings/test-cpa":
+            req = self._body()
+            s = _gsettings()
+            url = req.get("url") or s.get("cpa_url") or ""
+            key = req.get("key") or s.get("cpa_key") or ""
+            up = (_gupstream() if str(url).startswith("https://")
+                  else None)
+            return self._json(_cpa_test(url, key, up))
+        if self.path == "/api/g/settings/test-upstream":
+            up = _gupstream()
+            if not up:
+                return self._json({"error": "未配置上级代理"})
             t0 = time.time()
             try:
-                st, body = _https_status_get(
-                    url + "/v8/management/credentials",
-                    up, 12, headers=hdrs)
-                ver = "v8"
-                if st == 404:
-                    st, body = _https_status_get(
-                        url + "/v0/management/api-keys",
-                        up, 12, headers=hdrs)
-                    ver = "v0"
-                ms = int((time.time() - t0) * 1000)
-                if st in (401, 403):
-                    return self._json(
-                        {"error": f"管理 Key 无效或未授权 ({st})",
-                         "ms": ms})
-                if st != 200:
-                    return self._json(
-                        {"error": f"HTTP {st}: "
-                                  f"{body[:160].decode(errors='ignore')}",
-                         "ms": ms})
-                try:
-                    j = json.loads(body)
-                except Exception:
-                    j = None
-                n = None
-                if isinstance(j, list):
-                    n = len(j)
-                elif isinstance(j, dict):
-                    for kk in ("credentials", "items", "files",
-                               "api-keys", "api_keys", "data"):
-                        if isinstance(j.get(kk), list):
-                            n = len(j[kk])
-                            break
-                return self._json({"ok": True, "ms": ms, "ver": ver,
-                                   "creds": n})
+                s = _dial_via_upstream(up, "api.ipify.org", 443, 8)
+                s.close()
+                return self._json({"ok": True,
+                                   "ms": int((time.time() - t0) * 1000),
+                                   "scheme": up["scheme"]})
             except Exception as e:
-                return self._json({"error": str(e)[:200]})
+                return self._json({"error": str(e)[:120]})
         if self.path == "/api/settings/test-upstream":
             # 经上级代理 CONNECT api.ipify.org:443 验证可达性
             up = _upstream()
