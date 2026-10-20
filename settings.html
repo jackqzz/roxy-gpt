@@ -112,10 +112,12 @@
     <div class="row" style="margin-top:10px">
       <button class="btn btn-outline btn-sm" id="st-all" title="全选 = 全自动: 开窗后一路跑到注册落地"><i data-ic="check-circle"></i>全自动</button>
       <button class="btn btn-outline btn-sm" id="st-none" title="全不选 = 纯手动: 只开窗定位到 chatgpt.com"><i data-ic="square"></i>全手动</button>
+      <span class="subtitle" title="同时跑几个账号 —— 每个窗口是一个真 Chromium 实例, 别开太大">并行开窗数</span>
+      <input class="form-input" id="st-workers" type="number" min="1" max="10" step="1" style="width:70px">
       <button class="btn btn-primary btn-sm" id="st-save">保存</button>
       <span class="subtitle" id="st-msg"></span>
     </div>
-    <div class="hint">步骤按勾选组合即"半自动"——没有独立模式了。全自动/全手动按钮直接勾选并保存; 单个勾选改动要点保存。</div>
+    <div class="hint">步骤按勾选组合即"半自动"——没有独立模式了。全自动/全手动按钮直接勾选并保存; 单个勾选改动要点保存。并行开窗数对 GPT/Google 开窗都生效。</div>
   </div>
 
   <!-- 注册节奏 -->
@@ -300,9 +302,11 @@ const STEP_KEYS = ["step_watch", "step_gen", "step_email", "step_code", "step_pa
 async function loadSteps() {
   const r = await fetch("/api/settings").then(r => r.json());
   STEP_KEYS.forEach((k, i) => { $(STEP_IDS[i]).checked = r[k] !== false; });
+  $("st-workers").value = r.open_workers ?? 3;
 }
 function stepsPayload() {
-  const o = {};
+  const o = { open_workers: Math.max(1, Math.min(10,
+    parseInt($("st-workers").value) || 3)) };
   STEP_KEYS.forEach((k, i) => { o[k] = $(STEP_IDS[i]).checked; });
   return o;
 }

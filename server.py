@@ -3891,7 +3891,8 @@ def _gopen_worker(accs):
             _persist(a)
 
     try:
-        with ThreadPoolExecutor(max_workers=OPEN_WORKERS) as ex:
+        with ThreadPoolExecutor(
+                max_workers=_open_workers()) as ex:
             futs = []
             for a in accs:
                 if GOPEN_JOB["stop"]:
@@ -3912,7 +3913,16 @@ OPEN_JOB = {"running": False, "log": [], "results": {},
 TARGET_URL = "https://chatgpt.com"
 
 
-OPEN_WORKERS = 3          # 并行开窗/注册并发数 (每个窗口是一个真 Chromium)
+OPEN_WORKERS = 3          # 并行开窗默认并发数 (设置页 open_workers 可改)
+
+
+def _open_workers():
+    """开窗并发: 设置页 open_workers, 夹 1..10, 非法值回落默认。"""
+    try:
+        return max(1, min(10, int(
+            _settings().get("open_workers") or OPEN_WORKERS)))
+    except Exception:
+        return OPEN_WORKERS
 
 
 def _open_worker(accs):
@@ -4060,7 +4070,8 @@ def _open_worker(accs):
         finally:
             _persist(a)
     try:
-        with ThreadPoolExecutor(max_workers=OPEN_WORKERS) as ex:
+        with ThreadPoolExecutor(
+                max_workers=_open_workers()) as ex:
             futs = []
             for a in accs:
                 if _stopped():
@@ -4168,6 +4179,7 @@ class H(BaseHTTPRequestHandler):
                 "pace_load_ms": s.get("pace_load_ms") or 5000,
                 "proxy_cool_min": s.get("proxy_cool_min") or 20,
                 "oauth_ttl_min": s.get("oauth_ttl_min") or 10,
+                "open_workers": s.get("open_workers") or OPEN_WORKERS,
                 "step_watch": s.get("step_watch", True),
                 "step_gen": s.get("step_gen", True),
                 "step_email": s.get("step_email", True),
@@ -4580,7 +4592,7 @@ class H(BaseHTTPRequestHandler):
                       "pace_step_min", "pace_step_max",
                       "pace_type_min", "pace_type_max",
                       "pace_load_ms", "proxy_cool_min",
-                      "oauth_ttl_min",
+                      "oauth_ttl_min", "open_workers",
                       "step_watch", "step_gen", "step_email",
                       "step_code", "step_password", "step_profile",
                       "cpa_url", "cpa_key"):
