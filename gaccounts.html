@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>G账号 · roxy-accounts</title>
+<link rel="stylesheet" href="/ui.css">
+<script src="/ui.js"></script>
+<style>
+  /* 页面专属 */
+  textarea.import-textarea {
+    width: 100%; height: 120px; resize: vertical; font-size: 12px;
+    font-family: ui-monospace, Menlo, Monaco, monospace;
+    border: 1px solid var(--border); border-radius: var(--radius); padding: 10px;
+    background: #f8fafc; color: var(--text-main); outline: none;
+  }
+  textarea.import-textarea:focus { border-color: var(--primary); background: #fff; }
+</style>
+</head>
+<body>
+<nav class="sidebar" data-nav="g-accounts"></nav>
+<div class="main">
+<div class="page-container">
+  <div class="page-header">
+    <div class="title-group">
+      <h1>G账号库 <span style="font-size:13px;font-weight:400;color:var(--text-muted)">antigravity</span></h1>
+      <div class="subtitle">自动选绑定数最少的代理 → Roxy 开窗 (gauto-邮箱) → 打开 Google 登录页 · 登录全人工, 授权走「OAuth授权」全链同IP</div>
+    </div>
+    <div class="header-actions">
+      <button class="btn btn-primary" id="btn-import"><i data-ic="plus"></i>导入账号</button>
+    </div>
+  </div>
+
+  <div class="stats-grid">
+    <div class="stat-card"><div class="stat-label">总账号</div><div class="stat-val" id="st-total">0</div><div class="stat-foot">库内全部</div></div>
+    <div class="stat-card"><div class="stat-label">已绑代理</div><div class="stat-val" id="st-bound" style="color:#2563eb">0</div><div class="stat-foot">一条代理最多 3 号</div></div>
+    <div class="stat-card"><div class="stat-label">已开窗口</div><div class="stat-val" id="st-opened" style="color:#059669">0</div><div class="stat-foot">Roxy gauto- 窗口</div></div>
+    <div class="stat-card"><div class="stat-label">凭证已备</div><div class="stat-val" id="st-ready" style="color:#7c3aed">0</div><div class="stat-foot">antigravity JSON 待推</div></div>
+    <div class="stat-card"><div class="stat-label">已入池</div><div class="stat-val" id="st-pushed" style="color:#0891b2">0</div><div class="stat-foot">CPA auth-files</div></div>
+  </div>
+
+  <div class="drawer-card" id="import-box" style="display:none">
+    <div class="drawer-title">
+      <span>批量导入G账号</span>
+      <button class="btn btn-ghost btn-sm" id="import-close"><i data-ic="x"></i>关闭</button>
+    </div>
+    <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">
+      每行一个：<code>email----密码</code> · <code>email----密码----辅助邮箱等</code> · <code>email:密码</code> · <code>email</code>
+      （已注册好的 Google 账号; 导入后开窗登录 → OAuth授权 拿 antigravity 凭证）
+    </div>
+    <textarea class="import-textarea" id="import-text"
+      placeholder="user1@gmail.com----Passw0rd1----recovery@x.com&#10;user2@gmail.com:Passw0rd2"></textarea>
+    <div style="display:flex;align-items:center;gap:10px;margin-top:10px">
+      <button class="btn btn-primary btn-sm" id="do-import">确认导入</button>
+      <span class="subtitle" id="import-msg"></span>
+    </div>
+  </div>
+
+  <div class="toolbar">
+    <div class="toolbar-row">
+      <input class="form-input" id="q" placeholder="搜索邮箱 / 代理 / 备注" style="width:200px">
+      <span class="tb-sep"></span>
+      <button class="btn btn-primary btn-sm" id="open-sel"><i data-ic="app-window"></i>开窗选中</button>
+      <button class="btn btn-outline btn-sm" id="open-all"><i data-ic="layout-grid"></i>全部开窗</button>
+      <span class="subtitle" style="font-size:12px" title="开窗只定位到 accounts.google.com —— 登录全人工">开窗只到 Google 登录页</span>
+      <span style="flex:1"></span>
+      <span class="subtitle" id="sel-hint" style="font-size:12px"></span>
+      <button class="btn btn-ghost btn-sm" id="reload" title="刷新"><i data-ic="refresh-cw"></i></button>
+    </div>
+    <div class="toolbar-row">
+      <button class="btn btn-outline btn-sm" id="oauth-sel" title="本地算 Google OAuth 链接 → 开(原/同IP新) gauto- 窗口授权 → 截 localhost:51121 回调 → 经账号代理换token+project_id → 生成 antigravity 凭证"><i data-ic="key"></i>OAuth授权</button>
+      <button class="btn btn-outline btn-sm" id="cpa-push" title="把已生成的 antigravity 凭证 JSON 推入 CPA 号池 (auth-files)"><i data-ic="cloud-upload"></i>推入池</button>
+      <button class="btn btn-outline btn-sm" id="cpa-export" title="导出选中账号的凭证 JSON (zip 打包)"><i data-ic="download"></i>导凭证</button>
+      <span class="tb-sep"></span>
+      <button class="btn btn-outline btn-sm btn-danger" id="del-sel"><i data-ic="trash-2"></i>删除选中</button>
+    </div>
+  </div>
+
+  <div class="table-card">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th style="width:36px"><input type="checkbox" id="ck-all"></th>
+          <th style="width:44px">#</th>
+          <th>邮箱</th>
+          <th style="width:110px">密码</th>
+          <th style="width:190px">绑定代理</th>
+          <th style="width:90px">窗口</th>
+          <th style="width:110px">状态</th>
+          <th style="width:110px">凭证</th>
+          <th>备注/附加</th>
+          <th style="width:150px;text-align:right">操作</th>
+        </tr>
+      </thead>
+      <tbody id="tbody"></tbody>
+    </table>
+    <div class="pager-footer" id="pager" style="display:none">
+      <span id="pg-info"></span>
+      <div style="display:flex;gap:6px">
+        <button class="btn btn-outline btn-sm" id="pg-prev">‹ 上一页</button>
+        <button class="btn btn-outline btn-sm" id="pg-next">下一页 ›</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 任务日志: 开窗 / OAuth -->
+  <div class="log-card" id="job-log" style="display:none">
+    <div class="log-title">
+      <span class="job-tabs" id="job-tabs"></span>
+      <span style="display:flex;align-items:center;gap:8px">
+        <button class="btn btn-outline btn-sm btn-danger" id="job-stop" style="display:none"><i data-ic="square"></i>停止</button>
+        <span id="job-log-state"></span></span></div>
+    <pre id="job-log-pre"></pre>
+    <div id="oauth-cb-row" style="display:none;gap:8px;margin-top:8px;align-items:center">
+      <input class="form-input" id="oauth-cb" placeholder="自动截码失败? 手动兜底: 浏览器地址栏复制 http://localhost:51121/oauth-callback?code=...&state=... 整串贴进来" style="flex:1;font-size:12px">
+      <button class="btn btn-outline btn-sm" id="oauth-cb-go">提交回调</button>
+    </div>
+  </div>
+</div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+let accounts = [];
+let oauthTtlMin = 10;
+let page = 1;
+const SIZE = 20;
+const sel = new Set();
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g,
+    c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function toast(msg) {
+  const t = $("toast"); t.textContent = msg; t.style.opacity = 1;
+  clearTimeout(t._h); t._h = setTimeout(() => t.style.opacity = 0, 1800);
+}
+async function post(path, body) {
+  const r = await fetch(path, { method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body) });
+  return r.json();
+}
+
+function filtered() {
+  const q = $("q").value.trim().toLowerCase();
+  if (!q) return accounts;
+  return accounts.filter(a =>
+    a.email.includes(q) || (a.proxy || "").includes(q) ||
+    (a.note || "").toLowerCase().includes(q) ||
+    (a.extra || "").toLowerCase().includes(q));
+}
+
+async function load() {
+  const r = await fetch("/api/g/accounts").then(r => r.json());
+  accounts = r.accounts || [];
+  oauthTtlMin = r.oauth_ttl_min || 10;
+  const s = r.stats || {};
+  $("st-total").textContent = s.total ?? 0;
+  $("st-bound").textContent = s.bound ?? 0;
+  $("st-opened").textContent = s.opened ?? 0;
+  $("st-ready").textContent = s.ready ?? 0;
+  $("st-pushed").textContent = s.pushed ?? 0;
+  render();
+}
+
+function render() {
+  const list = filtered();
+  const pages = Math.max(1, Math.ceil(list.length / SIZE));
+  if (page > pages) page = pages;
+  const rows = list.slice((page - 1) * SIZE, page * SIZE);
+  $("tbody").innerHTML = rows.map((a, i) => {
+    const idx = (page - 1) * SIZE + i + 1;
+    const px = a.proxy
+      ? `<span class="pill pill-ok mono">${esc(a.proxy)}</span>`
+      : `<span class="pill pill-dim">未绑</span>`;
+    const win = a.win
+      ? `<span class="pill pill-ok" title="${esc(a.win)}">已开</span>`
+      : `<span class="pill pill-dim">—</span>`;
+    const st = a.status === "opened"
+      ? `<span class="pill pill-ok">已开窗</span>`
+      : a.status === "stopped"
+        ? `<span class="pill pill-warn">已停止</span>`
+        : a.status === "login_failed" || a.status === "email_dead"
+          ? `<span class="pill pill-bad">${esc(a.status)}</span>`
+          : `<span class="pill pill-dim">${esc(a.status || "new")}</span>`;
+    const pw = a.password
+      ? `<span class="copyable" data-c="${esc(a.password)}" title="点击复制密码">••••••</span>`
+      : "—";
+    const cpa = a.cpa === "yes"
+      ? `<a class="pill pill-ok" href="/api/g/accounts/${a.id}/cred" title="已入CPA池 ${esc(a.cpa_at||"")} —— 点下载凭证 ${esc(a.cred_file||"")}">已入池</a>`
+      : a.cpa === "ready"
+        ? `<a class="pill" style="background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe" href="/api/g/accounts/${a.id}/cred" title="凭证已备好 ${esc(a.cred_at||"")} · project ${esc((a.cred||{}).project_id||"?")} —— 点下载, 勾选后推入池">已生成</a>`
+        : a.cpa === "pending"
+          ? (() => {
+              const left = a.oauth_at
+                ? Math.max(0, Math.ceil(
+                    (new Date(a.oauth_at).getTime()
+                     + oauthTtlMin * 60000 - Date.now()) / 60000))
+                : 0;
+              return `<span class="pill pill-warn copyable" data-c="${esc(a.oauth_url||"")}" title="授权未完成 · 链接约剩 ${left} 分钟 —— 点复制 OAuth 链接手动开">${ui.icon("clock")}待授权 ${left}m</span>`;
+            })()
+          : a.cpa === "expired"
+            ? `<span class="pill pill-bad" title="授权超时, 链接已失效 —— 重跑OAuth授权">${ui.icon("clock")}已过期</span>`
+            : `<span class="pill pill-dim">—</span>`;
+    return `<tr>
+      <td><input type="checkbox" class="ck" data-id="${a.id}" ${sel.has(a.id) ? "checked" : ""}></td>
+      <td class="mono" style="color:var(--text-dim)">${idx}</td>
+      <td class="mono copyable" data-c="${esc(a.email)}" title="点击复制">${esc(a.email)}</td>
+      <td class="mono">${pw}</td>
+      <td>${px}</td>
+      <td>${win}</td>
+      <td>${st}</td>
+      <td>${cpa}</td>
+      <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(a.note || a.extra || "")}">${esc(a.note || a.extra || "")}</td>
+      <td style="text-align:right;white-space:nowrap">
+        <button class="btn btn-ghost btn-sm" data-act="open" data-id="${a.id}">开窗</button>
+        <button class="btn btn-ghost btn-sm" data-act="oauth" data-id="${a.id}" title="单号跑 antigravity OAuth">${ui.icon("key")}</button>
+        ${a.proxy_id ? `<button class="btn btn-ghost btn-sm" data-act="unbind" data-id="${a.id}">解绑</button>` : ""}
+        <button class="btn btn-ghost btn-sm btn-danger" data-act="del" data-id="${a.id}">删</button>
+      </td>
+    </tr>`;
+  }).join("") || `<tr><td colspan="10" style="text-align:center;color:var(--text-dim);padding:32px">暂无账号 —— 点右上角「导入账号」</td></tr>`;
+  $("pager").style.display = list.length > SIZE ? "flex" : "none";
+  $("pg-info").textContent = `第 ${page} / ${pages} 页 · 共 ${list.length} 条`;
+  $("sel-hint").textContent = sel.size ? `已选 ${sel.size} 个` : "";
+  if (accounts.some(a => a.cpa === "pending")) {
+    $("job-log").style.display = "block"; curTab = "oauth"; renderJobTab();
+  }
+}
+
+// ---- 任务日志: 开窗 / OAuth 两标签 ----
+const TABS = {
+  open:  { icon: "app-window", name: "开窗",  api: "/api/g/open/status",  stop: "/api/g/accounts/open/stop" },
+  oauth: { icon: "key",        name: "OAuth", api: "/api/g/oauth/status", stop: "/api/g/oauth/stop" },
+};
+const tabData = {};
+let curTab = "open", jobPollT = null;
+
+$("job-tabs").innerHTML = Object.keys(TABS)
+  .map(k => `<button class="job-tab" data-tab="${k}"></button>`).join("");
+$("job-tabs").addEventListener("click", e => {
+  const b = e.target.closest(".job-tab");
+  if (b) { curTab = b.dataset.tab; renderJobTab(); }
+});
+
+function renderJobTab() {
+  document.querySelectorAll(".job-tab").forEach(b => {
+    const k = b.dataset.tab, d = tabData[k] || {};
+    b.classList.toggle("on", k === curTab);
+    b.innerHTML = `${ui.icon(TABS[k].icon)}${TABS[k].name}` +
+      (d.running ? ' <span class="dot"></span>' : "");
+  });
+  const d = tabData[curTab] || {};
+  $("job-log-state").textContent =
+    d.running ? "运行中 …" : ((d.log || []).length ? "已结束" : "");
+  $("job-stop").style.display = d.running ? "" : "none";
+  $("job-log-pre").textContent = (d.log || []).join("\n");
+  $("job-log-pre").scrollTop = $("job-log-pre").scrollHeight;
+  $("oauth-cb-row").style.display = curTab === "oauth" ? "flex" : "none";
+}
+
+async function pollJobs() {
+  const keys = Object.keys(TABS);
+  const rs = await Promise.all(keys.map(k =>
+    fetch(TABS[k].api).then(r => r.json()).catch(() => null)));
+  keys.forEach((k, i) => { if (rs[i]) tabData[k] = rs[i]; });
+  if (keys.some(k => (tabData[k].log || []).length || tabData[k].running))
+    $("job-log").style.display = "block";
+  renderJobTab();
+  if (!keys.some(k => tabData[k].running) && jobPollT) {
+    clearInterval(jobPollT); jobPollT = null; await load();
+  }
+}
+function jobTab(k) {
+  curTab = k;
+  $("job-log").style.display = "block";
+  renderJobTab();
+  if (!jobPollT) jobPollT = setInterval(pollJobs, 1200);
+}
+$("job-stop").onclick = async () => {
+  await post(TABS[curTab].stop, {});
+  toast("已请求停止 —— 当前账号做完手上这步就停");
+};
+$("oauth-cb-go").onclick = async () => {
+  const u = $("oauth-cb").value.trim();
+  if (!u) return toast("先贴回调 URL");
+  const r = await post("/api/g/oauth-callback", { url: u });
+  if (r.error) return toast("✗ " + r.error);
+  toast(`✓ ${r.email}: 凭证 ${r.cred_file}`);
+  $("oauth-cb").value = "";
+  load();
+};
+
+function startOpen(ids, btn) {
+  btn.disabled = true;
+  post("/api/g/accounts/open", { ids }).then(r => {
+    btn.disabled = false;
+    if (r.error) return toast("✗ " + r.error);
+    toast(`开窗任务启动: ${r.count} 个账号`);
+    jobTab("open");
+  });
+}
+function startOauth(ids, btn) {
+  btn.disabled = true;
+  post("/api/g/oauth", { ids }).then(r => {
+    btn.disabled = false;
+    if (r.error) return toast("✗ " + r.error);
+    toast(`OAuth 授权启动: ${r.count} 个账号`);
+    jobTab("oauth");
+  });
+}
+
+// ---- 事件 ----
+$("btn-import").onclick = () => $("import-box").style.display = "block";
+$("import-close").onclick = () => $("import-box").style.display = "none";
+$("do-import").onclick = async e => {
+  e.target.disabled = true;
+  const r = await post("/api/g/accounts/import",
+    { text: $("import-text").value });
+  e.target.disabled = false;
+  if (r.error) return toast("✗ " + r.error);
+  $("import-msg").textContent =
+    `新增 ${r.added} · 重复 ${r.dup}` +
+    (r.bad && r.bad.length ? ` · ${r.bad.length} 行无法解析` : "");
+  if (r.added) { $("import-text").value = ""; load(); }
+};
+$("reload").onclick = load;
+$("q").oninput = () => { page = 1; render(); };
+$("pg-prev").onclick = () => { if (page > 1) { page--; render(); } };
+$("pg-next").onclick = () => {
+  const pages = Math.ceil(filtered().length / SIZE);
+  if (page < pages) { page++; render(); }
+};
+$("ck-all").onchange = e => {
+  filtered().slice((page - 1) * SIZE, page * SIZE).forEach(a =>
+    e.target.checked ? sel.add(a.id) : sel.delete(a.id));
+  render();
+};
+$("tbody").addEventListener("change", e => {
+  const ck = e.target.closest(".ck");
+  if (ck) {
+    ck.checked ? sel.add(ck.dataset.id) : sel.delete(ck.dataset.id);
+    render();
+  }
+});
+$("tbody").addEventListener("click", e => {
+  const cp = e.target.closest(".copyable");
+  if (cp) {
+    navigator.clipboard.writeText(cp.dataset.c)
+      .then(() => toast("已复制 " + (cp.dataset.c.length > 40
+        ? cp.dataset.c.slice(0, 40) + "…" : cp.dataset.c)));
+    return;
+  }
+  const b = e.target.closest("[data-act]");
+  if (!b) return;
+  const id = b.dataset.id;
+  if (b.dataset.act === "open") startOpen([id], b);
+  if (b.dataset.act === "oauth") startOauth([id], b);
+  if (b.dataset.act === "unbind")
+    post("/api/g/accounts/unbind", { id }).then(() => load());
+  if (b.dataset.act === "del") {
+    if (!confirm("删除这个G账号? (绑的代理会解绑, gauto- 窗口也会删掉)")) return;
+    post("/api/g/accounts/delete", { ids: [id] }).then(r => {
+      if (r.error) return toast("✗ " + r.error);
+      toast(`已删 ${r.deleted} 个`);
+      load();
+    });
+  }
+});
+$("open-sel").onclick = e => {
+  if (!sel.size) return toast("先勾选账号");
+  startOpen([...sel], e.target);
+};
+$("open-all").onclick = e => {
+  if (!accounts.length) return toast("没有账号");
+  startOpen(accounts.map(a => a.id), e.target);
+};
+$("oauth-sel").onclick = e => {
+  if (!sel.size) return toast("先勾选账号");
+  startOauth([...sel], e.target);
+};
+$("cpa-push").onclick = async e => {
+  if (!sel.size) return toast("先勾选有凭证的账号");
+  e.target.disabled = true;
+  const r = await post("/api/g/cpa-push", { ids: [...sel] });
+  e.target.disabled = false;
+  if (r.error) return toast("✗ " + r.error);
+  const f = r.failed
+    ? " · 失败 " + Object.keys(r.failed).length + "个" : "";
+  toast(`✓ 推入池 ${r.ok} 个${f}`);
+  load();
+};
+$("cpa-export").onclick = () => {
+  if (!sel.size) return toast("先勾选账号");
+  location.href = "/api/g/cred-export?ids=" + [...sel].join(",");
+};
+$("del-sel").onclick = async () => {
+  if (!sel.size) return toast("先勾选账号");
+  if (!confirm(`删除 ${sel.size} 个G账号? (绑的代理会解绑, gauto- 窗口也会删掉)`)) return;
+  const r = await post("/api/g/accounts/delete", { ids: [...sel] });
+  if (r.error) return toast("✗ " + r.error);
+  toast(`已删 ${r.deleted} 个` + (r.windows_deleted ? ` · 关窗 ${r.windows_deleted}` : ""));
+  sel.clear(); load();
+};
+
+load();
+setInterval(load, 15000);
+</script>
+</body>
+</html>

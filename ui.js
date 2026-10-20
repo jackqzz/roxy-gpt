@@ -40,19 +40,41 @@
       + 'stroke-linejoin="round" aria-hidden="true">' + d + "</svg>";
   }
 
-  const NAV = [
-    ["accounts", "/accounts", "users", "账号"],
-    ["proxies", "/", "globe", "代理"],
-    ["mothers", "/mothers", "crown", "空间母号"],
-    ["settings", "/settings", "settings", "设置"]
-  ];
+  const NAVS = {
+    gpt: [
+      ["accounts", "/accounts", "users", "账号"],
+      ["proxies", "/", "globe", "代理"],
+      ["mothers", "/mothers", "crown", "空间母号"],
+      ["settings", "/settings", "settings", "设置"]
+    ],
+    g: [
+      ["g-accounts", "/g/accounts", "users", "G账号"],
+      ["g-proxies", "/?nav=g", "globe", "代理池"],
+      ["g-settings", "/settings?nav=g", "settings", "设置"]
+    ]
+  };
+  const PRODS = [["gpt", "/accounts", "GPT"], ["g", "/g/accounts", "Google"]];
+  const SHARED_KEY = { proxies: "g-proxies", settings: "g-settings" };
 
   function renderNav() {
     const nav = document.querySelector("nav.sidebar[data-nav]");
     if (!nav) return;
-    const cur = nav.dataset.nav;
+    let cur = nav.dataset.nav;
+    // data-nav 定组; 共享页 (代理/设置) 可用 ?nav=g 保持 Google 语境
+    let grp = cur.indexOf("g-") === 0 ? "g" : "gpt";
+    try {
+      if (new URLSearchParams(location.search).get("nav") === "g") {
+        grp = "g";
+        if (cur.indexOf("g-") !== 0) cur = SHARED_KEY[cur] || cur;
+      }
+    } catch (e) {}
     nav.innerHTML = '<div class="brand"><span class="mark">R</span>roxy-accounts</div>'
-      + NAV.map(([k, href, ic, label]) =>
+      + '<div class="prod-switch">'
+      + PRODS.map(([k, href, label]) =>
+          '<a href="' + href + '"' + (k === grp ? ' class="on"' : "") + ">"
+          + label + "</a>").join("")
+      + "</div>"
+      + NAVS[grp].map(([k, href, ic, label]) =>
           '<a href="' + href + '"' + (k === cur ? ' class="on"' : "") + ">"
           + icon(ic) + "<span>" + label + "</span></a>").join("");
   }

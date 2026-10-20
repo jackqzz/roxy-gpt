@@ -431,11 +431,12 @@ def _roxy_env_for(email):
                          % len(_ROXY_OS_POOL)]
 
 
-def _roxy_open_for(email, proxy, kernel="Chrome"):
-    """找到或创建 auto-<email> 窗口并绑定指定代理, 返回 (dirId, ws, err)。
-    kernel 只在新建窗口时生效; 已有窗口沿用自己的内核。"""
+def _roxy_open_for(email, proxy, kernel="Chrome", prefix="auto"):
+    """找到或创建 <prefix>-<email> 窗口并绑定指定代理, 返回 (dirId, ws, err)。
+    kernel 只在新建窗口时生效; 已有窗口沿用自己的内核。
+    prefix: GPT 账号用 auto-, Google 账号用 gauto- (同邮箱也分窗)。"""
     cfg = _roxy_cfg()
-    name = f"auto-{email}"
+    name = f"{prefix}-{email}"
     w, werr = _roxy_find_window(name)
     if werr:
         return None, None, werr
@@ -2635,22 +2636,24 @@ def _jwt_claims(tok):
         return {}
 
 
-def _post_form_via(p, host, path, form, timeout=30):
-    """经账号代理 p 发 x-www-form-urlencoded POST → https://host/path。
-    链式: 本机→上级代理→账号代理→目标, token 交换与注册同 IP。
+def _req_via(p, method, host, path, headers=None, body=b"",
+             timeout=30):
+    """经账号代理 p 发任意 HTTP 请求 → https://host/path。
+    链式: 本机→上级代理→账号代理→目标 —— 与注册/授权同 IP。
     返回 (status, body)。"""
     s = _dial_via_account_proxy(p, host, 443, timeout)
     s = ssl.create_default_context().wrap_socket(
         s, server_hostname=host)
     s.settimeout(timeout)
     try:
-        s.sendall((
-            "POST %s HTTP/1.1\r\nHost: %s\r\n"
-            "Content-Type: application/x-www-form-urlencoded\r\n"
-            "Accept: application/json\r\n"
-            "Content-Length: %d\r\n"
-            "Connection: close\r\n\r\n"
-            % (path, host, len(form))).encode() + form)
+        h = {"Host": host, "Connection": "close",
+             "Content-Length": str(len(body))}
+        h.update(headers or {})
+        raw = ("%s %s HTTP/1.1\r\n%s\r\n"
+               % (method, path,
+                  "".join("%s: %s\r\n" % kv for kv in h.items()))
+               ).encode() + body
+        s.sendall(raw)
         buf = b""
         while True:
             ch = s.recv(8192)
@@ -2680,6 +2683,15 @@ def _post_form_via(p, host, path, form, timeout=30):
             rest = rest[nl + 2 + n + 2:]
         body = out
     return st, body
+
+
+def _post_form_via(p, host, path, form, timeout=30):
+    """经账号代理 p 发 x-www-form-urlencoded POST (token 交换用)。"""
+    return _req_via(p, "POST", host, path,
+                    {"Content-Type":
+                     "application/x-www-form-urlencoded",
+                     "Accept": "application/json"},
+                    form, timeout)
 
 
 def _oauth_exchange(p, code, verifier):
@@ -2956,6 +2968,511 @@ def _cpa_worker(ids):
             + (" (手动停止)" if CPA_JOB["stop"] else ""))
 
 
+# ---------------- Google 账号 (antigravity) ----------------
+GACCOUNTS_FILE = os.path.join(BASE_DIR, "gaccounts.json")
+_gacct_lock = threading.Lock()
+
+
+def _load_gaccounts():
+    try:
+        return json.load(open(GACCOUNTS_FILE)).get("accounts") or []
+    except Exception:
+        return []
+
+
+def _save_gaccounts(accs):
+    with _gacct_lock:
+        tmp = GACCOUNTS_FILE + ".tmp"
+        json.dump({"accounts": accs}, open(tmp, "w"),
+                  ensure_ascii=False, indent=1)
+        os.replace(tmp, GACCOUNTS_FILE)
+
+
+def _new_gaccount(**kw):
+    """照 _new_account, id 前缀 gc_ —— 与 GPT 账号区分命名空间。"""
+    d = _new_account(**kw)
+    d["id"] = "gc_" + uuid.uuid4().hex[:10]
+    return d
+
+
+# OAuth 参数照 CLIProxyAPI internal/auth/antigravity 源码:
+# 非PKCE(用 client_secret), 回调 http://localhost:51121/oauth-callback
+GOAUTH_CLIENT_ID = ("1071006060591-tmhssin2h21lcre235vtolojh4g403ep"
+                    ".apps.googleusercontent.com")
+GOAUTH_CLIENT_SECRET = "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"
+GOAUTH_REDIRECT = "http://localhost:51121/oauth-callback"
+GOAUTH_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+GOAUTH_TOKEN_HOST = "oauth2.googleapis.com"
+GOAUTH_SCOPES = " ".join([
+    "https://www.googleapis.com/auth/cloud-platform",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/userinfo.profile",
+    "https://www.googleapis.com/auth/cclog",
+    "https://www.googleapis.com/auth/experimentsandconfigs"])
+GOOGLE_USERINFO_HOST = "www.googleapis.com"
+GCODE_HOST = "cloudcode-pa.googleapis.com"
+GCODE_UA = "google-api-nodejs-client/9.15.1"
+GCODE_API_CLIENT = "google-cloud-sdk vscode_cloudshelleditor/0.1"
+GCODE_META = ('{"ideType":"IDE_UNSPECIFIED",'
+              '"platform":"PLATFORM_UNSPECIFIED",'
+              '"pluginType":"GEMINI"}')
+GCODE_META_ONBOARD = ('{"ideType":"ANTIGRAVITY",'
+                      '"platform":"PLATFORM_UNSPECIFIED",'
+                      '"pluginType":"GEMINI"}')
+
+
+def _goauth_gen():
+    """生成 Google OAuth 链接 + state (无 PKCE —— 授权码+secret 换 token)。"""
+    state = secrets.token_hex(16)
+    q = urllib.parse.urlencode({
+        "access_type": "offline",
+        "client_id": GOAUTH_CLIENT_ID,
+        "prompt": "consent",
+        "redirect_uri": GOAUTH_REDIRECT,
+        "response_type": "code",
+        "scope": GOAUTH_SCOPES,
+        "state": state})
+    return GOAUTH_AUTH_URL + "?" + q, state
+
+
+def _goauth_exchange(p, code):
+    """经账号代理 code→token。返回 (token dict, err)。"""
+    form = urllib.parse.urlencode({
+        "code": code,
+        "client_id": GOAUTH_CLIENT_ID,
+        "client_secret": GOAUTH_CLIENT_SECRET,
+        "redirect_uri": GOAUTH_REDIRECT,
+        "grant_type": "authorization_code"}).encode()
+    try:
+        st, body = _post_form_via(p, GOAUTH_TOKEN_HOST, "/token", form)
+    except Exception as e:
+        return None, str(e)[:160]
+    try:
+        j = json.loads(body) if body else {}
+    except Exception:
+        j = {}
+    if st != 200:
+        return None, "token 交换 HTTP %d: %s" % (
+            st, (body or b"")[:200].decode(errors="ignore"))
+    if not j.get("access_token"):
+        return None, "响应里没有 access_token"
+    return j, None
+
+
+def _g_userinfo(p, at):
+    """经账号代理拿 Google userinfo → email|None。"""
+    try:
+        st, body = _req_via(
+            p, "GET", GOOGLE_USERINFO_HOST,
+            "/oauth2/v1/userinfo?alt=json",
+            {"Authorization": "Bearer " + at})
+        if st == 200 and body:
+            return (json.loads(body).get("email") or "").strip() or None
+    except Exception:
+        pass
+    return None
+
+
+def _gcode_call(p, op, obj, at):
+    """经账号代理调 cloudcode-pa v1internal:op。返回 (status, json|{})。"""
+    body = json.dumps(obj).encode()
+    st, raw = _req_via(
+        p, "POST", GCODE_HOST, "/v1internal:" + op, {
+            "Authorization": "Bearer " + at,
+            "Content-Type": "application/json",
+            "User-Agent": GCODE_UA,
+            "X-Goog-Api-Client": GCODE_API_CLIENT,
+            "Client-Metadata": GCODE_META}, body)
+    try:
+        return st, json.loads(raw) if raw else {}
+    except Exception:
+        return st, {}
+
+
+def _g_project_id(p, at, log=None):
+    """loadCodeAssist → cloudaicompanionProject; 空则 onboardUser
+    轮询开通 (照 CPA FetchProjectID/OnboardUser)。返回 (pid, err)。"""
+    try:
+        st, j = _gcode_call(p, "loadCodeAssist",
+                            {"metadata": json.loads(GCODE_META_ONBOARD)},
+                            at)
+    except Exception as e:
+        return None, "loadCodeAssist: " + str(e)[:120]
+    if st != 200:
+        return None, "loadCodeAssist HTTP %d: %s" % (
+            st, str(j)[:160])
+    pid = ""
+    cp = j.get("cloudaicompanionProject")
+    if isinstance(cp, str):
+        pid = cp.strip()
+    elif isinstance(cp, dict):
+        pid = (cp.get("id") or "").strip()
+    if pid:
+        return pid, None
+    tier = "legacy-tier"
+    for t in (j.get("allowedTiers") or []):
+        if isinstance(t, dict) and t.get("isDefault") \
+                and (t.get("id") or "").strip():
+            tier = t["id"].strip()
+            break
+    if log:
+        log("  无现成 project_id, onboardUser 开通 (tier=%s) ..."
+            % tier)
+    for _ in range(5):
+        try:
+            st, j = _gcode_call(p, "onboardUser",
+                                {"tierId": tier,
+                                 "metadata":
+                                 json.loads(GCODE_META_ONBOARD)}, at)
+        except Exception as e:
+            return None, "onboardUser: " + str(e)[:120]
+        if st != 200:
+            return None, "onboardUser HTTP %d: %s" % (
+                st, str(j)[:160])
+        if j.get("done"):
+            rp = (j.get("response") or {}).get(
+                "cloudaicompanionProject")
+            if isinstance(rp, dict):
+                pid = (rp.get("id") or "").strip()
+            elif isinstance(rp, str):
+                pid = rp.strip()
+            if pid:
+                return pid, None
+            return None, "onboardUser 完成但响应里没 project_id"
+        time.sleep(2)
+    return None, "onboardUser 轮询超时"
+
+
+def _gcred(j, email, pid, proxy_url):
+    """token 响应 → CPA antigravity 凭证 JSON (照池内现存文件格式)。"""
+    now = time.time()
+    return {
+        "type": "antigravity",
+        "email": email,
+        "access_token": j.get("access_token") or "",
+        "refresh_token": j.get("refresh_token") or "",
+        "expires_in": int(j.get("expires_in") or 0),
+        "expired": time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                 time.gmtime(
+                                     now + int(j.get("expires_in")
+                                               or 0))),
+        "timestamp": int(now * 1000),
+        "project_id": pid or "",
+        "proxy_url": proxy_url}
+
+
+def _gcred_name(cred):
+    return "antigravity-%s.json" % (
+        (cred.get("email") or "unknown").strip())
+
+
+def _goauth_expire(accs):
+    """同 _oauth_expire, 但落 gaccounts.json。"""
+    cut = time.strftime("%Y-%m-%dT%H:%M:%S",
+                        time.localtime(time.time() - _oauth_ttl_s()))
+    changed = False
+    for a in accs:
+        if a.get("cpa") == "pending" \
+                and (not a.get("oauth_at") or a["oauth_at"] < cut):
+            a["cpa"] = "expired"
+            for k in ("oauth_url", "oauth_state", "oauth_at"):
+                a.pop(k, None)
+            changed = True
+    if changed:
+        _save_gaccounts(accs)
+    return changed
+
+
+def _goauth_finish(p, a, code, log):
+    """code → token → userinfo → project_id → 凭证落账号。
+    全程经账号代理 (与登录/回调同 IP)。返回 err|None。"""
+    j, err = _goauth_exchange(p, code)
+    if err:
+        return "换token: " + err
+    email = _g_userinfo(p, j["access_token"]) or a["email"]
+    if email.lower() != a["email"].lower():
+        log("  ⚠ 授权邮箱 %s 与账号 %s 不一致 —— 按账号记"
+            % (email, a["email"]))
+    pid, err = _g_project_id(p, j["access_token"], log)
+    if err:
+        return "project_id: " + err
+    cred = _gcred(j, a["email"], pid, _proxy_url(p, "url"))
+    a["cred"] = cred
+    a["cred_file"] = _gcred_name(cred)
+    a["cred_at"] = _now()
+    a["cpa"] = "ready"
+    for k in ("oauth_url", "oauth_state", "oauth_at"):
+        a.pop(k, None)
+    log("✓ %s: token+project_id(%s) 到手, 凭证 %s 已备好"
+        % (a["email"], pid, a["cred_file"]))
+    return None
+
+
+GOAUTH_JOB = {"running": False, "log": [], "results": {},
+              "stop": False}
+
+
+def _goauth_worker(ids):
+    """逐账号 Google antigravity OAuth: 算链接 → 开 gauto- 窗口
+    (同代理) → 截 localhost:51121 回调 → 经账号代理换 token
+    + userinfo + project_id → 生成 antigravity 凭证 (含 proxy_url)。
+    登录 google/提交回调/凭证生成 全链路同一 IP。"""
+    GOAUTH_JOB["running"] = True
+    GOAUTH_JOB["stop"] = False
+    GOAUTH_JOB["log"] = []
+    GOAUTH_JOB["results"] = {}
+
+    def log(m):
+        GOAUTH_JOB["log"].append(
+            "%s %s" % (time.strftime("%H:%M:%S"), m))
+
+    from playwright.sync_api import sync_playwright
+    try:
+        with sync_playwright() as pw:
+            for aid in ids:
+                if GOAUTH_JOB["stop"]:
+                    log("⏹ 已手动停止")
+                    break
+                a = next((x for x in _load_gaccounts()
+                          if x["id"] == aid), None)
+                if not a:
+                    continue
+                email = a["email"]
+                try:
+                    px = _load_proxies()
+                    p = next((x for x in px
+                              if x["id"] == a.get("proxy_id")),
+                             None)
+                    if not p or p.get("banned"):
+                        # 没绑/绑死了: 现场选一条绑上 —— IP 从这个
+                        # 窗口建立起就是这一条, 全链一致
+                        p = _pick_proxy(px, email)
+                        if not p:
+                            cool = (" (冷却中 %d 条)"
+                                    % PICK_LAST["cooled"]
+                                    if PICK_LAST["cooled"] else "")
+                            GOAUTH_JOB["results"][aid] = \
+                                "没有可用代理" + cool
+                            log("✗ %s: 没有可用代理%s" % (email, cool))
+                            continue
+                        _bind_proxy(p, email)
+                        a["proxy_id"] = p["id"]
+                        _save_proxies(px)
+                        log("→ %s: 绑代理 %s:%s" % (
+                            email, p["host"], p["port"]))
+                    url, state = _goauth_gen()
+                    a["oauth_state"] = state
+                    a["oauth_url"] = url
+                    a["oauth_at"] = _now()
+                    log("→ %s: Google OAuth 链接已生成 (%d分钟时效)"
+                        % (email, _oauth_ttl_s() // 60))
+                    dir_id, cws, err = _roxy_open_for(
+                        email, p, prefix="gauto")
+                    if err or not cws:
+                        GOAUTH_JOB["results"][aid] = \
+                            "开窗: " + (err or "")
+                        log("✗ %s: 开窗失败 %s" % (email, err))
+                        continue
+                    a["win"] = dir_id
+                    cbr = pw.chromium.connect_over_cdp(cws)
+                    try:
+                        ctx = cbr.contexts[0] if cbr.contexts else None
+                        cpg = (ctx.pages[0] if ctx and ctx.pages
+                               else (ctx.new_page() if ctx else None))
+                        cpg.goto(url, wait_until="domcontentloaded",
+                                 timeout=60000)
+                        code = None
+                        hit = {"u": None}
+
+                        def _take(u):
+                            if not u or "localhost:51121" not in u:
+                                return
+                            qs = urllib.parse.parse_qs(
+                                urllib.parse.urlparse(u).query)
+                            got = (qs.get("state") or [""])[0]
+                            if got and got != state:
+                                return
+                            if qs.get("code"):
+                                hit["u"] = u
+
+                        cpg.on("request", lambda r: _take(r.url))
+                        cpg.on("requestfailed",
+                               lambda r: _take(r.url))
+                        cdp = cpg.context.new_cdp_session(cpg)
+                        deadline = time.time() + _oauth_ttl_s()
+                        while time.time() < deadline:
+                            if GOAUTH_JOB["stop"]:
+                                break
+                            if hit["u"]:
+                                code = (urllib.parse.parse_qs(
+                                    urllib.parse.urlparse(
+                                        hit["u"]).query)
+                                    .get("code") or [None])[0]
+                                break
+                            _take(cpg.url or "")
+                            try:
+                                for e in (cdp.send(
+                                        "Page.getNavigationHistory")
+                                        .get("entries") or []):
+                                    _take(e.get("url"))
+                            except Exception:
+                                pass
+                            if hit["u"]:
+                                continue
+                            # Google 同意页按钮尽力点 (Continue/允许)
+                            for sel in (
+                                    'button:has-text("Continue")',
+                                    'button:has-text("Allow")',
+                                    'button:has-text("允许")',
+                                    'button:has-text("继续")',
+                                    'button[type="submit"]'):
+                                try:
+                                    b = cpg.query_selector(sel)
+                                    if b and b.is_visible():
+                                        b.click()
+                                        log("  %s: 点了授权按钮 %s"
+                                            % (email, sel))
+                                        cpg.wait_for_timeout(1500)
+                                        break
+                                except Exception:
+                                    pass
+                            cpg.wait_for_timeout(2000)
+                        if not code:
+                            if GOAUTH_JOB["stop"]:
+                                a["cpa"] = "pending"
+                                done = "手动停止"
+                            else:
+                                a["cpa"] = "expired"
+                                for k in ("oauth_url", "oauth_state",
+                                          "oauth_at"):
+                                    a.pop(k, None)
+                                done = "授权超时 (链接已过时效)"
+                            GOAUTH_JOB["results"][aid] = done
+                            log("✗ %s: %s%s" % (email, done,
+                                ", 授权页留在窗口里"
+                                if GOAUTH_JOB["stop"]
+                                else ", 重跑OAuth授权"))
+                            continue
+                        log("  %s: 回调已截获, 走账号代理换 token"
+                            % email)
+                        err = _goauth_finish(p, a, code, log)
+                        if err:
+                            a["cpa"] = "pending"
+                            GOAUTH_JOB["results"][aid] = err
+                            log("✗ %s: %s" % (email, err))
+                            continue
+                        GOAUTH_JOB["results"][aid] = "凭证已生成"
+                    finally:
+                        try:
+                            cbr.close()
+                        except Exception:
+                            pass
+                except Exception as e:
+                    GOAUTH_JOB["results"][aid] = str(e)[:120]
+                    log("✗ %s: %s" % (email, str(e)[:120]))
+                finally:
+                    accs_all = _load_gaccounts()
+                    for x in accs_all:
+                        if x["id"] == aid:
+                            x.update(a)
+                            break
+                    _save_gaccounts(accs_all)
+    finally:
+        GOAUTH_JOB["running"] = False
+        log("—— Google OAuth 授权结束 ——"
+            + (" (手动停止)" if GOAUTH_JOB["stop"] else ""))
+
+
+GOPEN_JOB = {"running": False, "log": [], "results": {},
+             "stop": False}
+GOOGLE_START_URL = "https://accounts.google.com/"
+
+
+def _gopen_worker(accs):
+    """低级半自动: 选代理 -> 绑定 -> 开 gauto- 窗口 -> 打开 Google
+    登录页即交人工 (不做任何表单自动化)。代理选取与 GPT 共用同一
+    池子同一冷却语义。"""
+    GOPEN_JOB["running"] = True
+    GOPEN_JOB["stop"] = False
+    GOPEN_JOB["log"] = []
+    GOPEN_JOB["results"] = {}
+    log = GOPEN_JOB["log"].append
+    db_lock = threading.Lock()
+
+    def _persist(a):
+        with db_lock:
+            all_ = _load_gaccounts()
+            for x in all_:
+                if x["id"] == a["id"]:
+                    x.update(a)
+                    break
+            _save_gaccounts(all_)
+
+    def _one(a):
+        email = a["email"]
+        try:
+            with db_lock:
+                px = _load_proxies()
+                p = next((x for x in px
+                          if x["id"] == a.get("proxy_id")), None)
+                if p and not p.get("banned"):
+                    bound = False
+                else:
+                    p = _pick_proxy(px, email)
+                    bound = True
+                    if p:
+                        _bind_proxy(p, email)
+                        a["proxy_id"] = p["id"]
+                        _save_proxies(px)
+            if not p:
+                cool = (" (冷却中 %d 条)" % PICK_LAST["cooled"]
+                        if PICK_LAST["cooled"] else "")
+                GOPEN_JOB["results"][a["id"]] = "没有可用代理" + cool
+                log(f"✗ {email}: 没有可用代理{cool}")
+                return
+            if bound:
+                log(f"→ {email}: 绑代理 {p['host']}:{p['port']}"
+                    f" (占用 {_bound_count(p)}/{PICK_LIMIT})")
+            dir_id, ws, err = _roxy_open_for(
+                email, p, prefix="gauto")
+            if err:
+                with db_lock:
+                    _unbind_proxy(p, email)
+                    p["alive"] = False
+                    a["proxy_id"] = None
+                    _save_proxies(px)
+                GOPEN_JOB["results"][a["id"]] = err
+                log(f"✗ {email}: 开窗失败 {err}"
+                    f" (已解绑换代理重试即可)")
+                return
+            a["win"] = dir_id
+            r = _roxy_goto_url(ws, GOOGLE_START_URL)
+            a["status"] = "opened"
+            GOPEN_JOB["results"][a["id"]] = "已开到 Google 登录页"
+            log(f"✓ {email}: 已开到 accounts.google.com —— "
+                f"登录/授权全人工; 要跑 antigravity 授权点「OAuth授权」")
+        except Exception as e:
+            GOPEN_JOB["results"][a["id"]] = str(e)[:120]
+            log(f"✗ {email}: {str(e)[:120]}")
+        finally:
+            _persist(a)
+
+    try:
+        with ThreadPoolExecutor(max_workers=OPEN_WORKERS) as ex:
+            futs = []
+            for a in accs:
+                if GOPEN_JOB["stop"]:
+                    log("⏹ 已手动停止")
+                    break
+                futs.append(ex.submit(_one, a))
+            for f in futs:
+                f.result()
+    finally:
+        GOPEN_JOB["running"] = False
+        log("—— 全部结束 ——"
+            + (" (手动停止)" if GOPEN_JOB["stop"] else ""))
+
+
 # ---------------- 开窗任务 ----------------
 OPEN_JOB = {"running": False, "log": [], "results": {},
             "stop": False}
@@ -3128,6 +3645,8 @@ def _open_worker(accs):
 PAGES = {"/": "index.html", "/index.html": "index.html",
          "/mothers": "mothers.html", "/mothers.html": "mothers.html",
          "/accounts": "accounts.html", "/accounts.html": "accounts.html",
+         "/g": "gaccounts.html", "/g/accounts": "gaccounts.html",
+         "/gaccounts.html": "gaccounts.html",
          "/settings": "settings.html", "/settings.html": "settings.html"}
 STATICS = {"/ui.css": ("ui.css", "text/css; charset=utf-8"),
            "/ui.js": ("ui.js", "application/javascript; charset=utf-8")}
@@ -3256,6 +3775,81 @@ class H(BaseHTTPRequestHandler):
                 if not v.get("hidden")],
                 "profiles": [
                     {"id": k, **v} for k, v in PROF_WATCH.items()]})
+        if self.path == "/api/g/accounts":
+            accs = _load_gaccounts()
+            _goauth_expire(accs)
+            px = _load_proxies()
+            pmap = {p["id"]: p for p in px}
+            out = []
+            for a in accs:
+                p = pmap.get(a.get("proxy_id") or "")
+                out.append({**a,
+                            "proxy":
+                                (f"{p['scheme']}://{p['host']}:{p['port']}"
+                                 if p else None)})
+            stats = {"total": len(accs),
+                     "bound": sum(1 for a in accs if a.get("proxy_id")),
+                     "opened": sum(1 for a in accs if a.get("win")),
+                     "ready": sum(1 for a in accs
+                                  if a.get("cpa") == "ready"),
+                     "pushed": sum(1 for a in accs
+                                   if a.get("cpa") == "yes")}
+            return self._json({"accounts": out, "stats": stats,
+                               "oauth_ttl_min": _oauth_ttl_s() // 60})
+        if self.path == "/api/g/open/status":
+            return self._json({"running": GOPEN_JOB["running"],
+                               "log": GOPEN_JOB["log"][-80:],
+                               "results": GOPEN_JOB["results"]})
+        if self.path == "/api/g/oauth/status":
+            return self._json(GOAUTH_JOB)
+        m = re.fullmatch(r"/api/g/accounts/([0-9a-f-]+)/cred",
+                         self.path)
+        if m:
+            a = next((x for x in _load_gaccounts()
+                      if x["id"] == m.group(1)), None)
+            if not a or not a.get("cred"):
+                return self._json({"error": "没有凭证"}, 404)
+            data = json.dumps(a["cred"], ensure_ascii=False,
+                              indent=2).encode()
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header(
+                "content-disposition",
+                'attachment; filename="%s"'
+                % (a.get("cred_file") or "antigravity-cred.json"))
+            self.send_header("content-length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        if self.path.startswith("/api/g/cred-export"):
+            q = urllib.parse.parse_qs(
+                urllib.parse.urlparse(self.path).query)
+            ids = set((q.get("ids") or [""])[0].split(",")) - {""}
+            items = [
+                (a.get("cred_file") or _gcred_name(a["cred"]),
+                 a["cred"])
+                for a in _load_gaccounts()
+                if a.get("cred")
+                and (not ids or a["id"] in ids)]
+            if not items:
+                return self._json({"error": "没有可导出的凭证"}, 404)
+            import io, zipfile
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w",
+                                 zipfile.ZIP_DEFLATED) as z:
+                for name, cred in items:
+                    z.writestr(name, json.dumps(
+                        cred, ensure_ascii=False, indent=2))
+            data = buf.getvalue()
+            self.send_response(200)
+            self.send_header("content-type", "application/zip")
+            self.send_header(
+                "content-disposition",
+                'attachment; filename="antigravity-creds.zip"')
+            self.send_header("content-length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         if self.path == "/api/mother":
             s = _settings()
             return self._json({"mother_window":
@@ -3918,6 +4512,184 @@ class H(BaseHTTPRequestHandler):
                     a["cpa_at"] = _now()
                     ok += 1
             _save_accounts(accs)
+            return self._json({"ok": ok,
+                               "failed": failed or None})
+        # ---------- Google 账号 (antigravity) ----------
+        if self.path == "/api/g/accounts/import":
+            try:
+                req = self._body()
+            except Exception:
+                return self._json({"error": "请求体不是 JSON"}, 400)
+            text = req.get("text") or ""
+            accs = _load_gaccounts()
+            seen = {a["email"] for a in accs}
+            added, dup, bad = 0, 0, []
+            for i, line in enumerate(text.splitlines(), 1):
+                d, err = _parse_account_line(line)
+                if err in ("empty", "comment"):
+                    continue
+                if err:
+                    bad.append({"line": i, "err": err,
+                                "raw": line.strip()[:80]})
+                    continue
+                if d["email"] in seen:
+                    dup += 1
+                    continue
+                seen.add(d["email"])
+                accs.append(_new_gaccount(**d))
+                added += 1
+            if added:
+                _save_gaccounts(accs)
+            return self._json({"ok": True, "added": added,
+                               "dup": dup, "bad": bad})
+        if self.path == "/api/g/accounts/delete":
+            req = self._body()
+            ids = set(req.get("ids") or [])
+            accs = _load_gaccounts()
+            doomed = [a for a in accs if a["id"] in ids]
+            px = _load_proxies()
+            win_ok, win_err = 0, []
+            for a in doomed:
+                p = next((x for x in px
+                          if x["id"] == a.get("proxy_id")), None)
+                if p:
+                    _unbind_proxy(p, a["email"])
+                if a.get("win"):
+                    e = _roxy_delete_window(a["win"])
+                    if e:
+                        win_err.append(f"{a['email']}: {e}")
+                    else:
+                        win_ok += 1
+            _save_proxies(px)
+            keep = [a for a in accs if a["id"] not in ids]
+            _save_gaccounts(keep)
+            return self._json({"ok": True,
+                               "deleted": len(accs) - len(keep),
+                               "windows_deleted": win_ok,
+                               "window_errors": win_err})
+        if self.path == "/api/g/accounts/update":
+            req = self._body()
+            accs = _load_gaccounts()
+            a = next((x for x in accs if x["id"] == req.get("id")),
+                     None)
+            if not a:
+                return self._json({"error": "账号不存在"}, 404)
+            for k in ("note", "password", "extra", "status",
+                      "mail_url"):
+                if k in req:
+                    a[k] = req[k]
+            _save_gaccounts(accs)
+            return self._json({"ok": True})
+        if self.path == "/api/g/accounts/unbind":
+            req = self._body()
+            accs = _load_gaccounts()
+            a = next((x for x in accs if x["id"] == req.get("id")),
+                     None)
+            if not a:
+                return self._json({"error": "账号不存在"}, 404)
+            px = _load_proxies()
+            p = next((x for x in px
+                      if x["id"] == a.get("proxy_id")), None)
+            if p:
+                _unbind_proxy(p, a["email"])
+                _save_proxies(px)
+            a["proxy_id"] = None
+            _save_gaccounts(accs)
+            return self._json({"ok": True})
+        if self.path == "/api/g/accounts/open":
+            req = self._body()
+            if GOPEN_JOB["running"]:
+                return self._json({"error": "已有开窗任务在跑"}, 409)
+            ids = set(req.get("ids") or [])
+            accs = [a for a in _load_gaccounts()
+                    if not ids or a["id"] in ids]
+            if not accs:
+                return self._json({"error": "没有要开的账号"})
+            if len(accs) > 50:
+                return self._json({"error": "单次最多 50 个"}, 400)
+            threading.Thread(
+                target=_gopen_worker, args=(accs,),
+                daemon=True).start()
+            return self._json({"ok": True, "count": len(accs)})
+        if self.path == "/api/g/accounts/open/stop":
+            GOPEN_JOB["stop"] = True
+            return self._json({"ok": True})
+        if self.path == "/api/g/oauth":
+            req = self._body()
+            if GOAUTH_JOB["running"]:
+                return self._json({"error": "已有OAuth任务在跑"}, 409)
+            ids = req.get("ids") or []
+            if not ids:
+                return self._json({"error": "没选账号"})
+            threading.Thread(
+                target=_goauth_worker, args=(ids,),
+                daemon=True).start()
+            return self._json({"ok": True, "count": len(ids)})
+        if self.path == "/api/g/oauth/stop":
+            GOAUTH_JOB["stop"] = True
+            return self._json({"ok": True})
+        if self.path == "/api/g/oauth-callback":
+            req = self._body()
+            u = (req.get("url") or "").strip()
+            if not u:
+                return self._json({"error": "贴回调 URL"})
+            qs = urllib.parse.parse_qs(
+                urllib.parse.urlparse(u).query)
+            code = (qs.get("code") or [None])[0]
+            state = (qs.get("state") or [""])[0]
+            if not code:
+                return self._json({"error": "URL 里没有 code"})
+            accs = _load_gaccounts()
+            _goauth_expire(accs)
+            a = None
+            if state:
+                a = next((x for x in accs
+                          if x.get("oauth_state") == state), None)
+            if not a:
+                pend = [x for x in accs if x.get("cpa") == "pending"]
+                if len(pend) == 1:
+                    a = pend[0]
+            if not a:
+                return self._json(
+                    {"error": "没有匹配的待授权账号 (state 对不上,"
+                              "可能已过期, 重跑OAuth授权)"}, 404)
+            p = next((x for x in _load_proxies()
+                      if x["id"] == a.get("proxy_id")), None)
+            if not p:
+                return self._json(
+                    {"error": "账号没绑代理 —— 全链同IP做不到"}, 400)
+            logs = []
+            err = _goauth_finish(
+                p, a, code, lambda m: logs.append(m))
+            _save_gaccounts(accs)
+            if err:
+                return self._json({"error": err, "logs": logs})
+            return self._json({"ok": True, "email": a["email"],
+                               "cred_file": a["cred_file"],
+                               "logs": logs})
+        if self.path == "/api/g/cpa-push":
+            req = self._body()
+            ids = req.get("ids") or []
+            if not ids:
+                return self._json({"error": "没选账号"})
+            accs = _load_gaccounts()
+            ok, failed = 0, {}
+            for a in accs:
+                if a["id"] not in ids:
+                    continue
+                cred = a.get("cred")
+                if not cred:
+                    failed[a["email"]] = "没有凭证 (先跑OAuth)"
+                    continue
+                err = _cpa_push_cred(
+                    a.get("cred_file") or _gcred_name(cred), cred)
+                if err:
+                    failed[a["email"]] = err
+                else:
+                    a["cpa"] = "yes"
+                    a["cpa_at"] = _now()
+                    ok += 1
+            _save_gaccounts(accs)
             return self._json({"ok": ok,
                                "failed": failed or None})
         if self.path == "/api/settings/test-cpa":
