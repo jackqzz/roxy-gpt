@@ -14,6 +14,7 @@ import secrets
 import socket
 import ssl
 import struct
+import sys
 import threading
 import time
 import zipfile
@@ -5230,6 +5231,12 @@ class H(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     print(f"roxy-accounts @ http://127.0.0.1:{PORT}")
+    try:
+        import playwright  # noqa: F401
+    except ImportError:
+        print("!! playwright 不在这个解释器里 —— 请用 ./run.sh "
+              "(.venv) 启动, 否则开窗/OAuth 全部失败")
+    print(f"python: {sys.executable}")
     if _goauth_cb_server():
         print("google oauth callback @ http://127.0.0.1:51121")
     ThreadingHTTPServer(("127.0.0.1", PORT), H).serve_forever()
