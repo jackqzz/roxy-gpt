@@ -28,6 +28,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PORT = 8322
+BJ_TZ = datetime.timezone(datetime.timedelta(hours=8))  # 北京时间 (无夏令时)
 
 # ---------------- 代理池存储 ----------------
 PROXIES_FILE = os.path.join(BASE_DIR, "proxies.json")
@@ -1925,7 +1926,8 @@ def _mother_billing(name, ws_id=""):
                         delta = dt - now
                         left_min = int(delta.total_seconds() // 60)
                         days = delta.days
-                        renewal = dt.strftime("%Y-%m-%d %H:%M")
+                        bj = dt.astimezone(BJ_TZ) if dt.tzinfo else dt
+                        renewal = bj.strftime("%Y-%m-%d %H:%M")
                     except Exception:
                         pass
                 return {"seats": r.get("seats"),
