@@ -1795,8 +1795,9 @@ _PAT_PROBE_JS = """async (wsid) => {
                   'content-type': 'application/json'},
         body: JSON.stringify({name: 'pat-probe-' + Date.now(),
                               ttl: 2592000})});
+    const raw = await r.text();
     let j = null;
-    try { j = await r.json(); } catch (e) {}
+    try { j = JSON.parse(raw); } catch (e) {}
     const d = (j && j.detail) || {};
     const code = d.code || (d.error && d.error.code)
         || (j && j.error && j.error.code) || null;
@@ -1804,6 +1805,7 @@ _PAT_PROBE_JS = """async (wsid) => {
         || (j && j.error && j.error.message) || '';
     return {status: r.status, code: code,
             msg: String(msg).slice(0, 200),
+            raw: raw.slice(0, 600),
             cred: j && (j.credential_id || (j.credential || {}).id)};
 }"""
 
@@ -2276,6 +2278,18 @@ def _pat_worker(ids):
                                 res = {"status": 0, "code": "eval_failed",
                                        "msg": str(e)[:120]}
                             stt, code = res.get("status"), res.get("code")
+                            # 上游原始响应(脱敏)进日志, 供判定排障
+                            raw = (res.get("raw") or "")
+                            if raw:
+                                raw = re.sub(
+                                    r'("(?:token|credential|secret'
+                                    r'|value)"\s*:\s*")[^"]{6}',
+                                    r'\1***', raw, flags=re.I)
+                                raw = re.sub(r'sk-[A-Za-z0-9_-]{4,}',
+                                             'sk-***', raw)
+                                log(f"  {email}: PAT响应 {stt} "
+                                    f"{code or '-'} | "
+                                    + raw[:300].replace("\n", " "))
                             if code == "no_token":
                                 verdict = "窗口未登录"
                                 break
