@@ -346,6 +346,7 @@ function render() {
             : `<span class="pill pill-dim">—</span>`;
     const acts = a.archived
       ? `<button class="btn btn-ghost btn-sm" data-act="restore" data-id="${a.id}">恢复</button>
+         <button class="btn btn-ghost btn-sm" data-act="bind" data-id="${a.id}" title="手动选一条代理绑给这个号 —— 恢复后开窗用这条">${ui.icon("globe")}绑IP</button>
          <button class="btn btn-ghost btn-sm btn-danger" data-act="harddel" data-id="${a.id}">真删</button>`
       : `<button class="btn btn-ghost btn-sm" data-act="open" data-id="${a.id}">开窗</button>
         ${a.mail_url ? `<button class="btn btn-ghost btn-sm" data-act="watch" data-id="${a.id}" title="开接码监听">${ui.icon("mail")}</button>` : ""}
