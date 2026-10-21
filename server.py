@@ -4921,6 +4921,38 @@ class H(BaseHTTPRequestHandler):
             a["proxy_id"] = None
             _save_accounts(accs)
             return self._json({"ok": True})
+        if self.path == "/api/accounts/bind-proxy":
+            """手动绑代理: {id, proxy_id}。已绑别条则自动换绑;
+            封禁的拒绑, 满载/冷却由用户显式选择覆盖。"""
+            req = self._body()
+            accs = _load_accounts()
+            a = next((x for x in accs if x["id"] == req.get("id")),
+                     None)
+            if not a:
+                return self._json({"error": "账号不存在"}, 404)
+            px = _load_proxies()
+            p = next((x for x in px
+                      if x["id"] == req.get("proxy_id")), None)
+            if not p:
+                return self._json({"error": "代理不存在"}, 404)
+            if p.get("banned"):
+                return self._json({"error": "该代理已封禁"})
+            old = next((x for x in px
+                        if x["id"] == a.get("proxy_id")), None)
+            rebound = None
+            if old and old["id"] != p["id"]:
+                _unbind_proxy(old, a["email"])
+                rebound = (f"{old['scheme']}://"
+                           f"{old['host']}:{old['port']}")
+            _bind_proxy(p, a["email"])
+            a["proxy_id"] = p["id"]
+            _save_proxies(px)
+            _save_accounts(accs)
+            return self._json(
+                {"ok": True,
+                 "proxy": f"{p['scheme']}://{p['host']}:{p['port']}",
+                 "rebound": rebound,
+                 "load": _bound_count(p)})
         if self.path == "/api/accounts/open":
             req = self._body()
             if OPEN_JOB["running"]:
@@ -5516,6 +5548,36 @@ class H(BaseHTTPRequestHandler):
             a["proxy_id"] = None
             _save_gaccounts(accs)
             return self._json({"ok": True})
+        if self.path == "/api/g/accounts/bind-proxy":
+            req = self._body()
+            accs = _load_gaccounts()
+            a = next((x for x in accs if x["id"] == req.get("id")),
+                     None)
+            if not a:
+                return self._json({"error": "账号不存在"}, 404)
+            px = _load_gproxies()
+            p = next((x for x in px
+                      if x["id"] == req.get("proxy_id")), None)
+            if not p:
+                return self._json({"error": "代理不存在"}, 404)
+            if p.get("banned"):
+                return self._json({"error": "该代理已封禁"})
+            old = next((x for x in px
+                        if x["id"] == a.get("proxy_id")), None)
+            rebound = None
+            if old and old["id"] != p["id"]:
+                _unbind_proxy(old, a["email"], _gcool_secs())
+                rebound = (f"{old['scheme']}://"
+                           f"{old['host']}:{old['port']}")
+            _bind_proxy(p, a["email"], _gcool_secs())
+            a["proxy_id"] = p["id"]
+            _save_gproxies(px)
+            _save_gaccounts(accs)
+            return self._json(
+                {"ok": True,
+                 "proxy": f"{p['scheme']}://{p['host']}:{p['port']}",
+                 "rebound": rebound,
+                 "load": _bound_count(p)})
         if self.path == "/api/g/accounts/open":
             req = self._body()
             if GOPEN_JOB["running"]:

@@ -133,6 +133,17 @@
 </div>
 </div>
 <div class="toast" id="toast"></div>
+<div class="modal-mask" id="bind-modal" style="display:none">
+  <div class="modal-box" style="max-width:600px">
+    <div class="modal-title"><i data-ic="globe"></i>绑定代理</div>
+    <div style="font-size:12px;color:var(--text-dim);margin-bottom:8px" id="bind-sub"></div>
+    <div id="bind-rows" style="max-height:360px;overflow-y:auto"></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
+      <button class="btn btn-outline btn-sm" id="bind-cancel">取消</button>
+      <button class="btn btn-primary btn-sm" id="bind-go">确认绑定</button>
+    </div>
+  </div>
+</div>
 
 <script>
 const $ = id => document.getElementById(id);
@@ -240,6 +251,7 @@ function render() {
          <button class="btn btn-ghost btn-sm btn-danger" data-act="harddel" data-id="${a.id}">真删</button>`
       : `<button class="btn btn-ghost btn-sm" data-act="open" data-id="${a.id}">开窗</button>
         <button class="btn btn-ghost btn-sm" data-act="oauth" data-id="${a.id}" title="单号跑 antigravity OAuth">${ui.icon("key")}</button>
+        <button class="btn btn-ghost btn-sm" data-act="bind" data-id="${a.id}" title="手动选一条代理绑给这个号">${ui.icon("globe")}绑IP</button>
         ${a.proxy_id ? `<button class="btn btn-ghost btn-sm" data-act="unbind" data-id="${a.id}">解绑</button>` : ""}
         <button class="btn btn-ghost btn-sm" data-act="arch" data-id="${a.id}" title="归档: 删窗留记录">归档</button>`;
     const archPill = a.archived
@@ -393,6 +405,7 @@ $("tbody").addEventListener("click", e => {
   const id = b.dataset.id;
   if (b.dataset.act === "open") startOpen([id], b);
   if (b.dataset.act === "oauth") startOauth([id], b);
+  if (b.dataset.act === "bind") openBindModal(id);
   if (b.dataset.act === "unbind")
     post("/api/g/accounts/unbind", { id }).then(() => load());
   if (b.dataset.act === "arch") {
@@ -502,6 +515,62 @@ $("del-sel").onclick = async () => {
   toast(`已归档 ${r.archived} 个` + (r.window_errors && r.window_errors.length
     ? ` · ${r.window_errors.length} 个窗口删除失败` : ""));
   sel.clear(); load();
+};
+
+// ---- 手动绑代理 ----
+let bindId = null;
+async function openBindModal(id) {
+  bindId = id;
+  const a = accounts.find(x => x.id === id);
+  $("bind-sub").textContent =
+    `给 ${a ? a.email : id} 选一条代理 —— 当前: ${(a && a.proxy) || "未绑"}`;
+  $("bind-rows").innerHTML =
+    `<div style="color:var(--text-dim);padding:16px">加载代理列表…</div>`;
+  $("bind-modal").style.display = "flex";
+  const r = await fetch("/api/g/proxies")
+    .then(x => x.json()).catch(() => null);
+  if (!r || !r.proxies) {
+    $("bind-rows").innerHTML =
+      `<div style="color:var(--text-dim);padding:16px">代理列表加载失败</div>`;
+    return;
+  }
+  const px = r.proxies.slice().sort((x, y) =>
+    (!!x.banned - !!y.banned)
+    || ((x.bound || []).length - (y.bound || []).length));
+  $("bind-rows").innerHTML = px.map(p => {
+    const n = (p.bound || []).length;
+    const mine = (p.bound || []).includes(a && a.email);
+    const banned = p.banned;
+    const st = banned
+      ? `<span class="pill pill-bad">封禁</span>`
+      : n >= 3
+        ? `<span class="pill pill-warn" title="超满载可选, 但撞车风险自担">满 ${n}/3</span>`
+        : `<span class="pill pill-ok">${n}/3</span>`;
+    return `<label class="lv-row" style="cursor:pointer${banned ? ";opacity:.45" : ""}">
+      <input type="radio" name="bindp" value="${p.id}"
+        ${p.id === (a && a.proxy_id) ? "checked" : ""}
+        ${banned ? "disabled" : ""}>
+      <span class="mono" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis"
+        title="${esc(p.username ? p.username + "@" : "")}${esc(p.host)}:${p.port}${p.note ? " · " + esc(p.note) : ""}">
+        ${esc(p.scheme)}://${esc(p.host)}:${p.port}
+        ${mine ? `<span class="pill pill-ok">当前</span>` : ""}
+        ${p.alive === false ? `<span class="pill pill-dim" title="测活失败过">掉线史</span>` : ""}
+      </span>${st}</label>`;
+  }).join("") ||
+    `<div style="color:var(--text-dim);padding:16px">代理池为空 —— 先去「代理池」页导入</div>`;
+}
+$("bind-cancel").onclick = () =>
+  $("bind-modal").style.display = "none";
+$("bind-go").onclick = async () => {
+  const cur = document.querySelector("#bind-rows input[name=bindp]:checked");
+  if (!cur) return toast("先选一条代理");
+  const r = await post("/api/g/accounts/bind-proxy",
+    { id: bindId, proxy_id: cur.value });
+  if (r.error) return toast("✗ " + r.error);
+  $("bind-modal").style.display = "none";
+  toast(`✓ 已绑 ${r.proxy}` + (r.rebound ? ` (换下 ${r.rebound})` : "")
+    + (r.load > 3 ? ` · ⚠ 该线已占 ${r.load}/3` : ""));
+  load();
 };
 
 load();
