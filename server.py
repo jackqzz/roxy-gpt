@@ -529,16 +529,60 @@ _ROXY_OS_POOL = [
     ("Windows", "10"),
 ]
 
+# Roxy /browser/create osVersion 枚举 (照官方 API 文档)
+_ANDROID_VERS = ["15", "14", "13", "12", "11", "10", "9"]
+_IOS_VERS = ["18.2", "18.1", "18.0", "17.0", "16.6", "16.5",
+             "16.4", "16.3", "16.2", "16.1", "16.0", "15.7",
+             "15.6", "15.5", "15.4", "15.3", "15.2", "15.1",
+             "15.0", "14.7", "14.6", "14.5", "14.4", "14.3",
+             "14.2", "14.1", "14.0"]
+_ENV_FIXED = {
+    "win11": ("Windows", "11"), "win10": ("Windows", "10"),
+    "win8": ("Windows", "8"),   "win7": ("Windows", "7"),
+    "mac15": ("macOS", "15.3.2"), "mac14": ("macOS", "14.7.1"),
+    "mac13": ("macOS", "13.7.2"), "linux": ("Linux", "ALL"),
+}
 
-def _roxy_env_for(email):
+
+def _roxy_env_for(email, env=None):
+    """建窗指纹环境 (os, osVersion)。
+    env=None/'pc-random': PC 池按邮箱哈希 (默认);
+    'win11'/'mac15'/... : 固定值;
+    'android-*'/'ios-*' : 指定版本 (*=random 时按邮箱确定性取);
+    'mob-random': 手机端两族里确定性取。"""
+    if not env or env == "pc-random":
+        return _ROXY_OS_POOL[zlib.crc32(email.encode())
+                             % len(_ROXY_OS_POOL)]
+    if env in _ENV_FIXED:
+        return _ENV_FIXED[env]
+    h = zlib.crc32((env + ":" + email).encode())
+    if env == "android-random":
+        return ("Android", _ANDROID_VERS[h % len(_ANDROID_VERS)])
+    if env == "ios-random":
+        return ("IOS", _IOS_VERS[h % len(_IOS_VERS)])
+    if env == "mob-random":
+        pool = ([("Android", v) for v in _ANDROID_VERS]
+                + [("IOS", v) for v in _IOS_VERS])
+        return pool[h % len(pool)]
+    if env.startswith("android-"):
+        v = env[8:]
+        if v in _ANDROID_VERS:
+            return ("Android", v)
+    if env.startswith("ios-"):
+        v = env[4:]
+        if v in _IOS_VERS:
+            return ("IOS", v)
     return _ROXY_OS_POOL[zlib.crc32(email.encode())
                          % len(_ROXY_OS_POOL)]
 
 
-def _roxy_open_for(email, proxy, kernel="Chrome", prefix="auto"):
+def _roxy_open_for(email, proxy, kernel="Chrome", prefix="auto",
+                   env=None):
     """找到或创建 <prefix>-<email> 窗口并绑定指定代理, 返回 (dirId, ws, err)。
     kernel 只在新建窗口时生效; 已有窗口沿用自己的内核。
-    prefix: GPT 账号用 auto-, Google 账号用 gauto- (同邮箱也分窗)。"""
+    prefix: GPT 账号用 auto-, Google 账号用 gauto- (同邮箱也分窗)。
+    env: 建窗指纹环境, None 时读 settings.open_env (默认 pc-random);
+    只影响新建窗口, 已存在的窗口指纹不动。"""
     cfg = _roxy_cfg()
     name = f"{prefix}-{email}"
     w, werr = _roxy_find_window(name)
@@ -553,7 +597,9 @@ def _roxy_open_for(email, proxy, kernel="Chrome", prefix="auto"):
                 "workspaceId": cfg["workspace_id"], "dirId": dir_id,
                 "proxyInfo": _roxy_proxyinfo(proxy)})
     else:
-        os_name, os_ver = _roxy_env_for(email)
+        if env is None:
+            env = _settings().get("open_env") or "pc-random"
+        os_name, os_ver = _roxy_env_for(email, env)
         r = _roxy_call("/browser/create", {
             "workspaceId": cfg["workspace_id"], "windowName": name,
             "os": os_name, "osVersion": os_ver,
@@ -3730,7 +3776,8 @@ def _goauth_worker(ids):
                     log("→ %s: Google OAuth 链接已生成 (%d分钟时效)"
                         % (email, _goauth_ttl_s() // 60))
                     dir_id, cws, err = _roxy_open_for(
-                        email, p, prefix="gauto")
+                        email, p, prefix="gauto",
+                        env=_gsettings().get("open_env"))
                     if err or not cws:
                         GOAUTH_JOB["results"][aid] = \
                             "开窗: " + (err or "")
@@ -3908,7 +3955,8 @@ def _gopen_worker(accs):
                 log(f"→ {email}: 绑代理 {p['host']}:{p['port']}"
                     f" (占用 {_bound_count(p)}/{PICK_LIMIT})")
             dir_id, ws, err = _roxy_open_for(
-                email, p, prefix="gauto")
+                email, p, prefix="gauto",
+                env=_gsettings().get("open_env"))
             if err:
                 with db_lock:
                     _unbind_proxy(p, email, _gcool_secs())
@@ -4328,6 +4376,7 @@ class H(BaseHTTPRequestHandler):
                 "proxy_cool_min": s.get("proxy_cool_min") or 20,
                 "oauth_ttl_min": s.get("oauth_ttl_min") or 10,
                 "open_workers": s.get("open_workers") or OPEN_WORKERS,
+                "open_env": s.get("open_env") or "pc-random",
                 "step_watch": s.get("step_watch", True),
                 "step_gen": s.get("step_gen", True),
                 "step_email": s.get("step_email", True),
@@ -4487,6 +4536,7 @@ class H(BaseHTTPRequestHandler):
                 "upstream_proxy": s.get("upstream_proxy") or "",
                 "proxy_cool_min": s.get("proxy_cool_min") or 20,
                 "oauth_ttl_min": s.get("oauth_ttl_min") or 10,
+                "open_env": s.get("open_env") or "pc-random",
                 "cpa_url": s.get("cpa_url") or "",
                 "cpa_key": s.get("cpa_key") or "",
                 "cpa_autopush": s.get("cpa_autopush", True)})
@@ -4742,7 +4792,7 @@ class H(BaseHTTPRequestHandler):
                       "pace_step_min", "pace_step_max",
                       "pace_type_min", "pace_type_max",
                       "pace_load_ms", "proxy_cool_min",
-                      "oauth_ttl_min", "open_workers",
+                      "oauth_ttl_min", "open_workers", "open_env",
                       "step_watch", "step_gen", "step_email",
                       "step_code", "step_password", "step_profile",
                       "cpa_url", "cpa_key", "cpa_autopush"):
@@ -5416,7 +5466,8 @@ class H(BaseHTTPRequestHandler):
                             400)
                 s["upstream_proxy"] = raw
             for k in ("proxy_cool_min", "oauth_ttl_min",
-                      "cpa_url", "cpa_key", "cpa_autopush"):
+                      "cpa_url", "cpa_key", "cpa_autopush",
+                      "open_env"):
                 if k in req:
                     s[k] = req[k]
             _save_gsettings(s)

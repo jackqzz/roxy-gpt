@@ -62,6 +62,7 @@
       <button class="btn btn-primary btn-sm" id="open-sel"><i data-ic="app-window"></i>开窗选中</button>
       <button class="btn btn-outline btn-sm" id="open-all"><i data-ic="layout-grid"></i>全部开窗</button>
       <button class="btn btn-outline btn-sm" id="close-sel" title="关掉选中账号的浏览器进程 —— gauto- 窗口配置留着, 下次开窗原窗秒起 (不是归档, 不删窗)"><i data-ic="x"></i>关窗选中</button>
+      <select class="form-select" id="env-sel" data-persist style="font-size:12px" title="新建窗口的指纹环境 (PC/手机+具体系统版本) —— 已建窗口不受影响"></select>
       <span class="subtitle" style="font-size:12px" title="开窗只定位到 accounts.google.com —— 登录全人工">开窗只到 Google 登录页</span>
       <span style="flex:1"></span>
       <span class="subtitle" id="sel-hint" style="font-size:12px"></span>
@@ -572,6 +573,39 @@ $("bind-go").onclick = async () => {
   toast(`✓ 已绑 ${r.proxy}` + (r.rebound ? ` (换下 ${r.rebound})` : "")
     + (r.load > 3 ? ` · ⚠ 该线已占 ${r.load}/3` : ""));
   load();
+};
+
+// ---- 建窗环境 (gsettings.open_env) ----
+const ENV_GROUPS = [
+  ["PC", [["pc-random","PC · 随机"],["win11","Windows 11"],
+          ["win10","Windows 10"],["win8","Windows 8"],
+          ["win7","Windows 7"],["mac15","macOS 15.3.2"],
+          ["mac14","macOS 14.7.1"],["mac13","macOS 13.7.2"],
+          ["linux","Linux"]]],
+  ["手机", [["mob-random","手机 · 随机"],
+            ["android-random","Android · 随机版本"],
+            ["android-15","Android 15"],["android-14","Android 14"],
+            ["android-13","Android 13"],["android-12","Android 12"],
+            ["android-11","Android 11"],["android-10","Android 10"],
+            ["android-9","Android 9"],
+            ["ios-random","iOS · 随机版本"],
+            ["ios-18.2","iOS 18.2"],["ios-18.1","iOS 18.1"],
+            ["ios-18.0","iOS 18.0"],["ios-17.0","iOS 17.0"],
+            ["ios-16.6","iOS 16.6"],["ios-16.0","iOS 16.0"],
+            ["ios-15.7","iOS 15.7"],["ios-15.0","iOS 15.0"],
+            ["ios-14.7","iOS 14.7"],["ios-14.0","iOS 14.0"]]],
+];
+$("env-sel").innerHTML = ENV_GROUPS.map(([g, os]) =>
+  `<optgroup label="${g}">` + os.map(([v, l]) =>
+    `<option value="${v}">${l}</option>`).join("")
+  + "</optgroup>").join("");
+ui.persistReapply();
+fetch("/api/g/settings").then(r => r.json()).then(s => {
+  if (s.open_env) $("env-sel").value = s.open_env;
+});
+$("env-sel").onchange = e => {
+  post("/api/g/settings", { open_env: e.target.value });
+  toast("建窗环境 → " + e.target.selectedOptions[0].text);
 };
 
 load();
