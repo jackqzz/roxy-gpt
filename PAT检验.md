@@ -111,6 +111,37 @@ const r = await fetch('/backend-api/accounts/' + wsId + '/invites', {
 母号邀请发出后，子号下次拉取 session/accounts 时就在 `accounts` 里
 能看到该 workspace，无需显式 accept。
 
+### 查看订阅接口（实测确认）
+
+```
+GET /backend-api/subscriptions?account_id={ws_id}
+```
+
+- `account_id` 与 `organization_id` 二选一必填；`organization_id` 填 ws id 实测 500。
+- **普通成员 token 即可查**（不需 owner）——子号接受邀请前后都能读。
+- 返回该空间的订阅 entitlement：`subscription_plan`（如 `chatgptteamplan`）、
+  `has_active_subscription`、`expires_at`/`renews_at`、`billing_period`、
+  `billing_currency`、`is_delinquent` 等——判断空间计划是否活着用这一条就够。
+- 用个人 free 号的 `account_id` 查 → `404 No subscription found for account`。
+
+### 空间挂起邀请列表（实测确认）
+
+```
+GET /backend-api/accounts/{ws_id}/invites
+→ 200 {"items":[{"id":"…","email_address":"…","role":"standard-user",
+                 "status":5,"seat_type":"usage_based","created_time":"…"}]}
+```
+
+**路径里必须是空间 id**：填子号 personal `account_id`
+→ `401 "Must use workspace account for this operation"`。
+成员 token（个人 AT）就能读这个队列——可配合
+`POST /backend-api/accounts/{ws}/invites/{invite_id}/accept` 走纯 API 接受。
+
+> ⚠️ 已知缺陷：`_ACCEPT_INVITE_JS` 的 list 步骤用的是 personal `pid`
+> （`accounts/{pid}/invites`），实测该路径 401，即"列邀请"一步实际拿不到——
+> 兜底目前只能靠拿到 invite_id 后直打 accept。改进方向：母号侧读
+> `accounts/{ws}/invites` 队列按 email 取 invite_id 传给子号 accept。
+
 兜底路径（`_ACCEPT_INVITE_JS`，用于邀请没落地的场景）：
 
 ```js
@@ -119,8 +150,8 @@ GET /api/auth/session                        → accessToken
 GET /backend-api/accounts/check/v4-2023-04-27 → accounts[*].account
     取 structure === 'personal' 的 account_id 作为 pid
 
-// 2) 列自己的 pending 邀请
-GET /backend-api/accounts/{pid}/invites      → {invites|items: [{id, workspace_id}]}
+// 2) 列 pending 邀请 —— 注意: 路径必须空间 id, personal pid 会 401
+GET /backend-api/accounts/{ws}/invites       → {items: [{id, email_address, status}]}
 
 // 3) 逐个接受（两种路由都试）
 POST /backend-api/accounts/{pid}/invites/{invite_id}/accept   body: {}
