@@ -2338,6 +2338,435 @@ def _ios_reg_worker(ids):
             + (" (手动停止)" if IOS_JOB["stop"] else ""))
 
 
+# ---------------- 协议 PAT 检测 (不开窗) ----------------
+# 链路: 母号 ws-AT(窗口抓一次) → HTTP 邀请全部邮箱 → 每号 codex
+# 客户端 OTP 登录 → workspace/select 选空间 → ws-scoped AT →
+# wham/auth-credentials 探针 → _pat_verdict 判定落 a.pat。
+# 母号邀请拿不到 AT 时退化 invites/request 申请制 (待批准)。
+PROTO_PAT_JOB = {"running": False, "log": [], "results": {},
+                 "stop": False}
+
+_CODEX_CLIENT = "app_EMoamEEZ73f0CkXaXp7hrann"
+_CODEX_REDIRECT = "http://localhost:1455/auth/callback"
+_CODEX_AUTH_URL = "https://auth.openai.com/api/accounts/authorize"
+_CODEX_NEXT_URL = ("https://auth.openai.com"
+                   "/api/first_party_authorize/next")
+_CODEX_WS_SEL = ("https://auth.openai.com"
+                 "/api/accounts/workspace/select")
+_CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token"
+
+
+class _CodexLogin:
+    """codex 客户端 OTP 登录 (免 devicecheck preauth, chrome 指纹)。"""
+
+    def __init__(self, proxy, log, dc_token=None):
+        from curl_cffi import requests as _cr
+        self.log = log
+        self.s = _cr.Session(proxy=proxy or None,
+                             impersonate="chrome", timeout=40)
+        self.device_id = str(uuid.uuid4()).lower()
+        self.verifier = _b64u(os.urandom(48))
+        self.state = _b64u(os.urandom(32))
+        self.dc_token = dc_token
+        from cryptography.hazmat.primitives.asymmetric import ec
+        self.dk = ec.generate_private_key(ec.SECP256R1())
+
+    def headers(self, extra=None):
+        h = [("content-type", "application/json"),
+             ("accept", "application/json"),
+             ("originator", "codex_cli_rs"),
+             ("x-openai-device-resolution", "desktop"),
+             ("oai-device-id", self.device_id)]
+        if self.dc_token:
+            h.append(("oai-ios-device-check-token",
+                      json.dumps({"token": self.dc_token})))
+        if extra:
+            h += extra
+        return h
+
+    def dpop(self):
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.hazmat.primitives.asymmetric.utils \
+            import decode_dss_signature
+        pub = self.dk.public_key().public_numbers()
+        jwk = {"crv": "P-256", "kty": "EC",
+               "x": _b64u(pub.x.to_bytes(32, "big")),
+               "y": _b64u(pub.y.to_bytes(32, "big"))}
+        si = (_b64u(self._jd({"alg": "ES256", "jwk": jwk,
+                             "typ": "dpop+jwt"}).encode()) + "." +
+              _b64u(self._jd({"htm": "POST",
+                             "htu": _CODEX_TOKEN_URL,
+                             "iat": int(time.time()),
+                             "jti": str(uuid.uuid4()).upper()}
+                            ).encode()))
+        sig = self.dk.sign(si.encode(), ec.ECDSA(hashes.SHA256()))
+        r, s = decode_dss_signature(sig)
+        return si + "." + _b64u(r.to_bytes(32, "big") +
+                               s.to_bytes(32, "big"))
+
+    @staticmethod
+    def _jd(o):
+        return json.dumps(o, separators=(",", ":"))
+
+    def authorize(self, workspace=None):
+        params = [
+            ("client_id", _CODEX_CLIENT),
+            ("response_type", "code"),
+            ("redirect_uri", _CODEX_REDIRECT),
+            ("code_challenge", _b64u(hashlib.sha256(
+                self.verifier.encode()).digest())),
+            ("code_challenge_method", "S256"),
+            ("state", self.state),
+            ("scope", "openid profile email offline_access"),
+            ("audience", "https://api.openai.com/v1"),
+            ("originator", "codex_cli_rs"),
+            ("id_token_add_organizations", "true"),
+            ("codex_cli_simplified_flow", "true"),
+        ]
+        if workspace:
+            params.append(("allowed_workspace_id", workspace))
+        r = self.s.get(_CODEX_AUTH_URL, params=params,
+                       headers=self.headers())
+        d = r.json() if r.text else {}
+        self.log("   authorize %d page=%s"
+                 % (r.status_code,
+                    (d.get("page") or {}).get("type")))
+        if r.status_code == 200 and d.get("continue_url"):
+            return d["continue_url"]           # 已登录会话直接发码
+        if r.status_code == 200 and (d.get("page") or {}).get("type") \
+                in ("login_start", "login_or_signup_start"):
+            return None
+        raise RuntimeError("authorize %d %s"
+                           % (r.status_code, r.text[:120]))
+
+    def next(self, body, tag):
+        r = self.s.post(_CODEX_NEXT_URL, data=self._jd(body),
+                        headers=self.headers([("accept", "*/*")]))
+        d = r.json() if r.text else {}
+        self.log("   next[%s] %d type=%s"
+                 % (tag, r.status_code, d.get("type")))
+        return r.status_code, d
+
+    def ws_select(self, wid):
+        r = self.s.post(_CODEX_WS_SEL,
+                        data=self._jd({"workspace_id": wid}),
+                        headers=self.headers([("accept", "*/*")]))
+        d = r.json() if r.text else {}
+        self.log("   ws_select(%s) %d -> %s"
+                 % (wid[:8], r.status_code, str(d)[:100]))
+        return d
+
+    def exchange(self, redirect_url):
+        import urllib.parse
+        q = urllib.parse.urlparse(redirect_url).query
+        code = urllib.parse.parse_qs(q).get("code", [None])[0]
+        if not code:
+            raise RuntimeError("continue_url 没带 code")
+        body = {"grant_type": "authorization_code",
+                "client_id": _CODEX_CLIENT, "code": code,
+                "redirect_uri": _CODEX_REDIRECT,
+                "code_verifier": self.verifier}
+        r = self.s.post(_CODEX_TOKEN_URL, data=self._jd(body),
+                        headers=self.headers(
+                            [("dpop", self.dpop())]))
+        self.log("   exchange %d" % r.status_code)
+        if r.status_code != 200:
+            raise RuntimeError("token 交换 %d %s"
+                               % (r.status_code, r.text[:150]))
+        return r.json()
+
+
+def _jwt_account_id(at):
+    """解 JWT payload 取 chatgpt_account_id (个人/空间看 claim)。"""
+    try:
+        p = at.split(".")[1]
+        p += "=" * (-len(p) % 4)
+        pay = json.loads(base64.urlsafe_b64decode(p))
+        return (pay.get("https://api.openai.com/auth") or {}) \
+            .get("chatgpt_account_id")
+    except Exception:
+        return None
+
+
+def _mother_ws_at(log):
+    """从母号窗口抓 ws-scoped AT (一次, 任务内复用)。"""
+    from playwright.sync_api import sync_playwright
+    ws_url, err = _mother_open()
+    if err:
+        return None, err
+    try:
+        with sync_playwright() as pw:
+            br = pw.chromium.connect_over_cdp(ws_url)
+            pg = _find_cgpt_page(br)
+            if not pg:
+                return None, "母号页不在 chatgpt.com"
+            tok = pg.evaluate(_WS_TOKEN_JS,
+                              (_settings().get("mother_workspace")
+                               or "").strip())
+            try:
+                br.close()
+            except Exception:
+                pass
+            return tok, None if tok else "窗口没取到 AT"
+    except Exception as e:
+        return None, str(e)[:100]
+
+
+def _http_invite(mother_at, ws, emails, proxy, log):
+    """母号侧纯 HTTP 邀请 (seat_type 探测同窗口版)。"""
+    from curl_cffi import requests as _cr
+    s = _cr.Session(proxy=proxy or None, impersonate="chrome",
+                    timeout=40)
+    h = {"authorization": "Bearer " + mother_at,
+         "chatgpt-account-id": ws,
+         "content-type": "application/json",
+         "accept": "application/json"}
+    seat = "usage_based"
+    try:
+        acc = s.get("https://chatgpt.com/backend-api/accounts"
+                    "/check/v4-2023-04-27", headers=h).json()
+        for v in (acc.get("accounts") or {}).values():
+            ac = v.get("account") or {}
+            if ac.get("account_id") != ws:
+                continue
+            pt = str(ac.get("plan_type") or "")
+            if "usage_based" not in pt \
+                    and not ac.get("is_usage_based_seat_enabled"):
+                seat = "default"
+    except Exception:
+        pass
+    body = {"email_addresses": emails, "flow_id": str(uuid.uuid4()),
+            "role": "standard-user", "resend_emails": True,
+            "submission_id": str(uuid.uuid4()), "seat_type": seat}
+    r = s.post("https://chatgpt.com/backend-api/accounts/%s/invites"
+               % ws, data=json.dumps(body), headers=h)
+    log("   invite %d seat=%s %s"
+        % (r.status_code, seat, r.text[:120]))
+    return r.status_code
+
+
+def _pat_probe_http(at, ws, proxy, log):
+    """纯 HTTP wham 探针 + 判定 + 建成即删。"""
+    from curl_cffi import requests as _cr
+    s = _cr.Session(proxy=proxy or None, impersonate="chrome",
+                    timeout=40)
+    h = {"authorization": "Bearer " + at,
+         "chatgpt-account-id": ws,
+         "content-type": "application/json",
+         "accept": "application/json",
+         "originator": "codex_cli_rs"}
+    r = s.post("https://chatgpt.com/backend-api/wham/"
+               "auth-credentials",
+               data=json.dumps({"name": "pat-probe-%d"
+                                        % int(time.time()),
+                                "ttl": 2592000}), headers=h)
+    raw = r.text[:600]
+    try:
+        j = r.json()
+    except Exception:
+        j = {}
+    d = j.get("detail") or {}
+    code = d.get("code") or (d.get("error") or {}).get("code") \
+        or (j.get("error") or {}).get("code")
+    raw2 = re.sub(r'("(?:token|credential|secret|value)"\s*:\s*")'
+                  r'[^"]{6}', r'\1***', raw, flags=re.I)
+    raw2 = re.sub(r'sk-[A-Za-z0-9_-]{4,}', 'sk-***', raw2)
+    log("   探针 %d %s | %s"
+        % (r.status_code, code or "-",
+           raw2[:200].replace("\n", " ")))
+    verdict = _pat_verdict(r.status_code, code)
+    if verdict == "good_created":
+        cid = j.get("credential_id") \
+            or (j.get("credential") or {}).get("id")
+        if cid:
+            r2 = s.delete("https://chatgpt.com/backend-api/wham/"
+                          "auth-credentials/" + cid, headers=h)
+            log("   清理 PAT %s.. -> %d" % (cid[:8], r2.status_code))
+        verdict = "good"
+    return verdict or "unknown:%d/%s" % (r.status_code, code)
+
+
+def _proto_pat_worker(ids):
+    PROTO_PAT_JOB["running"] = True
+    PROTO_PAT_JOB["stop"] = False
+    PROTO_PAT_JOB["log"] = []
+    PROTO_PAT_JOB["results"] = {}
+
+    def log(m):
+        PROTO_PAT_JOB["log"].append(
+            "%s %s" % (time.strftime("%H:%M:%S"), m))
+
+    try:
+        from curl_cffi import requests as _cr  # noqa: F401
+        import cryptography  # noqa: F401
+    except ImportError:
+        log("✗ 缺依赖: curl_cffi/cryptography")
+        PROTO_PAT_JOB["running"] = False
+        return
+    st = _settings()
+    ws_id = (st.get("mother_workspace") or "").strip()
+    ws_name = st.get("mother_workspace_name") or ""
+    if not ws_id:
+        log("✗ 未配置 PAT 母号空间 (settings.mother_workspace)")
+        PROTO_PAT_JOB["running"] = False
+        return
+    dc = _ios_dc()
+    # 先抓母号 ws-AT (一次抓, 整个任务复用; 失败走申请制)
+    mother_at, merr = _mother_ws_at(log)
+    if mother_at:
+        log("母号 ws-AT 已取 (%s), 纯HTTP邀请" % ws_name or ws_id[:8])
+    else:
+        log("母号窗口不可用 (%s), 子号改走 invites/request 申请"
+            % (merr or "-"))
+    accs0 = {x["id"]: x for x in _load_accounts()}
+    emails = {aid: accs0[aid]["email"] for aid in ids
+              if aid in accs0}
+    # 有母号 AT 就先把所有邮箱一次性邀请进去 (纯HTTP, 不发邀请邮件
+    # 等待 —— pending invite 在子号登录选空间时自动接受)
+    if mother_at:
+        try:
+            up = _upstream()
+            _http_invite(mother_at, ws_id, list(emails.values()),
+                         _proxy_url(up, "url") if up else None,
+                         log)
+        except Exception as e:
+            log("   批量邀请失败: %s (子号逐个再走申请)"
+                % str(e)[:80])
+    try:
+        for aid in ids:
+            if PROTO_PAT_JOB["stop"]:
+                log("⏹ 已手动停止")
+                break
+            a = next((x for x in _load_accounts()
+                      if x["id"] == aid), None)
+            if not a:
+                continue
+            email = a["email"]
+            try:
+                if not a.get("mail_url"):
+                    PROTO_PAT_JOB["results"][aid] = "没有接码链接"
+                    log("✗ %s: 没有接码链接" % email)
+                    continue
+                px = _load_proxies()
+                p = next((x for x in px
+                          if x["id"] == a.get("proxy_id")), None)
+                if not p or p.get("banned"):
+                    p = _pick_proxy(px, email)
+                    if not p:
+                        PROTO_PAT_JOB["results"][aid] = "没有可用代理"
+                        log("✗ %s: 没有可用代理" % email)
+                        continue
+                    _bind_proxy(p, email)
+                    a["proxy_id"] = p["id"]
+                    _save_proxies(px)
+                log("→ %s: codex 登录 (%s)" % (email, p["host"]))
+                relay = _ChainRelay(p, _upstream())
+                try:
+                    lg = _CodexLogin(relay.url(), log, dc)
+                    lg.authorize()
+                    stale, _ = _mail_code_once(
+                        a["mail_url"], _upstream())
+                    lg.next({"data": {"kind": "username",
+                                      "username": {"kind": "email",
+                                                   "value": email}},
+                             "origin_page_type": "login_start"},
+                            "email")
+                    code = _fetch_mail_code(
+                        a["mail_url"], _upstream(), log,
+                        timeout=240, interval=5,
+                        exclude={stale} if stale else (),
+                        should_stop=lambda: PROTO_PAT_JOB["stop"])
+                    if not code or code == "dead":
+                        PROTO_PAT_JOB["results"][aid] = \
+                            "邮箱失效" if code == "dead" else "等码超时"
+                        continue
+                    sc, d = lg.next(
+                        {"data": {"code": code, "intent": "validate",
+                                  "username_kind": "email"},
+                         "origin_page_type":
+                             "email_otp_verification"}, "otp")
+                    if d.get("type") == "add_phone":
+                        PROTO_PAT_JOB["results"][aid] = \
+                            "blocked:add_phone"
+                        log("✗ %s: add_phone 硬门" % email)
+                        continue
+                    if d.get("type") not in ("token_exchange", None) \
+                            and not d.get("continue_url"):
+                        d = lg.ws_select(ws_id)
+                    redir = d.get("continue_url") or \
+                        (d.get("payload") or {}).get(
+                            "login_session", {}).get("redirect_url")
+                    if not redir:
+                        raise RuntimeError(
+                            "otp 后无跳转: " + str(d)[:150])
+                    tok = lg.exchange(redir)
+                    at = tok["access_token"]
+                    scope = _jwt_account_id(at)
+                    # 个人态 → 选空间 (pending invite 自动接受)
+                    if scope != ws_id:
+                        if mother_at:
+                            pass      # 任务级已邀请
+                        else:
+                            # 无母号 → 子号主动申请加入
+                            h = {"authorization": "Bearer " + at,
+                                 "chatgpt-account-id": scope or "",
+                                 "content-type":
+                                     "application/json"}
+                            r = lg.s.post(
+                                "https://chatgpt.com/backend-api/"
+                                "accounts/%s/invites/request" % ws_id,
+                                data="{}", headers=h)
+                            log("   invites/request %d %s"
+                                % (r.status_code, r.text[:100]))
+                            PROTO_PAT_JOB["results"][aid] = \
+                                "已申请待批准"
+                            continue
+                        sel = lg.ws_select(ws_id)
+                        redir = sel.get("continue_url") or \
+                            (sel.get("payload") or {}).get(
+                                "login_session", {}).get(
+                                "redirect_url")
+                        if not redir:
+                            # 再试带 allowed_workspace_id 重授权
+                            redir = lg.authorize(ws_id)
+                        if not redir:
+                            raise RuntimeError("选空间失败")
+                        tok = lg.exchange(redir)
+                        at = tok["access_token"]
+                        scope = _jwt_account_id(at)
+                    verdict = _pat_probe_http(at, ws_id,
+                                              relay.url(), log)
+                    a["pat"] = verdict
+                    a["pat_at"] = _now()
+                    a["ws_id"] = ws_id
+                    _ws_list_add(a, ws_id, ws_name,
+                                 "standard-user")
+                    if verdict != "窗口未登录" and not a.get("reg"):
+                        a["reg"] = "yes"
+                        a["reg_at"] = a.get("reg_at") or _now()
+                    PROTO_PAT_JOB["results"][aid] = verdict
+                    tag = {"good": "✓ 良好", "low": "✗ 低级"} \
+                        .get(verdict, "? " + verdict)
+                    log("%s %s" % (tag, email))
+                finally:
+                    relay.close()
+            except Exception as e:
+                PROTO_PAT_JOB["results"][aid] = str(e)[:120]
+                log("✗ %s: %s" % (email, str(e)[:120]))
+            finally:
+                accs_all = _load_accounts()
+                for x in accs_all:
+                    if x["id"] == aid:
+                        x.clear(); x.update(a)
+                        break
+                _save_accounts(accs_all)
+    finally:
+        PROTO_PAT_JOB["running"] = False
+        log("—— 协议PAT 结束 ——"
+            + (" (手动停止)" if PROTO_PAT_JOB["stop"] else ""))
+
+
 def _gen_password(n=14):
     """随机密码: 大小写+数字+符号, 各类至少一个, 洗牌防规律性"""
     import random as _r
@@ -4896,6 +5325,11 @@ class H(BaseHTTPRequestHandler):
             return self._json({"running": IOS_JOB["running"],
                                "log": IOS_JOB["log"][-80:],
                                "results": IOS_JOB["results"]})
+        if self.path == "/api/accounts/proto-pat/status":
+            return self._json(
+                {"running": PROTO_PAT_JOB["running"],
+                 "log": PROTO_PAT_JOB["log"][-80:],
+                 "results": PROTO_PAT_JOB["results"]})
         if self.path == "/api/mail-codes":
             # 接码监听列表 (清掉 30min 前的死条目)
             now = time.time()
@@ -5572,6 +6006,21 @@ class H(BaseHTTPRequestHandler):
                 return self._json({"error": "单次最多 50 个"}, 400)
             threading.Thread(target=_ios_reg_worker, args=(ids,),
                              daemon=True).start()
+            return self._json({"ok": True, "count": len(ids)})
+        if self.path == "/api/accounts/proto-pat/stop":
+            PROTO_PAT_JOB["stop"] = True
+            return self._json({"ok": True})
+        if self.path == "/api/accounts/proto-pat":
+            req = self._body()
+            if PROTO_PAT_JOB["running"]:
+                return self._json({"error": "协议PAT 在跑"}, 409)
+            ids = [i for i in (req.get("ids") or [])]
+            if not ids:
+                return self._json({"error": "没选账号"})
+            if len(ids) > 50:
+                return self._json({"error": "单次最多 50 个"}, 400)
+            threading.Thread(target=_proto_pat_worker,
+                             args=(ids,), daemon=True).start()
             return self._json({"ok": True, "count": len(ids)})
         if self.path == "/api/mothers/add":
             req = self._body()

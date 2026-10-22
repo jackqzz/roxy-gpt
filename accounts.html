@@ -95,6 +95,7 @@
     </div>
     <div class="toolbar-row">
       <button class="btn btn-outline btn-sm" id="pat-sel"><i data-ic="shield-check"></i>PAT检验</button>
+      <button class="btn btn-outline btn-sm" id="ppat-sel" title="协议PAT: 纯接口检测, 不开子号窗 —— codex登录→选空间→wham探针 (母号AT能抓到就连邀请都免窗)"><i data-ic="zap"></i>协议PAT</button>
       <span class="tb-sep"></span>
       <select class="form-select" id="join-mother" data-persist style="font-size:12px;max-width:150px" title="邀请子号进谁的空间 (空间母号页导入)"></select>
       <select class="form-select" id="join-seat" data-persist style="font-size:12px" title="席位类型: 标准 default / 高级 prolite (codex用量计费空间固定usage_based)">
@@ -390,6 +391,7 @@ const TABS = {
   leave:{ icon: "log-out",      name: "退出",  api: "/api/accounts/leave/status", stop: "/api/accounts/leave/stop" },
   cpa:  { icon: "key",          name: "OAuth", api: "/api/accounts/cpa/status",   stop: "/api/accounts/cpa/stop" },
   ios:  { icon: "smartphone",   name: "iOS注册", api: "/api/accounts/ios-reg/status", stop: "/api/accounts/ios-reg/stop" },
+  ppat: { icon: "zap",          name: "协议PAT", api: "/api/accounts/proto-pat/status", stop: "/api/accounts/proto-pat/stop" },
 };
 const tabData = {};
 let curTab = "open", jobPollT = null;
@@ -687,6 +689,18 @@ $("ios-reg").onclick = e => {
     if (r.error) return toast("✗ " + r.error);
     toast(`iOS 注册启动: ${r.count} 个账号`);
     jobTab("ios");
+  });
+};
+
+$("ppat-sel").onclick = e => {
+  if (!sel.size) return toast("先勾选账号");
+  const ids = [...sel];
+  e.target.disabled = true;
+  post("/api/accounts/proto-pat", { ids }).then(r => {
+    e.target.disabled = false;
+    if (r.error) return toast("✗ " + r.error);
+    toast(`协议PAT 启动: ${r.count} 个账号`);
+    jobTab("ppat");
   });
 };
 
