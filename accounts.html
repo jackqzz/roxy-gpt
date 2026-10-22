@@ -85,6 +85,7 @@
       <button class="btn btn-primary btn-sm" id="open-sel"><i data-ic="app-window"></i>开窗选中</button>
       <button class="btn btn-outline btn-sm" id="open-all"><i data-ic="layout-grid"></i>全部开窗</button>
       <button class="btn btn-outline btn-sm" id="close-sel" title="关掉选中账号的浏览器进程 —— 窗口配置留着, 下次开窗原窗秒起 (不是归档, 不删窗)"><i data-ic="x"></i>关窗选中</button>
+      <button class="btn btn-outline btn-sm" id="ios-reg" title="iOS 协议注册: 纯接口重放 iOS App 注册流 (邮箱→OTP→资料→token), 不开窗 · 需要接码链接 + 可用代理"><i data-ic="smartphone"></i>iOS注册</button>
       <select class="form-select" id="env-sel" data-persist style="font-size:12px" title="新建窗口的指纹环境 (PC/手机+具体系统版本) —— 已建窗口不受影响, 重建归档窗也按这个"></select>
       <span class="subtitle" style="font-size:12px" title="到设置页勾选自动化步骤: 接码监听/资料生成/邮箱/填码/密码/资料">步骤在设置页配</span>
       <span style="flex:1"></span>
@@ -296,7 +297,7 @@ function render() {
     const reg = a.email_dead
       ? `<span class="pill pill-bad" title="接码接口返回 602 邮箱不可用">${ui.icon("mail")}邮箱失效</span>`
       : a.reg === "new"
-        ? `<span class="pill" style="background:#f5f3ff;color:#6d28d9;border:1px solid #ddd6fe" title="本次流程新注册 ${esc(a.reg_at||"")}">新注册</span>`
+        ? `<span class="pill" style="background:#f5f3ff;color:#6d28d9;border:1px solid #ddd6fe" title="${a.reg_how === "ios" ? "iOS 协议注册 (纯接口)" : "本次流程新注册"} ${esc(a.reg_at||"")}">${a.reg_how === "ios" ? "iOS新" : "新注册"}</span>`
         : a.reg === "yes"
           ? `<span class="pill pill-ok" title="已注册老号, 登录验证通过 ${esc(a.reg_at||"")}">已注册</span>`
           : `<span class="pill pill-dim">未注册</span>`;
@@ -388,6 +389,7 @@ const TABS = {
   join: { icon: "user-plus",    name: "空间",  api: "/api/accounts/join/status",  stop: "/api/accounts/join/stop" },
   leave:{ icon: "log-out",      name: "退出",  api: "/api/accounts/leave/status", stop: "/api/accounts/leave/stop" },
   cpa:  { icon: "key",          name: "OAuth", api: "/api/accounts/cpa/status",   stop: "/api/accounts/cpa/stop" },
+  ios:  { icon: "smartphone",   name: "iOS注册", api: "/api/accounts/ios-reg/status", stop: "/api/accounts/ios-reg/stop" },
 };
 const tabData = {};
 let curTab = "open", jobPollT = null;
@@ -673,6 +675,18 @@ $("pat-sel").onclick = e => {
     if (r.error) return toast("✗ " + r.error);
     toast(`PAT 检验启动: ${r.count} 个账号`);
     jobTab("pat");
+  });
+};
+
+$("ios-reg").onclick = e => {
+  if (!sel.size) return toast("先勾选账号");
+  const ids = [...sel];
+  e.target.disabled = true;
+  post("/api/accounts/ios-reg", { ids }).then(r => {
+    e.target.disabled = false;
+    if (r.error) return toast("✗ " + r.error);
+    toast(`iOS 注册启动: ${r.count} 个账号`);
+    jobTab("ios");
   });
 };
 

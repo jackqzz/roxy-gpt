@@ -1884,6 +1884,334 @@ def _find_cgpt_page(br):
     return None
 
 
+# ---------------- iOS 协议注册 ----------------
+# 纯 HTTP 重放 ChatGPT iOS App 注册流 (不开窗):
+#   warmup -> authorize -> 提交邮箱 -> 邮箱OTP -> 提交资料 ->
+#   /oauth/token (DPoP)。需要:
+#     ios/dc-token.txt          —— 重放的 DCDevice token, 管 OTP 发送
+#                                  (缺它 OTP 邮件被静默压制)
+#     ios/dc-token-backend.txt  —— /backend-api/devicecheck 用 (可选)
+#   账号需 mail_url (接码) + 可用代理; 走账号代理出口。
+#   产物存 a.ios = {at, rt, id_token, device_id, ...}, reg="new" how="ios"。
+IOS_JOB = {"running": False, "log": [], "results": {},
+           "stop": False}
+
+_IOS_DIR = os.path.join(BASE_DIR, "ios")
+_IOS_CLIENT_ID = "app_WXrF1LSkiTtfYqiL6XtjygvX"
+_IOS_REDIRECT = ("com.openai.chat://auth0.openai.com"
+                 "/ios/com.openai.chat/callback")
+_IOS_TOKEN_URL = "https://auth.openai.com/oauth/token"
+_IOS_NEXT_URL = ("https://auth.openai.com"
+                 "/api/first_party_authorize/next")
+_IOS_AUTH_URL = "https://auth.openai.com/api/accounts/authorize"
+_IOS_SCOPE = ("openid email profile offline_access model.request "
+              "model.read organization.read organization.write")
+_IOS_PREAUTH_ERR = (
+    "APIClient.DeviceCheckError,2: Failed with error 400, "
+    "message: Missing or badly formatted authorization token")
+_IOS_UA = ("ChatGPT/1.2026.279 (iOS 27.0; iPhone18,3; "
+           "build 37999862476)")
+
+
+def _ios_dc(which="dc-token.txt"):
+    try:
+        v = open(os.path.join(_IOS_DIR, which)).read().strip()
+        return v or None
+    except Exception:
+        return None
+
+
+class _IosRegistrar:
+    """curl_cffi 会话重放 iOS 注册五步流 (DPoP 签名 token 交换)。"""
+
+    def __init__(self, proxy, log, dc_token=None):
+        from curl_cffi import requests as _cr
+        self.log = log
+        self.s = _cr.Session(proxy=proxy or None,
+                             impersonate="safari18_0_ios",
+                             timeout=40)
+        self.dc_token = dc_token
+        self.device_id = str(uuid.uuid4()).upper()
+        self.app_sid = str(uuid.uuid4())
+        self.session_log_id = str(uuid.uuid4()).upper()
+        self.trace = "%s-%s-0" % (uuid.uuid4().hex,
+                                  uuid.uuid4().hex[:16])
+        b64 = lambda b: base64.urlsafe_b64encode(
+            b).decode().rstrip("=")
+        self._b64 = b64
+        self.code_verifier = b64(os.urandom(48))
+        self.state = b64(os.urandom(32))
+        from cryptography.hazmat.primitives.asymmetric import ec
+        self.dpop_key = ec.generate_private_key(ec.SECP256R1())
+
+    def _jd(self, obj):
+        return json.dumps(obj, separators=(",", ":"))
+
+    def headers(self, extra=None):
+        h = [("content-type", "application/json"),
+             ("accept", "application/json"),
+             ("baggage",
+              "sentry-environment=production-ios,sentry-org_id=33249,"
+              "sentry-public_key=aaedc2eb8e6ef123191aa364274c85db,"
+              "sentry-trace-id=%s,sentry-sample_rate=0.1"
+              % uuid.uuid4().hex),
+             ("oai-package-name", "com.openai.chat")]
+        if self.dc_token:
+            h.append(("oai-ios-device-check-token",
+                      self._jd({"token": self.dc_token})))
+        h += [("priority", "u=3"),
+              ("oai-device-id", self.device_id),
+              ("accept-language", "zh-Hans-CN,zh;q=0.9"),
+              ("sentry-trace", self.trace),
+              ("oai-app-sid", self.app_sid),
+              ("x-request-client-start", "%.3f" % time.time()),
+              ("user-agent", _IOS_UA),
+              ("oai-client-type", "ios")]
+        if extra:
+            h += extra
+        return h
+
+    def dpop(self):
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.hazmat.primitives.asymmetric.utils \
+            import decode_dss_signature
+        b64 = self._b64
+        pub = self.dpop_key.public_key().public_numbers()
+        jwk = {"crv": "P-256", "kty": "EC",
+               "x": b64(pub.x.to_bytes(32, "big")),
+               "y": b64(pub.y.to_bytes(32, "big"))}
+        signing = (b64(self._jd(
+            {"alg": "ES256", "jwk": jwk, "typ": "dpop+jwt"}
+        ).encode()) + "." + b64(self._jd(
+            {"htm": "POST", "htu": _IOS_TOKEN_URL,
+             "iat": int(time.time()),
+             "jti": str(uuid.uuid4()).upper()}).encode()))
+        sig = self.dpop_key.sign(signing.encode(),
+                                 ec.ECDSA(hashes.SHA256()))
+        r, s = decode_dss_signature(sig)
+        return (signing + "." +
+                b64(r.to_bytes(32, "big") + s.to_bytes(32, "big")))
+
+    def warmup(self):
+        r = self.s.get(
+            "https://ios.chat.openai.com"
+            "/public-api/mobile/server_status/v1",
+            headers=self.headers())
+        self.log("  warmup %d" % r.status_code)
+
+    def authorize(self):
+        params = [
+            ("client_id", _IOS_CLIENT_ID),
+            ("hydra_flow", "condense"),
+            ("issuer", "https://auth.openai.com"),
+            ("auth_api_migration_enabled", "true"),
+            ("scope", _IOS_SCOPE),
+            ("preauth_cookie_failed", _IOS_PREAUTH_ERR),
+            ("ccaps", "default_otp login_methods"),
+            ("auth_session_logging_id", self.session_log_id),
+            ("audience", "https://api.openai.com/v1"),
+            ("code_challenge", self._b64(
+                hashlib.sha256(
+                    self.code_verifier.encode()).digest())),
+            ("ios_app_display_version", "unknown"),
+            ("redirect_uri", _IOS_REDIRECT),
+            ("nonce", self._b64(os.urandom(32))),
+            ("state", self.state),
+            ("requester_metadata_app_version", "1.2026.279"),
+            ("screen_hint", "login_or_signup"),
+            ("ios_device_id", self.device_id),
+            ("response_type", "code"),
+            ("code_challenge_method", "S256"),
+            ("ios_app_version", "37999862476"),
+        ]
+        for att in range(1, 4):
+            r = self.s.get(_IOS_AUTH_URL, params=params,
+                           headers=self.headers())
+            cf = r.headers.get("cf-mitigated", "-")
+            self.log("  authorize #%d: %d cf=%s"
+                     % (att, r.status_code, cf))
+            if r.status_code == 200:
+                page = (r.json().get("page") or {}).get("type")
+                if page != "login_or_signup_start":
+                    raise RuntimeError(
+                        "authorize 页异常: %s" % page)
+                return
+            time.sleep(2)
+        raise RuntimeError("authorize 一直拿不到 200")
+
+    def next_step(self, body, expect, tag):
+        r = self.s.post(_IOS_NEXT_URL, data=self._jd(body),
+                        headers=self.headers([("accept", "*/*")]))
+        try:
+            data = r.json()
+        except Exception:
+            data = {}
+        self.log("  %s: %d type=%s"
+                 % (tag, r.status_code, data.get("type")))
+        if r.status_code != 200 or data.get("type") != expect:
+            raise RuntimeError("%s 失败: %d %s"
+                               % (tag, r.status_code,
+                                  r.text[:200]))
+        return data
+
+    def exchange(self, code):
+        body = {"client_id": _IOS_CLIENT_ID,
+                "auth_session_logging_id": self.session_log_id,
+                "redirect_uri": _IOS_REDIRECT,
+                "code_verifier": self.code_verifier,
+                "grant_type": "authorization_code",
+                "code": code}
+        r = self.s.post(_IOS_TOKEN_URL, data=self._jd(body),
+                        headers=self.headers(
+                            [("accept", "*/*"),
+                             ("dpop", self.dpop()),
+                             ("oai-uit", "True")]))
+        self.log("  token 交换 %d" % r.status_code)
+        if r.status_code != 200:
+            raise RuntimeError("token 交换失败: %d %s"
+                               % (r.status_code, r.text[:200]))
+        return r.json()
+
+
+def _ios_birthday(age):
+    """按年龄生成生日 YYYY-MM-DD (年月随机取)。"""
+    import random as _r
+    now = time.localtime()
+    y = now.tm_year - age
+    m, d = _r.randint(1, 12), _r.randint(1, 28)
+    return "%04d-%02d-%02d" % (y, m, d)
+
+
+def _ios_reg_worker(ids):
+    IOS_JOB["running"] = True
+    IOS_JOB["stop"] = False
+    IOS_JOB["log"] = []
+    IOS_JOB["results"] = {}
+
+    def log(m):
+        IOS_JOB["log"].append(
+            "%s %s" % (time.strftime("%H:%M:%S"), m))
+
+    try:
+        from curl_cffi import requests as _cr  # noqa: F401
+        import cryptography  # noqa: F401
+    except ImportError:
+        log("✗ 缺依赖: .venv/bin/pip install curl_cffi cryptography")
+        IOS_JOB["running"] = False
+        return
+    dc = _ios_dc()
+    if not dc:
+        log("✗ ios/dc-token.txt 缺失 —— 没有它 OTP 邮件会被静默压制, "
+            "先放一个再跑")
+        IOS_JOB["running"] = False
+        return
+    log("iOS 协议注册: %d 个账号 (纯接口, 不开窗)" % len(ids))
+    try:
+        for aid in ids:
+            if IOS_JOB["stop"]:
+                log("⏹ 已手动停止")
+                break
+            a = next((x for x in _load_accounts()
+                      if x["id"] == aid), None)
+            if not a:
+                continue
+            email = a["email"]
+            try:
+                if not a.get("mail_url"):
+                    IOS_JOB["results"][aid] = "没有接码链接"
+                    log("✗ %s: 没有接码链接" % email)
+                    continue
+                px = _load_proxies()
+                p = next((x for x in px
+                          if x["id"] == a.get("proxy_id")), None)
+                if not p or p.get("banned"):
+                    p = _pick_proxy(px, email)
+                    if not p:
+                        IOS_JOB["results"][aid] = "没有可用代理"
+                        log("✗ %s: 没有可用代理" % email)
+                        continue
+                    _bind_proxy(p, email)
+                    a["proxy_id"] = p["id"]
+                    _save_proxies(px)
+                proxy = _proxy_url(p, "url")
+                prof = _gen_profile(email, log)
+                name = (prof[0] if prof else None) or "John"
+                age = prof[1] if prof else 28
+                birthday = _ios_birthday(age)
+                log("→ %s: %s 代理开跑 (%s, %s)"
+                    % (email, p.get("host"), name, birthday))
+                reg = _IosRegistrar(proxy, log, dc)
+                reg.warmup()
+                reg.authorize()
+                reg.next_step(
+                    {"data": {"kind": "username",
+                              "username": {"kind": "email",
+                                           "value": email}},
+                     "origin_page_type": "login_or_signup_start"},
+                    "email_otp_verification", "email")
+                log("  %s: 等 OTP (接码轮询)…" % email)
+                code = _fetch_mail_code(
+                    a["mail_url"], _upstream(), log,
+                    timeout=240, interval=5,
+                    should_stop=lambda: IOS_JOB["stop"])
+                if code == "dead":
+                    a["email_dead"] = True
+                    IOS_JOB["results"][aid] = "邮箱失效(602)"
+                    log("✗ %s: 邮箱不可用 (602)" % email)
+                    continue
+                if not code:
+                    IOS_JOB["results"][aid] = "等码超时"
+                    log("✗ %s: 等码超时" % email)
+                    continue
+                reg.next_step(
+                    {"data": {"code": code, "intent": "validate",
+                              "username_kind": "email"},
+                     "origin_page_type": "email_otp_verification"},
+                    "about_you", "otp")
+                final = reg.next_step(
+                    {"data": {"name": name, "birthday": birthday,
+                              "is_explicit_consent_required":
+                                  False},
+                     "origin_page_type": "about_you"},
+                    "token_exchange", "profile")
+                grant = (final.get("payload") or {}).get("code")
+                if not grant:
+                    raise RuntimeError(
+                        "token_exchange 没带授权码: %s"
+                        % str(final)[:150])
+                tokens = reg.exchange(grant)
+                a["reg"] = "new"
+                a["reg_how"] = "ios"
+                a["reg_at"] = _now()
+                a["ios"] = {
+                    "at": tokens.get("access_token"),
+                    "rt": tokens.get("refresh_token"),
+                    "id_token": tokens.get("id_token"),
+                    "expires_in": tokens.get("expires_in"),
+                    "earliest_refresh_at":
+                        tokens.get("earliest_refresh_at"),
+                    "device_id": reg.device_id,
+                    "at": _now()}
+                IOS_JOB["results"][aid] = "✓ iOS 注册完成"
+                log("✓ %s: iOS 注册完成, token 已存 a.ios"
+                    % email)
+            except Exception as e:
+                IOS_JOB["results"][aid] = str(e)[:120]
+                log("✗ %s: %s" % (email, str(e)[:120]))
+            finally:
+                accs_all = _load_accounts()
+                for x in accs_all:
+                    if x["id"] == aid:
+                        x.clear(); x.update(a)
+                        break
+                _save_accounts(accs_all)
+    finally:
+        IOS_JOB["running"] = False
+        log("—— iOS 注册结束 ——"
+            + (" (手动停止)" if IOS_JOB["stop"] else ""))
+
+
 def _gen_password(n=14):
     """随机密码: 大小写+数字+符号, 各类至少一个, 洗牌防规律性"""
     import random as _r
@@ -4438,6 +4766,10 @@ class H(BaseHTTPRequestHandler):
             return self._json({"running": PAT_JOB["running"],
                                "log": PAT_JOB["log"][-80:],
                                "results": PAT_JOB["results"]})
+        if self.path == "/api/accounts/ios-reg/status":
+            return self._json({"running": IOS_JOB["running"],
+                               "log": IOS_JOB["log"][-80:],
+                               "results": IOS_JOB["results"]})
         if self.path == "/api/mail-codes":
             # 接码监听列表 (清掉 30min 前的死条目)
             now = time.time()
@@ -5098,6 +5430,21 @@ class H(BaseHTTPRequestHandler):
             if len(ids) > 50:
                 return self._json({"error": "单次最多 50 个"}, 400)
             threading.Thread(target=_pat_worker, args=(ids,),
+                             daemon=True).start()
+            return self._json({"ok": True, "count": len(ids)})
+        if self.path == "/api/accounts/ios-reg/stop":
+            IOS_JOB["stop"] = True
+            return self._json({"ok": True})
+        if self.path == "/api/accounts/ios-reg":
+            req = self._body()
+            if IOS_JOB["running"]:
+                return self._json({"error": "iOS 注册在跑"}, 409)
+            ids = [i for i in (req.get("ids") or [])]
+            if not ids:
+                return self._json({"error": "没选账号"})
+            if len(ids) > 50:
+                return self._json({"error": "单次最多 50 个"}, 400)
+            threading.Thread(target=_ios_reg_worker, args=(ids,),
                              daemon=True).start()
             return self._json({"ok": True, "count": len(ids)})
         if self.path == "/api/mothers/add":
