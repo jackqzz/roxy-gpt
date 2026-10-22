@@ -44,7 +44,8 @@
         <tr>
           <th style="width:36px"><input type="checkbox" id="ck-all"></th>
           <th>Roxy 窗口名</th>
-          <th style="width:300px">目标空间</th>
+          <th style="width:280px">目标空间</th>
+          <th style="width:90px">拉入</th>
           <th style="width:220px">账单</th>
           <th style="width:110px">导入时间</th>
           <th style="width:260px;text-align:right">操作</th>
@@ -89,27 +90,46 @@ async function load() {
   render();
 }
 
+function leftParts(ts) {
+  // ts: 到期时间戳(秒) → [文本, pill类]
+  const m = Math.floor((ts - Date.now() / 1000) / 60);
+  if (m <= 0) return ["已到期", "pill-bad"];
+  if (m < 60) return [`剩${m}分`, "pill-bad"];
+  if (m < 1440) return [`剩${Math.floor(m / 60)}时${m % 60}分`, "pill-bad"];
+  if (m <= 4320) return [`剩${Math.floor(m / 1440)}天`, "pill-bad"];
+  if (m <= 10080) return [`剩${Math.floor(m / 1440)}天`, "pill-warn"];
+  return [`剩${Math.floor(m / 1440)}天`, "pill-ok"];
+}
+function renewalTs(b) {
+  if (b.renewal_ts) return b.renewal_ts;
+  // 老记录没有 renewal_ts: "YYYY-MM-DD HH:mm" 是北京时间
+  const t = Date.parse(String(b.renewal || "").replace(" ", "T") + "+08:00");
+  return isNaN(t) ? null : Math.floor(t / 1000);
+}
+
 function billCell(b) {
   if (!b) return `<span class="pill pill-dim">未查</span>`;
   const bits = [];
   if (b.renewal) {
-    // 剩余倒计时: <1天精确到分钟 (left_min), 老的记录回退 days
-    const m = b.left_min != null ? b.left_min : (b.days != null ? b.days * 1440 : null);
-    let leftTxt = "", cls = "pill-ok";
-    if (m != null) {
-      if (m <= 0) { leftTxt = "已到期"; cls = "pill-bad"; }
-      else if (m < 60) { leftTxt = `剩${m}分`; cls = "pill-bad"; }
-      else if (m < 1440) { leftTxt = `剩${Math.floor(m / 60)}时${m % 60}分`; cls = "pill-bad"; }
-      else if (m <= 4320) { leftTxt = `剩${Math.floor(m / 1440)}天`; cls = "pill-bad"; }
-      else if (m <= 10080) { leftTxt = `剩${Math.floor(m / 1440)}天`; cls = "pill-warn"; }
-      else leftTxt = `剩${Math.floor(m / 1440)}天`;
+    const ts = renewalTs(b);
+    if (ts) {
+      const [txt, cls] = leftParts(ts);
+      bits.push(`<span class="pill ${cls} left-tick" data-ts="${ts}" title="续费/到期 ${esc(b.renewal)} · 倒计时实时走">${esc(b.renewal.slice(5, 16))} <b class="lt">${txt}</b></span>`);
+    } else {
+      bits.push(`<span class="pill pill-dim" title="续费/到期 ${esc(b.renewal)}">${esc(b.renewal.slice(5, 16))}</span>`);
     }
-    bits.push(`<span class="pill ${cls}" title="续费/到期 ${esc(b.renewal)}${leftTxt ? " · " + leftTxt : ""}">${esc(b.renewal.slice(5, 16))} ${leftTxt}</span>`);
   }
   if (b.price) bits.push(`<span class="pill pill-dim" title="现在新增 1 席的即时费用 (按剩余天数折算)">${esc(b.price)}/席</span>`);
   if (b.seats != null) bits.push(`<span class="pill pill-dim" title="当前席位数">${b.seats}席</span>`);
   return bits.join(" ")
     + `<div class="subtitle" style="font-size:11px;margin-top:3px">查于 ${esc((b.at || "").slice(5, 16))}${b.ws_name ? " · " + esc(b.ws_name) : ""}</div>`;
+}
+
+function joinCell(m) {
+  const n = m.join_count || 0, r = m.join_runs || 0;
+  if (!n && !r) return `<span class="pill pill-dim">—</span>`;
+  const last = (m.join_at || "").slice(5, 16);
+  return `<span class="pill pill-ok" title="加入空间执行 ${r} 次 · 累计拉入 ${n} 个${last ? " · 最近 " + esc(last) : ""}">${n}个/${r}次</span>`;
 }
 
 function render() {
@@ -121,6 +141,7 @@ function render() {
       <td><input type="checkbox" class="ck" data-name="${esc(m.name)}" ${sel.has(m.name) ? "checked" : ""}></td>
       <td class="mono">${esc(m.name)}</td>
       <td>${ws}<span class="ws-slot" data-name="${esc(m.name)}"></span></td>
+      <td>${joinCell(m)}</td>
       <td>${billCell(m.bill)}</td>
       <td class="mono" style="color:var(--text-dim)">${esc((m.added_at || "").slice(0, 10))}</td>
       <td style="text-align:right;white-space:nowrap">
@@ -129,7 +150,7 @@ function render() {
         <button class="btn btn-ghost btn-sm btn-danger" data-act="del" data-name="${esc(m.name)}">删</button>
       </td>
     </tr>`;
-  }).join("") || `<tr><td colspan="6" style="text-align:center;color:var(--text-dim);padding:32px">暂无母号 —— 上方导入 Roxy 窗口名</td></tr>`;
+  }).join("") || `<tr><td colspan="7" style="text-align:center;color:var(--text-dim);padding:32px">暂无母号 —— 上方导入 Roxy 窗口名</td></tr>`;
 }
 
 async function doBilling(names, btn) {
@@ -223,6 +244,15 @@ $("del-sel").onclick = async () => {
   sel.clear();
   await load();
 };
+
+// 账单倒计时每 30s 实时重算 (renewal_ts 是绝对到期点)
+setInterval(() => {
+  document.querySelectorAll(".left-tick").forEach(el => {
+    const [txt, cls] = leftParts(+el.dataset.ts);
+    el.querySelector(".lt").textContent = txt;
+    el.className = "pill left-tick " + cls;
+  });
+}, 30000);
 
 load();
 </script>

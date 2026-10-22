@@ -2046,6 +2046,7 @@ def _mother_billing(name, ws_id=""):
                     return None, r["error"]
                 days = None
                 left_min = None
+                renewal_ts = None
                 renewal = r.get("renewal") or ""
                 if renewal:
                     try:
@@ -2057,6 +2058,7 @@ def _mother_billing(name, ws_id=""):
                         delta = dt - now
                         left_min = int(delta.total_seconds() // 60)
                         days = delta.days
+                        renewal_ts = int(dt.timestamp())
                         bj = dt.astimezone(BJ_TZ) if dt.tzinfo else dt
                         renewal = bj.strftime("%Y-%m-%d %H:%M")
                     except Exception:
@@ -2067,6 +2069,7 @@ def _mother_billing(name, ws_id=""):
                         "currency": r.get("currency") or "",
                         "renewal": renewal, "days": days,
                         "left_min": left_min,
+                        "renewal_ts": renewal_ts,
                         "ws_id": ws_id, "ws_name": ws_name,
                         "at": _now()}, None
             finally:
@@ -2513,6 +2516,7 @@ def _join_worker(ids, mname, seat="prolite"):
             log("→ 批量邀请完成: 新发 %d 个, 已是成员 %d 个"
                 % (len(emails) - len(already & set(emails.values())),
                    len(already & set(emails.values()))))
+            joined = 0
             # 逐个子号: 开窗 → 刷新 → 接受邀请
             for aid in ids:
                 if JOIN_JOB["stop"]:
@@ -2609,6 +2613,7 @@ def _join_worker(ids, mname, seat="prolite"):
                             done = "没找到邀请 (%s)" % ",".join(
                                 res.get("tried") or [])[:80]
                         if done == "ok":
+                            joined += 1
                             a["space"] = ws_name
                             a["space_ws"] = ws_id
                             a["space_mother"] = mname
@@ -2646,6 +2651,16 @@ def _join_worker(ids, mname, seat="prolite"):
                 mbr.close()
             except Exception:
                 pass
+            # 落母号统计: 执行次数 + 累计拉入数
+            ms2 = _load_mothers()
+            mm = next((x for x in ms2 if x["name"] == mname), None)
+            if mm:
+                mm["join_runs"] = mm.get("join_runs", 0) + 1
+                mm["join_count"] = mm.get("join_count", 0) + joined
+                mm["join_at"] = _now()
+                _save_mothers(ms2)
+                log("→ %s 累计执行 %d 次加入, 拉入 %d 个"
+                    % (mname, mm["join_runs"], mm["join_count"]))
     finally:
         JOIN_JOB["running"] = False
         log("—— 加入空间结束 ——"
