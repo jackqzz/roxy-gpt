@@ -3411,6 +3411,22 @@ def _join_worker(ids, mname, seat="prolite"):
                     continue
                 email = a["email"]
                 try:
+                    if email in already:
+                        # API 权威判定已是成员 —— 免开窗直接落位,
+                        # 开窗接邀请只对"新发的邀请"有意义
+                        joined += 1
+                        a["space"] = ws_name
+                        a["space_ws"] = ws_id
+                        a["space_mother"] = mname
+                        a["space_seat"] = r.get("seat") or seat
+                        a["space_at"] = _now()
+                        a.pop("space_left", None)
+                        _ws_list_add(a, ws_id, ws_name,
+                                     "standard-user")
+                        JOIN_JOB["results"][aid] = \
+                            "已是成员 %s (%s)" % (ws_name, ws_id[:8])
+                        log("✓ %s: 已是成员, 直接落位" % email)
+                        continue
                     px = _load_proxies()
                     p = next((x for x in px
                               if x["id"] == a.get("proxy_id")), None)
