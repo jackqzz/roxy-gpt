@@ -1921,6 +1921,99 @@ def _ios_dc(which="dc-token.txt"):
         return None
 
 
+class _ChainRelay:
+    """本地 HTTP CONNECT 中继: curl → 127.0.0.1:port →
+    (上级链 →) 账号代理 → 目标站。
+    池代理直连会被 RST, 只能经上级代理链到 (见
+    _dial_via_account_proxy)。curl 链不支持 socks前+socks主,
+    所以用本地中继把链式隧道包成普通 http 代理给 curl_cffi。"""
+
+    def __init__(self, p, up, timeout=30):
+        self.p, self.up, self.timeout = p, up, timeout
+        self.dead = False
+        import socketserver
+        me = self
+
+        class H(socketserver.BaseRequestHandler):
+            def handle(self):
+                c = self.request
+                c.settimeout(me.timeout)
+                try:
+                    req = b""
+                    while b"\r\n\r\n" not in req and len(req) < 8192:
+                        ch = c.recv(4096)
+                        if not ch:
+                            return
+                        req += ch
+                    line = req.split(b"\r\n", 1)[0].decode(
+                        errors="ignore")
+                    m = re.match(r"CONNECT\s+([^\s:]+):(\d+)", line)
+                    if not m:
+                        c.sendall(b"HTTP/1.1 400 Bad\r\n\r\n")
+                        return
+                    host, port = m.group(1), int(m.group(2))
+                    s = _dial_via_account_proxy(
+                        me.p, host, port, me.timeout, me.up)
+                    c.sendall(b"HTTP/1.1 200 Connection established"
+                              b"\r\n\r\n")
+                    me._pipe(c, s)
+                except Exception:
+                    try:
+                        c.sendall(b"HTTP/1.1 502 Upstream\r\n\r\n")
+                    except Exception:
+                        pass
+                    try:
+                        c.close()
+                    except Exception:
+                        pass
+
+        self.srv = socketserver.ThreadingTCPServer(
+            ("127.0.0.1", 0), H)
+        self.srv.daemon_threads = True
+        self.port = self.srv.server_address[1]
+        threading.Thread(target=self.srv.serve_forever,
+                         kwargs={"poll_interval": 0.3},
+                         daemon=True).start()
+
+    @staticmethod
+    def _pipe(a, b):
+        """双向转发直到任一侧断开。"""
+        import select
+        a.setblocking(False)
+        b.setblocking(False)
+        try:
+            while True:
+                rl, _, xl = select.select([a, b], [], [a, b], 60)
+                if xl or not rl:
+                    break
+                for s in rl:
+                    try:
+                        d = s.recv(65536)
+                    except Exception:
+                        return
+                    if not d:
+                        return
+                    (b if s is a else a).sendall(d)
+        except Exception:
+            pass
+        finally:
+            for s in (a, b):
+                try:
+                    s.close()
+                except Exception:
+                    pass
+
+    def url(self):
+        return "http://127.0.0.1:%d" % self.port
+
+    def close(self):
+        try:
+            self.srv.shutdown()
+            self.srv.server_close()
+        except Exception:
+            pass
+
+
 class _IosRegistrar:
     """curl_cffi 会话重放 iOS 注册五步流 (DPoP 签名 token 交换)。"""
 
@@ -2073,6 +2166,22 @@ class _IosRegistrar:
                                % (r.status_code, r.text[:200]))
         return r.json()
 
+    def refresh(self, rt):
+        """refresh_token 换新 access_token (同 token 端点)。"""
+        body = {"client_id": _IOS_CLIENT_ID,
+                "grant_type": "refresh_token",
+                "refresh_token": rt}
+        r = self.s.post(_IOS_TOKEN_URL, data=self._jd(body),
+                        headers=self.headers(
+                            [("accept", "*/*"),
+                             ("dpop", self.dpop()),
+                             ("oai-uit", "True")]))
+        self.log("  refresh %d" % r.status_code)
+        if r.status_code != 200:
+            raise RuntimeError("refresh 失败: %d %s"
+                               % (r.status_code, r.text[:200]))
+        return r.json()
+
 
 def _ios_birthday(age):
     """按年龄生成生日 YYYY-MM-DD (年月随机取)。"""
@@ -2134,68 +2243,85 @@ def _ios_reg_worker(ids):
                     _bind_proxy(p, email)
                     a["proxy_id"] = p["id"]
                     _save_proxies(px)
-                proxy = _proxy_url(p, "url")
                 prof = _gen_profile(email, log)
                 name = (prof[0] if prof else None) or "John"
                 age = prof[1] if prof else 28
                 birthday = _ios_birthday(age)
                 log("→ %s: %s 代理开跑 (%s, %s)"
                     % (email, p.get("host"), name, birthday))
-                reg = _IosRegistrar(proxy, log, dc)
-                reg.warmup()
-                reg.authorize()
-                reg.next_step(
-                    {"data": {"kind": "username",
-                              "username": {"kind": "email",
-                                           "value": email}},
-                     "origin_page_type": "login_or_signup_start"},
-                    "email_otp_verification", "email")
-                log("  %s: 等 OTP (接码轮询)…" % email)
-                code = _fetch_mail_code(
-                    a["mail_url"], _upstream(), log,
-                    timeout=240, interval=5,
-                    should_stop=lambda: IOS_JOB["stop"])
-                if code == "dead":
-                    a["email_dead"] = True
-                    IOS_JOB["results"][aid] = "邮箱失效(602)"
-                    log("✗ %s: 邮箱不可用 (602)" % email)
-                    continue
-                if not code:
-                    IOS_JOB["results"][aid] = "等码超时"
-                    log("✗ %s: 等码超时" % email)
-                    continue
-                reg.next_step(
-                    {"data": {"code": code, "intent": "validate",
-                              "username_kind": "email"},
-                     "origin_page_type": "email_otp_verification"},
-                    "about_you", "otp")
-                final = reg.next_step(
-                    {"data": {"name": name, "birthday": birthday,
-                              "is_explicit_consent_required":
-                                  False},
-                     "origin_page_type": "about_you"},
-                    "token_exchange", "profile")
-                grant = (final.get("payload") or {}).get("code")
-                if not grant:
-                    raise RuntimeError(
-                        "token_exchange 没带授权码: %s"
-                        % str(final)[:150])
-                tokens = reg.exchange(grant)
-                a["reg"] = "new"
-                a["reg_how"] = "ios"
-                a["reg_at"] = _now()
-                a["ios"] = {
-                    "at": tokens.get("access_token"),
-                    "rt": tokens.get("refresh_token"),
-                    "id_token": tokens.get("id_token"),
-                    "expires_in": tokens.get("expires_in"),
-                    "earliest_refresh_at":
-                        tokens.get("earliest_refresh_at"),
-                    "device_id": reg.device_id,
-                    "at": _now()}
-                IOS_JOB["results"][aid] = "✓ iOS 注册完成"
-                log("✓ %s: iOS 注册完成, token 已存 a.ios"
-                    % email)
+                relay = _ChainRelay(p, _upstream())
+                try:
+                    reg = _IosRegistrar(relay.url(), log, dc)
+                    reg.warmup()
+                    reg.authorize()
+                    stale, _ = _mail_code_once(
+                        a["mail_url"], _upstream())
+                    reg.next_step(
+                        {"data": {"kind": "username",
+                                  "username": {"kind": "email",
+                                               "value": email}},
+                         "origin_page_type":
+                             "login_or_signup_start"},
+                        "email_otp_verification", "email")
+                    log("  %s: 等 OTP (接码轮询)…" % email)
+                    code = _fetch_mail_code(
+                        a["mail_url"], _upstream(), log,
+                        timeout=240, interval=5,
+                        exclude={stale} if stale else (),
+                        should_stop=lambda: IOS_JOB["stop"])
+                    if code == "dead":
+                        a["email_dead"] = True
+                        IOS_JOB["results"][aid] = "邮箱失效(602)"
+                        log("✗ %s: 邮箱不可用 (602)" % email)
+                        continue
+                    if not code:
+                        IOS_JOB["results"][aid] = "等码超时"
+                        log("✗ %s: 等码超时" % email)
+                        continue
+                    reg.next_step(
+                        {"data": {"code": code,
+                                  "intent": "validate",
+                                  "username_kind": "email"},
+                         "origin_page_type":
+                             "email_otp_verification"},
+                        "about_you", "otp")
+                    final = reg.next_step(
+                        {"data": {"name": name,
+                                  "birthday": birthday,
+                                  "is_explicit_consent_required":
+                                      False},
+                         "origin_page_type": "about_you"},
+                        "token_exchange", "profile")
+                    grant = (final.get("payload") or {}).get("code")
+                    if not grant:
+                        raise RuntimeError(
+                            "token_exchange 没带授权码: %s"
+                            % str(final)[:150])
+                    tokens = reg.exchange(grant)
+                    from cryptography.hazmat.primitives \
+                        import serialization as _ser
+                    a["reg"] = "new"
+                    a["reg_how"] = "ios"
+                    a["reg_at"] = _now()
+                    a["ios"] = {
+                        "at": tokens.get("access_token"),
+                        "rt": tokens.get("refresh_token"),
+                        "id_token": tokens.get("id_token"),
+                        "expires_in": tokens.get("expires_in"),
+                        "earliest_refresh_at":
+                            tokens.get("earliest_refresh_at"),
+                        "device_id": reg.device_id,
+                        "cookies": reg.s.cookies.get_dict(),
+                        "dpop": reg.dpop_key.private_bytes(
+                            _ser.Encoding.PEM,
+                            _ser.PrivateFormat.PKCS8,
+                            _ser.NoEncryption()).decode(),
+                        "got_at": _now()}
+                    IOS_JOB["results"][aid] = "✓ iOS 注册完成"
+                    log("✓ %s: iOS 注册完成, token 已存 a.ios"
+                        % email)
+                finally:
+                    relay.close()
             except Exception as e:
                 IOS_JOB["results"][aid] = str(e)[:120]
                 log("✗ %s: %s" % (email, str(e)[:120]))
