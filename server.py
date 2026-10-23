@@ -1384,9 +1384,10 @@ def _chatgpt_email_step(ws, a, log, should_stop=None):
 
 
 def _chatgpt_password_step(ws, a, log, should_stop=None, timeout=300):
-    """自动·创建密码: 等 input[name=new-password] -> 生成随机密码
-    (存账号) -> 填入提交。密码页可能出现在验证码前(由填码步骤内联
-    处理)或之后(本步骤兜); about-you/主界面出现即认为无需密码页。
+    """自动·密码: 注册走 input[name=new-password] -> 生成随机密码
+    (存账号); 已注册号登录走 input[name=password] -> 填已有密码。
+    密码页可能出现在验证码前(由填码步骤内联处理)或之后(本步骤兜);
+    about-you/主界面出现即认为无需密码页。
     返回 ok|no_pwd|stopped|err。"""
     import random
     from playwright.sync_api import sync_playwright
@@ -1428,6 +1429,26 @@ def _chatgpt_password_step(ws, a, log, should_stop=None, timeout=300):
                         if not _real_continue(pg):
                             return "密码页提交按钮点不动"
                         log("  🔑 创建密码页已自动提交 (密码存账号)")
+                        return "ok"
+                    # 登录模式: name=password/current-password 填已有密码
+                    lp = pg.query_selector(
+                        "input[name=password],"
+                        "input[name=current-password]")
+                    if lp and lp.is_visible() \
+                            and a.get("password"):
+                        hdelay()
+                        lsel = ("input[name=current-password]"
+                                if lp.get_attribute("name")
+                                == "current-password"
+                                else "input[name=password]")
+                        lp.click()
+                        pg.fill(lsel, "")
+                        pg.type(lsel,
+                                a["password"], delay=tdelay())
+                        hdelay()
+                        if not _real_continue(pg):
+                            return "登录密码页提交按钮点不动"
+                        log("  🔑 登录密码已自动提交")
                         return "ok"
                     # about-you / 主界面已现 = 流程越过密码页
                     if pg.query_selector("input[name=name]") \
@@ -5262,9 +5283,14 @@ def _open_worker(accs):
             a["status"] = "opened"
             OPEN_JOB["results"][a["id"]] = "已定位, 请手动操作"
             log(f"✓ {email}: 已开到 chatgpt.com")
+            registered = a.get("reg") in ("new", "yes")
+            if registered:
+                log(f"  [{email}] ↪ 已注册账号 "
+                    f"({a.get('reg_how') or a.get('reg')})"
+                    f" —— 登录模式, 跳过资料步")
             if step_watch and _mail_watch_start(a):
                 log(f"  [{email}] 📨 接码监听已开 (10min)")
-            if step_gen:
+            if step_gen and not registered:
                 _prof_gen_start(a)
                 log(f"  [{email}] 🤖 资料生成中 …")
             if step_email:
@@ -5303,7 +5329,8 @@ def _open_worker(accs):
                 if r5 not in ("ok", "no_pwd", "stopped"):
                     log(f"  [{email}] 🔑 创建密码失败: {r5}"
                         f" —— 请手动继续")
-            if step_profile and not a.get("email_dead"):
+            if step_profile and not a.get("email_dead") \
+                    and not registered:
                 r4 = _chatgpt_profile_step(
                     ws, a, lambda m: log(f"  [{email}] {m}"),
                     should_stop=_stopped)
