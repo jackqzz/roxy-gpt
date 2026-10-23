@@ -3380,15 +3380,19 @@ def _join_worker(ids, mname, seat="prolite"):
                     emails[aid] = a["email"]
             r = {}
             for att in range(3):
-                r = mpg.evaluate(_INVITE_JS, {
-                    "ws": ws_id, "emails": list(emails.values()),
-                    "fid": str(uuid.uuid4()),
-                    "sid": str(uuid.uuid4()),
-                    "seat": seat})
-                if r.get("status") == 401 \
+                try:
+                    r = mpg.evaluate(_INVITE_JS, {
+                        "ws": ws_id,
+                        "emails": list(emails.values()),
+                        "fid": str(uuid.uuid4()),
+                        "sid": str(uuid.uuid4()),
+                        "seat": seat})
+                except Exception as e:
+                    r = {"status": 0, "body": str(e)[:120]}
+                if r.get("status") in (0, 401) \
                         or "token_expired" in (r.get("body") or ""):
-                    log("  母号 token 过期, 刷新页面重取 (%d/3)"
-                        % (att + 1))
+                    log("  邀请请求异常(%s), 刷新页面重试 (%d/3)"
+                        % (r.get("status"), att + 1))
                     try:
                         mpg.goto(TARGET_URL,
                                  wait_until="domcontentloaded",
@@ -3409,11 +3413,29 @@ def _join_worker(ids, mname, seat="prolite"):
             except Exception:
                 bj = {}
             already = set(bj.get("already_member_emails") or [])
+            # 新发邀请的 email → invite_id, 给子号协议接受用
+            iid_by_email = {}
+            for iv in (bj.get("account_invites") or []):
+                if iv.get("email_address") and iv.get("id"):
+                    iid_by_email[iv["email_address"]] = iv["id"]
             log("→ 批量邀请完成: 新发 %d 个, 已是成员 %d 个"
                 % (len(emails) - len(already & set(emails.values())),
                    len(already & set(emails.values()))))
             joined = 0
-            # 逐个子号: 开窗 → 刷新 → 接受邀请
+
+            def _mark_joined(a, wsn, wsd, how):
+                a["space"] = wsn
+                a["space_ws"] = wsd
+                a["space_mother"] = mname
+                a["space_seat"] = r.get("seat") or seat
+                a["space_at"] = _now()
+                a.pop("space_left", None)
+                _ws_list_add(a, wsd, wsn, "standard-user")
+                JOIN_JOB["results"][a["id"]] = \
+                    "已入 %s (%s)%s" % (wsn, wsd[:8],
+                                     " [协议]" if how == "p" else "")
+
+            # 逐个子号: 协议接受优先(ios.at), 无 at/失败再开窗
             for aid in ids:
                 if JOIN_JOB["stop"]:
                     log("⏹ 已手动停止")
@@ -3428,14 +3450,7 @@ def _join_worker(ids, mname, seat="prolite"):
                         # API 权威判定已是成员 —— 免开窗直接落位,
                         # 开窗接邀请只对"新发的邀请"有意义
                         joined += 1
-                        a["space"] = ws_name
-                        a["space_ws"] = ws_id
-                        a["space_mother"] = mname
-                        a["space_seat"] = r.get("seat") or seat
-                        a["space_at"] = _now()
-                        a.pop("space_left", None)
-                        _ws_list_add(a, ws_id, ws_name,
-                                     "standard-user")
+                        _mark_joined(a, ws_name, ws_id, "w")
                         JOIN_JOB["results"][aid] = \
                             "已是成员 %s (%s)" % (ws_name, ws_id[:8])
                         log("✓ %s: 已是成员, 直接落位" % email)
@@ -3457,6 +3472,28 @@ def _join_worker(ids, mname, seat="prolite"):
                         _bind_proxy(p, email)
                         a["proxy_id"] = p["id"]
                         _save_proxies(px)
+                    # 协议路径: ios.at + 邀请响应里的 invite_id
+                    iid = iid_by_email.get(email)
+                    if iid and (a.get("ios") or {}).get("at"):
+                        ok, code, detail = _proto_accept_invite(
+                            a, p, ws_id, iid)
+                        if ok:
+                            joined += 1
+                            _mark_joined(a, ws_name, ws_id, "p")
+                            log("✓ %s: 协议接邀请已入 %s (%s)"
+                                % (email, ws_name, ws_id[:8]))
+                            continue
+                        if code in ("at_expired", "no_at", "no_pid"):
+                            log("  %s: 协议接不可用(%s), "
+                                "转开窗" % (email, code))
+                        else:
+                            log("  %s: 协议接失败 %s %s, 转开窗"
+                                % (email, code, detail[:80]))
+                    elif iid:
+                        pass  # 无 ios.at 直接走开窗
+                    else:
+                        log("  %s: 邀请响应里没找到 "
+                            "invite_id, 走开窗碰运气" % email)
                     dir_id, cws, err = _roxy_open_for(email, p)
                     if err or not cws:
                         JOIN_JOB["results"][aid] = "开窗: " + (err or "")
@@ -3526,17 +3563,7 @@ def _join_worker(ids, mname, seat="prolite"):
                                 res.get("tried") or [])[:80]
                         if done == "ok":
                             joined += 1
-                            a["space"] = ws_name
-                            a["space_ws"] = ws_id
-                            a["space_mother"] = mname
-                            a["space_seat"] = r.get("seat") or seat
-                            a["space_at"] = _now()
-                            a.pop("space_left", None)
-                            _ws_list_add(
-                                a, ws_id, ws_name,
-                                "standard-user")
-                            JOIN_JOB["results"][aid] = \
-                                "已入 %s (%s)" % (ws_name, ws_id[:8])
+                            _mark_joined(a, ws_name, ws_id, "w")
                             log("✓ %s: 已入 %s (%s)"
                                 % (email, ws_name, ws_id[:8]))
                         else:
@@ -3665,6 +3692,69 @@ def _proto_leave_ws(a, p, ws_id):
         if d.status_code == 200:
             return True, mine.get("name") or "", "", ""
         return False, "", "HTTP %s" % d.status_code, d.text[:150]
+    finally:
+        relay.close()
+
+
+def _proto_accept_invite(a, p, ws_id, iid):
+    """纯协议接受邀请: ios.at + 账号代理(链式), 不开窗。
+    POST /accounts/{pid}/invites/accept  {invite_id} —— 实测成功路径;
+    注意接口常回 {"success":true} 却空炮, 必须 accounts/check 复查成员。
+    返回 (ok, code, detail)。code: no_at/at_expired/no_pid/
+    accepted(复查未落)/HTTP xxx。"""
+    at = (a.get("ios") or {}).get("at")
+    if not at:
+        return False, "no_at", ""
+    from curl_cffi import requests as _cr
+    relay = _ChainRelay(p, _upstream())
+    try:
+        s = _cr.Session(proxy=relay.url(),
+                        impersonate="chrome", timeout=40)
+        H = {"authorization": "Bearer " + at,
+             "content-type": "application/json"}
+
+        def _check():
+            r = s.get("https://chatgpt.com/backend-api/accounts"
+                      "/check/v4-2023-04-27", headers=H)
+            if r.status_code != 200:
+                return r.status_code, None, False
+            pid = None
+            found = False
+            for v in (r.json().get("accounts") or {}).values():
+                x = v.get("account") or {}
+                if x.get("structure") == "personal":
+                    pid = x.get("account_id")
+                elif x.get("account_id") == ws_id:
+                    found = True
+            return 200, pid, found
+
+        code, pid, found = _check()
+        if code == 401:
+            return False, "at_expired", ""
+        if code != 200:
+            return False, "HTTP %s" % code, ""
+        if found:
+            return True, "", ""
+        if not pid:
+            return False, "no_pid", ""
+        h = dict(H)
+        h["chatgpt-account-id"] = pid
+        ac = s.post("https://chatgpt.com/backend-api/accounts/%s"
+                    "/invites/accept" % pid, headers=h,
+                    json={"invite_id": iid})
+        if ac.status_code == 401:
+            return False, "at_expired", ac.text[:150]
+        if ac.status_code != 200:
+            return False, "HTTP %s" % ac.status_code, \
+                ac.text[:150]
+        # success 可能是假阳 —— 复查成员
+        for _ in range(4):
+            code, _, found = _check()
+            if found:
+                return True, "", ""
+            time.sleep(4)
+        return False, "accepted", \
+            "accept 200 但成员未落 (可能是席位满/假成功)"
     finally:
         relay.close()
 
