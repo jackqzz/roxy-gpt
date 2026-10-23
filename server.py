@@ -3479,24 +3479,33 @@ def _join_worker(ids, mname, seat="prolite"):
                             a, p, ws_id, iid)
                         verified = False
                         if ok:
-                            # 假成功防护: 母号复邀一次 —— 已落成员
-                            # 会进 already_member_emails, 空炮则重新发邀
-                            try:
-                                rv = mpg.evaluate(_INVITE_JS, {
-                                    "ws": ws_id, "emails": [email],
-                                    "fid": str(uuid.uuid4()),
-                                    "sid": str(uuid.uuid4()),
-                                    "seat": seat})
-                                bj2 = json.loads(
-                                    rv.get("body") or "{}")
-                                verified = email in set(
-                                    bj2.get("already_member_emails")
-                                    or [])
-                            except Exception:
-                                verified = False
+                            # 假成功防护: 母号复邀 —— 已落成员会进
+                            # already_member_emails。落成员有约10s
+                            # 传播延迟, 轮3次再判空炮
+                            for _vi in range(3):
+                                if _vi:
+                                    time.sleep(8)
+                                try:
+                                    rv = mpg.evaluate(_INVITE_JS, {
+                                        "ws": ws_id,
+                                        "emails": [email],
+                                        "fid": str(uuid.uuid4()),
+                                        "sid": str(uuid.uuid4()),
+                                        "seat": seat})
+                                    bj2 = json.loads(
+                                        rv.get("body") or "{}")
+                                    verified = email in set(
+                                        bj2.get(
+                                            "already_member_emails")
+                                        or [])
+                                except Exception:
+                                    verified = False
+                                if verified:
+                                    break
                             if not verified:
-                                log("  %s: accept 200 但复邀未确认"
-                                    "成员 (假成功), 转开窗" % email)
+                                log("  %s: accept 200 但复邀3次"
+                                    "未确认成员 (假成功), 转开窗"
+                                    % email)
                         if ok and verified:
                             joined += 1
                             _mark_joined(a, ws_name, ws_id, "p")
@@ -3650,6 +3659,19 @@ def _ws_list_add(a, ws_id, name="", role=""):
     lst.append({"id": ws_id, "name": name, "role": role})
 
 
+def _cf_call(fn, n=4, wait=1.5):
+    """执行一次 HTTP 调用; CF 间歇拦 403(HTML挑战页)时同会话重试。
+    API 层的 403 是 application/json, 不触发重试。"""
+    r = fn()
+    for _ in range(n - 1):
+        ct = (r.headers.get("content-type") or "")
+        if r.status_code != 403 or "json" in ct.lower():
+            break
+        time.sleep(wait)
+        r = fn()
+    return r
+
+
 def _mark_left(a, ws_id, wsn):
     """退出成功后的统一记账。"""
     a["space_left"] = {"ws": ws_id, "name": wsn,
@@ -3678,8 +3700,9 @@ def _proto_leave_ws(a, p, ws_id):
         s = _cr.Session(proxy=relay.url(),
                         impersonate="chrome", timeout=40)
         H = {"authorization": "Bearer " + at}
-        r = s.get("https://chatgpt.com/backend-api/accounts"
-                  "/check/v4-2023-04-27", headers=H)
+        r = _cf_call(lambda: s.get(
+            "https://chatgpt.com/backend-api/accounts"
+            "/check/v4-2023-04-27", headers=H))
         if r.status_code == 401:
             return False, "", "at_expired", r.text[:150]
         if r.status_code != 200:
@@ -3702,13 +3725,15 @@ def _proto_leave_ws(a, p, ws_id):
         hw["chatgpt-account-id"] = ws_id
         if "owner" in str(
                 mine.get("account_user_role") or "").lower():
-            oc = s.get("https://chatgpt.com/backend-api/accounts"
-                       "/%s/users/owner_count" % ws_id, headers=hw)
+            oc = _cf_call(lambda: s.get(
+                "https://chatgpt.com/backend-api/accounts"
+                "/%s/users/owner_count" % ws_id, headers=hw))
             if oc.status_code == 200 and \
                     (oc.json().get("owner_count") or 0) <= 1:
                 return False, "", "sole_owner", ""
-        d = s.delete("https://chatgpt.com/backend-api/accounts/%s"
-                     "/users/%s" % (ws_id, uid), headers=hw)
+        d = _cf_call(lambda: s.delete(
+            "https://chatgpt.com/backend-api/accounts/%s"
+            "/users/%s" % (ws_id, uid), headers=hw))
         if d.status_code == 200:
             return True, mine.get("name") or "", "", ""
         return False, "", "HTTP %s" % d.status_code, d.text[:150]
@@ -3734,8 +3759,9 @@ def _proto_accept_invite(a, p, ws_id, iid):
              "content-type": "application/json"}
 
         def _check():
-            r = s.get("https://chatgpt.com/backend-api/accounts"
-                      "/check/v4-2023-04-27", headers=H)
+            r = _cf_call(lambda: s.get(
+                "https://chatgpt.com/backend-api/accounts"
+                "/check/v4-2023-04-27", headers=H))
             if r.status_code != 200:
                 return r.status_code, None, False
             pid = None
@@ -3759,9 +3785,10 @@ def _proto_accept_invite(a, p, ws_id, iid):
             return False, "no_pid", ""
         h = dict(H)
         h["chatgpt-account-id"] = pid
-        ac = s.post("https://chatgpt.com/backend-api/accounts/%s"
-                    "/invites/accept" % pid, headers=h,
-                    json={"invite_id": iid})
+        ac = _cf_call(lambda: s.post(
+            "https://chatgpt.com/backend-api/accounts/%s"
+            "/invites/accept" % pid, headers=h,
+            json={"invite_id": iid}))
         if ac.status_code == 401:
             return False, "at_expired", ac.text[:150]
         if ac.status_code != 200:
