@@ -560,20 +560,21 @@ $("do-import").onclick = async () => {
 
 $("open-sel").onclick = e => {
   if (!sel.size) return toast("先勾选账号");
-  startOpen([...sel], e.target);
+  startOpen([...sel], e.currentTarget);
 };
 $("open-all").onclick = e => {
   const ids = filtered().map(a => a.id);
   if (!ids.length) return toast("没有账号");
   if (!confirm(`为全部 ${ids.length} 个账号开窗?`)) return;
-  startOpen(ids, e.target);
+  startOpen(ids, e.currentTarget);
 };
 $("close-sel").onclick = async e => {
+  const btn = e.currentTarget;
   if (!sel.size) return toast("先勾选账号");
-  e.currentTarget.disabled = true;
+  btn.disabled = true;
   const r = await post("/api/accounts/close-win", { ids: [...sel] })
     .catch(() => null);
-  e.currentTarget.disabled = false;
+  btn.disabled = false;
   if (!r || r.error) return toast("✗ " + (r && r.error || "请求失败"));
   toast(`✓ 已关 ${r.ok} 个浏览器` +
     (r.failed ? ` · ✗${Object.keys(r.failed).length}: ` +
@@ -671,11 +672,12 @@ setInterval(pollMailWatch, 3000);
 pollMailWatch();
 
 $("pat-sel").onclick = e => {
+  const btn = e.currentTarget;
   if (!sel.size) return toast("先勾选账号");
   const ids = [...sel];
-  e.currentTarget.disabled = true;
+  btn.disabled = true;
   post("/api/accounts/pat-check", { ids }).then(r => {
-    e.currentTarget.disabled = false;
+    btn.disabled = false;
     jobTab("pat");
     if (r.error) return toast("✗ " + r.error);
     toast(`PAT 检验启动: ${r.count} 个账号`);
@@ -683,11 +685,12 @@ $("pat-sel").onclick = e => {
 };
 
 $("ios-reg").onclick = e => {
+  const btn = e.currentTarget;
   if (!sel.size) return toast("先勾选账号");
   const ids = [...sel];
-  e.currentTarget.disabled = true;
+  btn.disabled = true;
   post("/api/accounts/ios-reg", { ids }).then(r => {
-    e.currentTarget.disabled = false;
+    btn.disabled = false;
     jobTab("ios");
     if (r.error) return toast("✗ " + r.error);
     toast(`iOS 注册启动: ${r.count} 个账号`);
@@ -695,11 +698,12 @@ $("ios-reg").onclick = e => {
 };
 
 $("ppat-sel").onclick = e => {
+  const btn = e.currentTarget;
   if (!sel.size) return toast("先勾选账号");
   const ids = [...sel];
-  e.currentTarget.disabled = true;
+  btn.disabled = true;
   post("/api/accounts/proto-pat", { ids }).then(r => {
-    e.currentTarget.disabled = false;
+    btn.disabled = false;
     jobTab("ppat");
     if (r.error) return toast("✗ " + r.error);
     toast(`协议PAT 启动: ${r.count} 个账号`);
@@ -708,14 +712,15 @@ $("ppat-sel").onclick = e => {
 
 // ---- 加入空间 ----
 $("join-sel").onclick = e => {
+  const btn = e.currentTarget;
   if (!sel.size) return toast("先勾选账号");
   const mother = $("join-mother").value;
   if (!mother) return toast("先选空间母号 (没有就去空间母号页导入)");
   const seat = $("join-seat").value;
   const ids = [...sel];
-  e.currentTarget.disabled = true;
+  btn.disabled = true;
   post("/api/accounts/join-space", { ids, mother, seat }).then(r => {
-    e.currentTarget.disabled = false;
+    btn.disabled = false;
     jobTab("join");
     if (r.error) return toast("✗ " + r.error);
     toast(`加入空间启动: ${r.count} 个账号 → ${mother}`);
@@ -779,12 +784,13 @@ function renderLeaveRows(ids) {
 }
 // ---- 查空间 (实况成员列表) ----
 $("ws-refresh").onclick = e => {
+  const btn = e.currentTarget;
   if (!sel.size) return toast("先勾选账号");
   const ids = [...sel];
-  e.currentTarget.disabled = true;
+  btn.disabled = true;
   toast(`正在拉 ${ids.length} 个号的空间成员…`);
   post("/api/accounts/ws-list", { ids }).then(r => {
-    e.currentTarget.disabled = false;
+    btn.disabled = false;
     if (r.error) return toast("✗ " + r.error);
     let ok = 0, fails = [];
     Object.entries((r && r.map) || {}).forEach(([id, v]) => {
@@ -887,22 +893,24 @@ $("leave-go").onclick = () => {
 
 // ---- CPA 入池 ----
 $("cpa-sel").onclick = e => {
+  const btn = e.currentTarget;
   if (!sel.size) return toast("先勾选账号");
   const ids = [...sel];
-  e.currentTarget.disabled = true;
+  btn.disabled = true;
   post("/api/accounts/cpa-oauth", { ids }).then(r => {
-    e.currentTarget.disabled = false;
+    btn.disabled = false;
     jobTab("cpa");
     if (r.error) return toast("✗ " + r.error);
     toast(`OAuth 授权启动: ${r.count} 个账号 —— 开窗走完授权页`);
   });
 };
 $("cpa-push").onclick = e => {
+  const btn = e.currentTarget;
   if (!sel.size) return toast("先勾选账号");
   const ids = [...sel];
-  e.currentTarget.disabled = true;
+  btn.disabled = true;
   post("/api/accounts/cpa-push", { ids }).then(r => {
-    e.currentTarget.disabled = false;
+    btn.disabled = false;
     if (r.error) return toast("✗ " + r.error);
     const fails = r.failed
       ? Object.entries(r.failed).map(([k, v]) => k + ": " + v).join(" · ")
