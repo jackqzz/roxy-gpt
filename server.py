@@ -1887,10 +1887,8 @@ def _find_cgpt_page(br):
 # ---------------- iOS 协议注册 ----------------
 # 纯 HTTP 重放 ChatGPT iOS App 注册流 (不开窗):
 #   warmup -> authorize -> 提交邮箱 -> 邮箱OTP -> 提交资料 ->
-#   /oauth/token (DPoP)。需要:
-#     ios/dc-token.txt          —— 重放的 DCDevice token, 管 OTP 发送
-#                                  (缺它 OTP 邮件被静默压制)
-#     ios/dc-token-backend.txt  —— /backend-api/devicecheck 用 (可选)
+#   /oauth/token (DPoP)。oai-ios-device-check-token 头每号自造
+#   (服务端只验头存在, 不验内容/签名 —— ios/dc-token*.txt 已不需要)。
 #   账号需 mail_url (接码) + 可用代理; 走账号代理出口。
 #   产物存 a.ios = {at, rt, id_token, device_id, ...}, reg="new" how="ios"。
 IOS_JOB = {"running": False, "log": [], "results": {},
@@ -1913,12 +1911,13 @@ _IOS_UA = ("ChatGPT/1.2026.279 (iOS 27.0; iPhone18,3; "
            "build 37999862476)")
 
 
-def _ios_dc(which="dc-token.txt"):
-    try:
-        v = open(os.path.join(_IOS_DIR, which)).read().strip()
-        return v or None
-    except Exception:
-        return None
+def _gen_dc_token():
+    """自造 DCDevice token。实测服务端只验 oai-ios-device-check-token
+    头存在, 不验内容/签名 —— 照真 token 形态生成即可:
+    \\x02\\x00\\x00\\x00\\xa6\\x39 CBOR 头 + 随机体, 2294B ->
+    3060 字符 base64 (前缀 AgAAAKY5, 末尾 '=')。每次调用生成新的。"""
+    raw = b"\x02\x00\x00\x00\xa6\x39" + os.urandom(2288)
+    return base64.b64encode(raw).decode()
 
 
 class _ChainRelay:
@@ -2023,7 +2022,8 @@ class _IosRegistrar:
         self.s = _cr.Session(proxy=proxy or None,
                              impersonate="safari18_0_ios",
                              timeout=40)
-        self.dc_token = dc_token
+        # 无外部 token 则自造 (服务端只验头存在), 每号一枚不重用
+        self.dc_token = dc_token or _gen_dc_token()
         self.device_id = str(uuid.uuid4()).upper()
         self.app_sid = str(uuid.uuid4())
         self.session_log_id = str(uuid.uuid4()).upper()
@@ -2209,13 +2209,8 @@ def _ios_reg_worker(ids):
         log("✗ 缺依赖: .venv/bin/pip install curl_cffi cryptography")
         IOS_JOB["running"] = False
         return
-    dc = _ios_dc()
-    if not dc:
-        log("✗ ios/dc-token.txt 缺失 —— 没有它 OTP 邮件会被静默压制, "
-            "先放一个再跑")
-        IOS_JOB["running"] = False
-        return
-    log("iOS 协议注册: %d 个账号 (纯接口, 不开窗)" % len(ids))
+    log("iOS 协议注册: %d 个账号 (纯接口, 不开窗, "
+        "dc-token 每号自造)" % len(ids))
     try:
         for aid in ids:
             if IOS_JOB["stop"]:
@@ -2251,7 +2246,7 @@ def _ios_reg_worker(ids):
                     % (email, p.get("host"), name, birthday))
                 relay = _ChainRelay(p, _upstream())
                 try:
-                    reg = _IosRegistrar(relay.url(), log, dc)
+                    reg = _IosRegistrar(relay.url(), log)
                     reg.warmup()
                     reg.authorize()
                     stale, _ = _mail_code_once(
@@ -2367,7 +2362,7 @@ class _CodexLogin:
         self.device_id = str(uuid.uuid4()).lower()
         self.verifier = _b64u(os.urandom(48))
         self.state = _b64u(os.urandom(32))
-        self.dc_token = dc_token
+        self.dc_token = dc_token or _gen_dc_token()
         from cryptography.hazmat.primitives.asymmetric import ec
         self.dk = ec.generate_private_key(ec.SECP256R1())
 
@@ -2611,7 +2606,6 @@ def _proto_pat_worker(ids):
         log("✗ 未配置 PAT 母号空间 (settings.mother_workspace)")
         PROTO_PAT_JOB["running"] = False
         return
-    dc = _ios_dc()
     # 先抓母号 ws-AT (一次抓, 整个任务复用; 失败走申请制)
     mother_at, merr = _mother_ws_at(log)
     if mother_at:
@@ -2663,7 +2657,7 @@ def _proto_pat_worker(ids):
                 log("→ %s: codex 登录 (%s)" % (email, p["host"]))
                 relay = _ChainRelay(p, _upstream())
                 try:
-                    lg = _CodexLogin(relay.url(), log, dc)
+                    lg = _CodexLogin(relay.url(), log)
                     lg.authorize()
                     stale, _ = _mail_code_once(
                         a["mail_url"], _upstream())
