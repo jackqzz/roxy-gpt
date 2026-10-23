@@ -3584,6 +3584,72 @@ def _ws_list_add(a, ws_id, name="", role=""):
     lst.append({"id": ws_id, "name": name, "role": role})
 
 
+def _mark_left(a, ws_id, wsn):
+    """退出成功后的统一记账。"""
+    a["space_left"] = {"ws": ws_id, "name": wsn,
+                       "at": _now(), "by": "self"}
+    if a.get("space_ws") == ws_id:
+        for k in ("space", "space_ws", "space_mother",
+                  "space_at", "space_seat"):
+            a.pop(k, None)
+    if a.get("ws_id") == ws_id:
+        a.pop("ws_id", None)
+    if a.get("ws_list"):
+        a["ws_list"] = [w for w in a["ws_list"]
+                        if w.get("id") != ws_id]
+
+
+def _proto_leave_ws(a, p, ws_id):
+    """纯协议退出: ios.at + 账号代理(链式) + chrome指纹, 不开窗。
+    返回 (ok, wsn, code, detail)。code: at_expired/not_member/
+    sole_owner/HTTP xxx/no_at。"""
+    at = (a.get("ios") or {}).get("at")
+    if not at:
+        return False, "", "no_at", ""
+    from curl_cffi import requests as _cr
+    relay = _ChainRelay(p, _upstream())
+    try:
+        s = _cr.Session(proxy=relay.url(),
+                        impersonate="chrome", timeout=40)
+        H = {"authorization": "Bearer " + at}
+        r = s.get("https://chatgpt.com/backend-api/accounts"
+                  "/check/v4-2023-04-27", headers=H)
+        if r.status_code == 401:
+            return False, "", "at_expired", r.text[:150]
+        if r.status_code != 200:
+            return False, "", "HTTP %s" % r.status_code, \
+                r.text[:150]
+        mine, names = None, []
+        for v in (r.json().get("accounts") or {}).values():
+            x = v.get("account") or {}
+            if x.get("structure") != "workspace":
+                continue
+            names.append(x.get("name") or "")
+            if x.get("account_id") == ws_id:
+                mine = x
+        if not mine:
+            return False, "", "not_member", \
+                ",".join(n for n in names if n)
+        uid = (mine.get("account_user_id")
+               or "").split("__")[0]
+        hw = dict(H)
+        hw["chatgpt-account-id"] = ws_id
+        if "owner" in str(
+                mine.get("account_user_role") or "").lower():
+            oc = s.get("https://chatgpt.com/backend-api/accounts"
+                       "/%s/users/owner_count" % ws_id, headers=hw)
+            if oc.status_code == 200 and \
+                    (oc.json().get("owner_count") or 0) <= 1:
+                return False, "", "sole_owner", ""
+        d = s.delete("https://chatgpt.com/backend-api/accounts/%s"
+                     "/users/%s" % (ws_id, uid), headers=hw)
+        if d.status_code == 200:
+            return True, mine.get("name") or "", "", ""
+        return False, "", "HTTP %s" % d.status_code, d.text[:150]
+    finally:
+        relay.close()
+
+
 def _leave_worker(ids, ws_name=None, pairs=None):
     from playwright.sync_api import sync_playwright
     LEAVE_JOB["running"] = True
@@ -3608,12 +3674,66 @@ def _leave_worker(ids, ws_name=None, pairs=None):
                     continue
                 email = a["email"]
                 try:
+                    # 解析目标空间 id —— 只按存量记录
+                    # (a.space_ws / a.ws_list), 实况拉取归「查空间」
+                    target = (pairs or {}).get(aid)
+                    if not target and ws_name:
+                        if (a.get("space") or "") == ws_name \
+                                and a.get("space_ws"):
+                            target = a["space_ws"]
+                        if not target:
+                            for w in a.get("ws_list") or []:
+                                if (w.get("name") or "") \
+                                        == ws_name:
+                                    target = w.get("id")
+                                    break
+                    if not target:
+                        known = ", ".join(
+                            w.get("name")
+                            for w in (a.get("ws_list") or [])
+                            if w.get("name")) \
+                            or (a.get("space") or "无")
+                        LEAVE_JOB["results"][aid] = "不在该空间"
+                        log("✗ %s: 不在空间 %s (记录在: %s)"
+                            " —— 记录过期先「查空间」"
+                            % (email, ws_name or "?", known))
+                        continue
                     p = next((x for x in _load_proxies()
                               if x["id"] == a.get("proxy_id")), None)
                     if not p or p.get("banned"):
                         LEAVE_JOB["results"][aid] = "没绑代理"
                         log("✗ %s: 没绑代理" % email)
                         continue
+                    # —— 纯协议优先: 有 ios.at 就不开窗 ——
+                    if (a.get("ios") or {}).get("at"):
+                        ok, wsn, code, detail = \
+                            _proto_leave_ws(a, p, target)
+                        if ok:
+                            wsn = wsn or ws_name or target[:8]
+                            _mark_left(a, target, wsn)
+                            LEAVE_JOB["results"][aid] = \
+                                "已退 %s (%s)" % (wsn, target[:8])
+                            log("✓ %s: 已退出 %s (%s) [协议]"
+                                % (email, wsn, target[:8]))
+                            continue
+                        if code == "not_member":
+                            LEAVE_JOB["results"][aid] = \
+                                "不在该空间"
+                            log("✗ %s: 不在该空间 (实况: %s)"
+                                % (email, detail or "无"))
+                            continue
+                        if code == "sole_owner":
+                            LEAVE_JOB["results"][aid] = \
+                                "唯一owner不能退"
+                            log("✗ %s: 是该空间唯一 owner,"
+                                " 先转交再退" % email)
+                            continue
+                        if code != "at_expired":
+                            LEAVE_JOB["results"][aid] = code
+                            log("✗ %s: 协议退出 %s %s"
+                                % (email, code, detail))
+                            continue
+                        log("… %s: ios.at 已过期, 走窗口" % email)
                     dir_id, cws, err = _roxy_open_for(email, p)
                     if err or not cws:
                         LEAVE_JOB["results"][aid] = \
@@ -3630,53 +3750,12 @@ def _leave_worker(ids, ws_name=None, pairs=None):
                                      wait_until="domcontentloaded",
                                      timeout=60000)
                             cpg.wait_for_timeout(3000)
-                        # 解析目标空间 id —— 只按存量记录
-                        # (a.space_ws / a.ws_list), 实况拉取
-                        # 归「查空间」按钮, 这里不再开窗 evaluate
-                        target = (pairs or {}).get(aid)
-                        if not target and ws_name:
-                            if (a.get("space") or "") == ws_name \
-                                    and a.get("space_ws"):
-                                target = a["space_ws"]
-                            if not target:
-                                for w in a.get("ws_list") or []:
-                                    if (w.get("name") or "") \
-                                            == ws_name:
-                                        target = w.get("id")
-                                        break
-                        if not target:
-                            known = ", ".join(
-                                w.get("name")
-                                for w in (a.get("ws_list") or [])
-                                if w.get("name")) \
-                                or (a.get("space") or "无")
-                            LEAVE_JOB["results"][aid] = \
-                                "不在该空间"
-                            log("✗ %s: 不在空间 %s (记录在: %s)"
-                                " —— 记录过期先「查空间」"
-                                % (email, ws_name or "?", known))
-                            continue
                         r = cpg.evaluate(_LEAVE_WS_JS, target)
                         code = r.get("code")
                         if r.get("status") == 200:
                             wsn = r.get("name") \
                                 or ws_name or target[:8]
-                            a["space_left"] = {"ws": target,
-                                               "name": wsn,
-                                               "at": _now(),
-                                               "by": "self"}
-                            if a.get("space_ws") == target:
-                                for k in ("space", "space_ws",
-                                          "space_mother",
-                                          "space_at",
-                                          "space_seat"):
-                                    a.pop(k, None)
-                            if a.get("ws_id") == target:
-                                a.pop("ws_id", None)
-                            if a.get("ws_list"):
-                                a["ws_list"] = [
-                                    w for w in a["ws_list"]
-                                    if w.get("id") != target]
+                            _mark_left(a, target, wsn)
                             LEAVE_JOB["results"][aid] = \
                                 "已退 %s (%s)" % (wsn, target[:8])
                             log("✓ %s: 已退出 %s (%s)"
