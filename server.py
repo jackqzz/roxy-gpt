@@ -3694,6 +3694,9 @@ def _proto_leave_ws(a, p, ws_id):
     at = (a.get("ios") or {}).get("at")
     if not at:
         return False, "", "no_at", ""
+    if (a.get("ios") or {}).get("at_dead"):
+        # 退过一次空间后 at 服务端作废, 不再浪费请求
+        return False, "", "at_expired", "at_dead"
     from curl_cffi import requests as _cr
     relay = _ChainRelay(p, _upstream())
     try:
@@ -3731,10 +3734,19 @@ def _proto_leave_ws(a, p, ws_id):
             if oc.status_code == 200 and \
                     (oc.json().get("owner_count") or 0) <= 1:
                 return False, "", "sole_owner", ""
-        d = _cf_call(lambda: s.delete(
-            "https://chatgpt.com/backend-api/accounts/%s"
-            "/users/%s" % (ws_id, uid), headers=hw))
+        # 429 "subscription update in progress" 是瞬时锁, 轮重试
+        d = None
+        for _try in range(4):
+            d = _cf_call(lambda: s.delete(
+                "https://chatgpt.com/backend-api/accounts/%s"
+                "/users/%s" % (ws_id, uid), headers=hw))
+            if d.status_code != 429:
+                break
+            time.sleep(10)
         if d.status_code == 200:
+            # 退出成功后该 at 服务端作废 —— 标记, 后续协议操作
+            # (退出/接邀) 全部转窗口
+            a.setdefault("ios", {})["at_dead"] = True
             return True, mine.get("name") or "", "", ""
         return False, "", "HTTP %s" % d.status_code, d.text[:150]
     finally:
@@ -3750,6 +3762,8 @@ def _proto_accept_invite(a, p, ws_id, iid):
     at = (a.get("ios") or {}).get("at")
     if not at:
         return False, "no_at", ""
+    if (a.get("ios") or {}).get("at_dead"):
+        return False, "at_expired", "at_dead"
     from curl_cffi import requests as _cr
     relay = _ChainRelay(p, _upstream())
     try:
