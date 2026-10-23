@@ -798,11 +798,12 @@ def _bound_count(p):
     return len(p.get("bound") or [])
 
 
-def _pick_proxy(px, email=None, limit=PICK_LIMIT):
-    """未封禁 + 绑定<limit + 非冷却(对 email);
+def _pick_proxy(px, email=None, limit=PICK_LIMIT, excl=None):
+    """未封禁 + 绑定<limit + 非冷却(对 email) + 不在 excl;
     排序: 绑定数 -> 已知失效沉底 -> 最久未用。"""
     cands = [p for p in px if not p.get("banned")
-             and _bound_count(p) < limit]
+             and _bound_count(p) < limit
+             and (not excl or p.get("id") not in excl)]
     avail = [p for p in cands if not _cooling(p, email)]
     PICK_LAST["cooled"] = len(cands) - len(avail)
     avail.sort(key=lambda p: (_bound_count(p),
@@ -2226,18 +2227,21 @@ def _ios_reg_worker(ids):
                     IOS_JOB["results"][aid] = "没有接码链接"
                     log("✗ %s: 没有接码链接" % email)
                     continue
+                # iOS注册不绑定代理 (不占 bound 空位): 取占用最少
+                # 的可用代理, 且避开本号上次注册用的那条 (ios_px)
                 px = _load_proxies()
-                p = next((x for x in px
-                          if x["id"] == a.get("proxy_id")), None)
-                if not p or p.get("banned"):
-                    p = _pick_proxy(px, email)
-                    if not p:
-                        IOS_JOB["results"][aid] = "没有可用代理"
-                        log("✗ %s: 没有可用代理" % email)
-                        continue
-                    _bind_proxy(p, email)
-                    a["proxy_id"] = p["id"]
-                    _save_proxies(px)
+                last = a.get("ios_px")
+                p = _pick_proxy(px, email,
+                                excl={last} if last else None) \
+                    or _pick_proxy(px, email)  # 排光则允许复用
+                if not p:
+                    IOS_JOB["results"][aid] = "没有可用代理"
+                    log("✗ %s: 没有可用代理" % email)
+                    continue
+                p["last_used"] = _now()
+                _touch_cool(p, email)   # 他号冷却, 不占 bound 位
+                a["ios_px"] = p["id"]
+                _save_proxies(px)
                 prof = _gen_profile(email, log)
                 name = (prof[0] if prof else None) or "John"
                 age = prof[1] if prof else 28
