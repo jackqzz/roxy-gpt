@@ -2255,13 +2255,28 @@ def _ios_reg_worker(ids):
                     reg.authorize()
                     stale, _ = _mail_code_once(
                         a["mail_url"], _upstream())
-                    reg.next_step(
+                    es = reg.next_step(
                         {"data": {"kind": "username",
                                   "username": {"kind": "email",
                                                "value": email}},
                          "origin_page_type":
                              "login_or_signup_start"},
                         "email_otp_verification", "email")
+                    if (es.get("payload") or {}).get(
+                            "email_verification_mode") \
+                            == "passwordless_login":
+                        # OpenAI 侧已有此号 → 走的是登录流,
+                        # OTP 后必撞 preauth cookie 死局(409)。
+                        # 直接标 reg=yes 跳过, 别浪费接码轮询
+                        a["reg"] = "yes"
+                        a["reg_how"] = "exists"
+                        a["reg_at"] = _now()
+                        IOS_JOB["results"][aid] = \
+                            "已是注册账号"
+                        log("… %s: OpenAI 已有此号"
+                            " (passwordless_login), 标记已注册"
+                            % email)
+                        continue
                     log("  %s: 等 OTP (接码轮询)…" % email)
                     code = _fetch_mail_code(
                         a["mail_url"], _upstream(), log,
