@@ -3477,7 +3477,27 @@ def _join_worker(ids, mname, seat="prolite"):
                     if iid and (a.get("ios") or {}).get("at"):
                         ok, code, detail = _proto_accept_invite(
                             a, p, ws_id, iid)
+                        verified = False
                         if ok:
+                            # 假成功防护: 母号复邀一次 —— 已落成员
+                            # 会进 already_member_emails, 空炮则重新发邀
+                            try:
+                                rv = mpg.evaluate(_INVITE_JS, {
+                                    "ws": ws_id, "emails": [email],
+                                    "fid": str(uuid.uuid4()),
+                                    "sid": str(uuid.uuid4()),
+                                    "seat": seat})
+                                bj2 = json.loads(
+                                    rv.get("body") or "{}")
+                                verified = email in set(
+                                    bj2.get("already_member_emails")
+                                    or [])
+                            except Exception:
+                                verified = False
+                            if not verified:
+                                log("  %s: accept 200 但复邀未确认"
+                                    "成员 (假成功), 转开窗" % email)
+                        if ok and verified:
                             joined += 1
                             _mark_joined(a, ws_name, ws_id, "p")
                             log("✓ %s: 协议接邀请已入 %s (%s)"
@@ -3486,7 +3506,7 @@ def _join_worker(ids, mname, seat="prolite"):
                         if code in ("at_expired", "no_at", "no_pid"):
                             log("  %s: 协议接不可用(%s), "
                                 "转开窗" % (email, code))
-                        else:
+                        elif not ok:
                             log("  %s: 协议接失败 %s %s, 转开窗"
                                 % (email, code, detail[:80]))
                     elif iid:
@@ -3699,9 +3719,9 @@ def _proto_leave_ws(a, p, ws_id):
 def _proto_accept_invite(a, p, ws_id, iid):
     """纯协议接受邀请: ios.at + 账号代理(链式), 不开窗。
     POST /accounts/{pid}/invites/accept  {invite_id} —— 实测成功路径;
-    注意接口常回 {"success":true} 却空炮, 必须 accounts/check 复查成员。
-    返回 (ok, code, detail)。code: no_at/at_expired/no_pid/
-    accepted(复查未落)/HTTP xxx。"""
+    注意 accept 常回 {"success":true} 却空炮 (席位满等), 成员确认
+    交给调用方复邀一次看 already_member_emails。
+    返回 (ok, code, detail)。code: no_at/at_expired/no_pid/HTTP xxx。"""
     at = (a.get("ios") or {}).get("at")
     if not at:
         return False, "no_at", ""
@@ -3747,14 +3767,9 @@ def _proto_accept_invite(a, p, ws_id, iid):
         if ac.status_code != 200:
             return False, "HTTP %s" % ac.status_code, \
                 ac.text[:150]
-        # success 可能是假阳 —— 复查成员
-        for _ in range(4):
-            code, _, found = _check()
-            if found:
-                return True, "", ""
-            time.sleep(4)
-        return False, "accepted", \
-            "accept 200 但成员未落 (可能是席位满/假成功)"
+        # 注意: 这里的 success 可能是假阳 (席位满等),
+        # 成员确认交给调用方再邀一次看 already_member_emails
+        return True, "", ""
     finally:
         relay.close()
 
