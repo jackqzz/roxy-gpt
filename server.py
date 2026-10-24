@@ -5662,7 +5662,9 @@ class H(BaseHTTPRequestHandler):
                 d = {**a,
                      "proxy":
                          (f"{p['scheme']}://{p['host']}:{p['port']}"
-                          if p else None)}
+                          if p else None),
+                     "proxy_full":
+                         (_proxy_url(p, "url") if p else None)}
                 if a.get("totp"):
                     d["totp_code"] = _totp_code(a["totp"])
                     d["totp_left"] = 30 - int(time.time() % 30)

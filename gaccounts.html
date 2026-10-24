@@ -211,7 +211,7 @@ function render() {
   $("tbody").innerHTML = rows.map((a, i) => {
     const idx = (page - 1) * SIZE + i + 1;
     const px = a.proxy
-      ? `<span class="pill pill-ok mono">${esc(a.proxy)}</span>`
+      ? `<span class="pill pill-ok mono copyable" data-c="${esc(a.proxy_full || a.proxy)}" title="点击复制代理 ${esc(a.proxy)} (scheme://user:pass@host:port, 外部程序直接用)">${esc(a.proxy)}</span>`
       : `<span class="pill pill-dim">未绑</span>`;
     const win = a.win
       ? `<span class="pill pill-ok" title="${esc(a.win)}">已开</span>`
