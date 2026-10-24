@@ -5581,7 +5581,9 @@ class H(BaseHTTPRequestHandler):
                                       .get("dead", False),
                             "proxy":
                                 (f"{p['scheme']}://{p['host']}:{p['port']}"
-                                 if p else None)})
+                                 if p else None),
+                            "proxy_full":
+                                (_proxy_url(p, "url") if p else None)})
             stats = {"total": len(accs),
                      "archived": sum(1 for a in accs
                                      if a.get("archived")),
