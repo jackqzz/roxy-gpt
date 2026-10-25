@@ -67,6 +67,7 @@
       <span style="flex:1"></span>
       <span class="subtitle" id="sel-hint" style="font-size:12px"></span>
       <button class="btn btn-outline btn-sm" id="view-arch" title="归档的账号在这 —— 窗口已删留记录, 可恢复/真删"><i data-ic="archive"></i>已归档 <span id="arch-n">0</span></button>
+      <button class="btn btn-ghost btn-sm" id="log-toggle" title="日志窗口开关"><i data-ic="list"></i>日志<span id="log-dot" class="dot" style="display:none;margin-left:4px"></span></button>
       <button class="btn btn-ghost btn-sm" id="reload" title="刷新"><i data-ic="refresh-cw"></i></button>
     </div>
     <div class="toolbar-row">
@@ -128,7 +129,8 @@
       <span class="job-tabs" id="job-tabs"></span>
       <span style="display:flex;align-items:center;gap:8px">
         <button class="btn btn-outline btn-sm btn-danger" id="job-stop" style="display:none"><i data-ic="square"></i>停止</button>
-        <span id="job-log-state"></span></span></div>
+        <span id="job-log-state"></span>
+        <button class="btn btn-ghost btn-sm" id="log-close" title="收起日志窗口"><i data-ic="x"></i></button></span></div>
     <pre id="job-log-pre"></pre>
   </div>
 </div>
@@ -310,24 +312,41 @@ function renderJobTab() {
   $("job-log-pre").scrollTop = $("job-log-pre").scrollHeight;
 }
 
+// 日志窗口开合状态: "1" 手动开 / "0" 手动关 / null 自动(有数据就开)
+const LOGKEY = "joblog-open";
+function setLog(open, manual) {
+  if (manual) localStorage.setItem(LOGKEY, open ? "1" : "0");
+  $("job-log").style.display = open ? "block" : "none";
+}
+const logClosed = () => localStorage.getItem(LOGKEY) === "0";
+if (localStorage.getItem(LOGKEY) === "1")
+  $("job-log").style.display = "block";
+
 async function pollJobs() {
   const keys = Object.keys(TABS);
   const rs = await Promise.all(keys.map(k =>
     fetch(TABS[k].api).then(r => r.json()).catch(() => null)));
   keys.forEach((k, i) => { if (rs[i]) tabData[k] = rs[i]; });
-  if (keys.some(k => (tabData[k].log || []).length || tabData[k].running))
+  if (!logClosed() && keys.some(k =>
+      (tabData[k].log || []).length || tabData[k].running))
     $("job-log").style.display = "block";
   renderJobTab();
-  if (!keys.some(k => tabData[k].running) && jobPollT) {
+  const anyRun = keys.some(k => tabData[k].running);
+  $("log-dot").style.display = anyRun && $("job-log").style.display !== "block" ? "" : "none";
+  if (anyRun && !jobPollT) jobPollT = setInterval(pollJobs, 1200);
+  if (!anyRun && jobPollT) {
     clearInterval(jobPollT); jobPollT = null; await load();
   }
 }
 function jobTab(k) {
   curTab = k;
-  $("job-log").style.display = "block";
+  setLog(true, true);
   renderJobTab();
   if (!jobPollT) jobPollT = setInterval(pollJobs, 1200);
 }
+$("log-toggle").onclick = () =>
+  setLog($("job-log").style.display !== "block", true);
+$("log-close").onclick = () => setLog(false, true);
 $("job-stop").onclick = async () => {
   await post(TABS[curTab].stop, {});
   toast("已请求停止 —— 当前账号做完手上这步就停");

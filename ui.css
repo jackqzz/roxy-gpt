@@ -215,7 +215,7 @@ table.data-table tbody tr:last-child td { border-bottom: none; }
 .job-tab .ic { width: 13px; height: 13px; }
 .job-tab:hover { color: #dbe4f0; border-color: #3b4c6b; }
 .job-tab.on { background: var(--primary); color: #fff; border-color: var(--primary); }
-.job-tab .dot {
+.dot {
   width: 6px; height: 6px; border-radius: 50%;
   background: #34d399; display: inline-block; animation: jk 1s infinite;
 }
