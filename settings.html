@@ -128,6 +128,11 @@
   <div class="card">
     <div class="card-title"><i data-ic="timer"></i>注册拟人节奏（自动注册的等待/击键速度）</div>
     <div class="row">
+      <label class="subtitle" style="display:flex;align-items:center;gap:6px;cursor:pointer">
+        <input type="checkbox" id="pc-on"> 启用拟人节奏</label>
+      <span class="subtitle" style="color:var(--text-dim)">关闭后步骤/击键/落地几乎不等 —— 极速模式</span>
+    </div>
+    <div class="row">
       <span class="subtitle">步骤间隔(秒)</span>
       <input class="form-input" id="pc-step-min" type="number" step="0.5" min="0" style="width:80px"> ~
       <input class="form-input" id="pc-step-max" type="number" step="0.5" min="0" style="width:80px">
@@ -340,6 +345,7 @@ $("st-none").onclick = async () => {
 // ---- 注册节奏 ----
 async function loadPace() {
   const r = await fetch("/api/settings").then(r => r.json());
+  $("pc-on").checked = r.pace_on !== false;
   $("pc-step-min").value = r.pace_step_min;
   $("pc-step-max").value = r.pace_step_max;
   $("pc-type-min").value = r.pace_type_min;
@@ -350,6 +356,7 @@ async function loadPace() {
 }
 $("pace-save").onclick = async () => {
   const r = await post("/api/settings", {
+    pace_on: $("pc-on").checked,
     pace_step_min: parseFloat($("pc-step-min").value) || 2,
     pace_step_max: parseFloat($("pc-step-max").value) || 6,
     pace_type_min: parseInt($("pc-type-min").value) || 90,

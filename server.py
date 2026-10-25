@@ -1339,16 +1339,25 @@ def _chatgpt_goto(ws, init_js=None):
             br.close()
 
 
+def _pace_vals(_st):
+    """注册拟人节奏参数: (步骤间隔min,max, 击键min,max, 落地等待ms)。
+    pace_on=False 时返回近零值 —— 步骤/击键几乎不等, 落地只留
+    最小渲染余量。"""
+    if not _st.get("pace_on", True):
+        return 0.05, 0.08, 0, 1, 800
+    return (float(_st.get("pace_step_min") or 2.0),
+            float(_st.get("pace_step_max") or 6.0),
+            int(_st.get("pace_type_min") or 90),
+            int(_st.get("pace_type_max") or 240),
+            int(_st.get("pace_load_ms") or 5000))
+
+
 def _chatgpt_email_step(ws, a, log, should_stop=None):
     """半自动·自动输入邮箱: 点 Log in -> 填邮箱 -> 提交, 之后交还人工。"""
     import random
     from playwright.sync_api import sync_playwright
     _st = _settings()
-    _smin = float(_st.get("pace_step_min") or 2.0)
-    _smax = float(_st.get("pace_step_max") or 6.0)
-    _tmin = int(_st.get("pace_type_min") or 90)
-    _tmax = int(_st.get("pace_type_max") or 240)
-    _loadms = int(_st.get("pace_load_ms") or 5000)
+    _smin, _smax, _tmin, _tmax, _loadms = _pace_vals(_st)
 
     def hdelay(lo=None, hi=None):
         time.sleep(random.uniform(
@@ -1392,10 +1401,7 @@ def _chatgpt_password_step(ws, a, log, should_stop=None, timeout=300):
     import random
     from playwright.sync_api import sync_playwright
     _st = _settings()
-    _tmin = int(_st.get("pace_type_min") or 90)
-    _tmax = int(_st.get("pace_type_max") or 240)
-    _smin = float(_st.get("pace_step_min") or 2.0)
-    _smax = float(_st.get("pace_step_max") or 6.0)
+    _smin, _smax, _tmin, _tmax, _ = _pace_vals(_st)
 
     def hdelay():
         time.sleep(random.uniform(_smin, _smax))
@@ -1472,10 +1478,7 @@ def _chatgpt_code_step(ws, a, log, upstream, should_stop=None,
     import random
     from playwright.sync_api import sync_playwright
     _st = _settings()
-    _tmin = int(_st.get("pace_type_min") or 90)
-    _tmax = int(_st.get("pace_type_max") or 240)
-    _smin = float(_st.get("pace_step_min") or 2.0)
-    _smax = float(_st.get("pace_step_max") or 6.0)
+    _smin, _smax, _tmin, _tmax, _ = _pace_vals(_st)
 
     def hdelay():
         time.sleep(random.uniform(_smin, _smax))
@@ -1706,10 +1709,7 @@ def _chatgpt_profile_step(ws, a, log, should_stop=None):
     import random
     from playwright.sync_api import sync_playwright
     _st = _settings()
-    _tmin = int(_st.get("pace_type_min") or 90)
-    _tmax = int(_st.get("pace_type_max") or 240)
-    _smin = float(_st.get("pace_step_min") or 2.0)
-    _smax = float(_st.get("pace_step_max") or 6.0)
+    _smin, _smax, _tmin, _tmax, _ = _pace_vals(_st)
 
     def hdelay(lo=None, hi=None):
         time.sleep(random.uniform(
@@ -5550,6 +5550,7 @@ class H(BaseHTTPRequestHandler):
                 "namegen_key": s.get("namegen_key") or "",
                 "namegen_prompt": s.get("namegen_prompt")
                 or NAMEGEN_PROMPT,
+                "pace_on": s.get("pace_on", True),
                 "pace_step_min": s.get("pace_step_min") or 2.0,
                 "pace_step_max": s.get("pace_step_max") or 6.0,
                 "pace_type_min": s.get("pace_type_min") or 90,
@@ -5984,7 +5985,7 @@ class H(BaseHTTPRequestHandler):
             for k in ("namegen_enabled", "namegen_url",
                       "namegen_model", "namegen_key",
                       "namegen_prompt",
-                      "pace_step_min", "pace_step_max",
+                      "pace_on", "pace_step_min", "pace_step_max",
                       "pace_type_min", "pace_type_max",
                       "pace_load_ms", "proxy_cool_min",
                       "oauth_ttl_min", "open_workers", "open_env",
