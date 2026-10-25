@@ -3680,9 +3680,10 @@ def _ws_list_add(a, ws_id, name="", role=""):
     lst.append({"id": ws_id, "name": name, "role": role})
 
 
-def _cf_call(fn, n=4, wait=1.5):
+def _cf_call(fn, n=10, wait=2.0):
     """执行一次 HTTP 调用; CF 间歇拦 403(HTML挑战页)时同会话重试。
-    API 层的 403 是 application/json, 不触发重试。"""
+    API 层的 403 是 application/json, 不触发重试。
+    CF 挑战按请求独立判定, 同一代理概率放行 —— 多试几发。"""
     r = fn()
     for _ in range(n - 1):
         ct = (r.headers.get("content-type") or "")
@@ -3914,12 +3915,14 @@ def _leave_worker(ids, ws_name=None, pairs=None):
                             log("✗ %s: 是该空间唯一 owner,"
                                 " 先转交再退" % email)
                             continue
-                        if code != "at_expired":
+                        if code not in ("at_expired", "HTTP 403"):
                             LEAVE_JOB["results"][aid] = code
                             log("✗ %s: 协议退出 %s %s"
                                 % (email, code, detail))
                             continue
-                        log("… %s: ios.at 已过期, 走窗口" % email)
+                        log("… %s: %s, 走窗口"
+                            % (email, "ios.at 已过期" if code
+                               == "at_expired" else "协议被CF拦截"))
                     dir_id, cws, err = _roxy_open_for(email, p)
                     if err or not cws:
                         LEAVE_JOB["results"][aid] = \
