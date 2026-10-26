@@ -829,6 +829,23 @@ def _unbind_proxy(p, email, secs=None):
     return False
 
 
+def _sync_bound(accs, px):
+    """按账号记录的 proxy_id 重建 bound[]: 已删/已归档账号的
+    死绑定不再占名额 (a.proxy_id 不动 —— 恢复开窗仍认同一条)。
+    返回 (清掉的死绑定数, 现总占用)。"""
+    live = {}
+    for a in accs:
+        if a.get("proxy_id") and not a.get("archived"):
+            live.setdefault(a["proxy_id"], []).append(a["email"])
+    dropped = 0
+    for p in px:
+        old = p.get("bound") or []
+        new = live.get(p["id"]) or []
+        dropped += len([e for e in old if e not in new])
+        p["bound"] = new
+    return dropped, sum(len(p.get("bound") or []) for p in px)
+
+
 # ---------------- 接码 ----------------
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
       "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36")
@@ -5942,6 +5959,13 @@ class H(BaseHTTPRequestHandler):
             _save_proxies(keep)
             return self._json({"ok": True,
                                "deleted": len(px) - len(keep)})
+        if self.path == "/api/proxies/sync-bound":
+            # 刷新绑定计数: 清掉已删/已归档账号占着的死绑定
+            px = _load_proxies()
+            dropped, kept = _sync_bound(_load_accounts(), px)
+            _save_proxies(px)
+            return self._json({"ok": True, "dropped": dropped,
+                               "bound": kept})
         if self.path == "/api/proxies/check":
             req = self._body()
             ids = set(req.get("ids") or [])
@@ -6650,6 +6674,13 @@ class H(BaseHTTPRequestHandler):
             _save_gproxies(keep)
             return self._json({"ok": True,
                                "deleted": len(px) - len(keep)})
+        if self.path == "/api/g/proxies/sync-bound":
+            # G 池同样: 清掉已删/已归档 G 账号的死绑定
+            px = _load_gproxies()
+            dropped, kept = _sync_bound(_load_gaccounts(), px)
+            _save_gproxies(px)
+            return self._json({"ok": True, "dropped": dropped,
+                               "bound": kept})
         if self.path == "/api/g/proxies/check":
             req = self._body()
             ids = set(req.get("ids") or [])

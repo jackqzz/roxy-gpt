@@ -94,6 +94,7 @@
       <button class="btn btn-outline btn-sm btn-danger" id="del-sel"><i data-ic="trash-2"></i>删除选中</button>
       <span style="flex:1"></span>
       <span class="subtitle" id="sel-hint" style="font-size:12px"></span>
+      <button class="btn btn-outline btn-sm" id="sync-bound" title="刷新绑定计数: 按账号实际 proxy_id 重建 bound —— 已删/已归档账号占着的死绑定名额清掉 (账号的 proxy_id 不动, 恢复开窗仍认原 IP)"><i data-ic="refresh-cw"></i>刷新绑定</button>
       <button class="btn btn-ghost btn-sm" id="reload" title="刷新"><i data-ic="refresh-cw"></i></button>
     </div>
     <div class="toolbar-row">
@@ -229,6 +230,12 @@ function render() {
 $("btn-import").onclick = () => $("import-box").style.display = "block";
 $("import-close").onclick = () => $("import-box").style.display = "none";
 $("reload").onclick = load;
+$("sync-bound").onclick = async () => {
+  const r = await post("/api/proxies/sync-bound", {});
+  toast(r.dropped ? `清了 ${r.dropped} 条死绑定 —— 现占用 ${r.bound}`
+                  : "绑定计数已是最新");
+  load();
+};
 $("q").oninput = () => { page = 1; render(); };
 $("pg-prev").onclick = () => { if (page > 1) { page--; render(); } };
 $("pg-next").onclick = () => {
