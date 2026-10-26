@@ -2222,6 +2222,52 @@ class _IosRegistrar:
         return r.json()
 
 
+def _ios_refresh_at(a, p, log):
+    """ios.rt 刷新 ios.at: refresh_token grant + 注册时存的 DPoP
+    私钥签名, 走账号代理链。成功更新 a.ios 的 at/rt/id_token/
+    got_at 并清 at_dead 标记, 返回 (True, ""); 失败 (False, err)。
+    不发请求的前提缺失 (没 rt) 也走失败返回。"""
+    ios = a.get("ios") or {}
+    rt = ios.get("rt")
+    if not rt:
+        return False, "没存 rt"
+    relay = _ChainRelay(p, _upstream())
+    try:
+        reg = _IosRegistrar(relay.url(), log)
+        # at 绑定注册时的 DPoP key —— 换回存的那把再签,
+        # 否则 refresh 出来的新 at 对不上原绑定
+        try:
+            from cryptography.hazmat.primitives \
+                import serialization as _ser
+            reg.dpop_key = _ser.load_pem_private_key(
+                (ios.get("dpop") or "").encode(), password=None)
+        except Exception:
+            pass
+        if ios.get("device_id"):
+            reg.device_id = ios["device_id"]
+        try:
+            reg.s.cookies.update(ios.get("cookies") or {})
+        except Exception:
+            pass
+        tokens = reg.refresh(rt)
+    except Exception as e:
+        return False, str(e)[:150]
+    finally:
+        relay.close()
+    if not tokens.get("access_token"):
+        return False, "refresh 响应缺 access_token"
+    ios["at"] = tokens["access_token"]
+    if tokens.get("refresh_token"):
+        ios["rt"] = tokens["refresh_token"]
+    for k in ("id_token", "expires_in", "earliest_refresh_at"):
+        if tokens.get(k):
+            ios[k] = tokens[k]
+    ios["got_at"] = _now()
+    ios.pop("at_dead", None)
+    a["ios"] = ios
+    return True, ""
+
+
 def _ios_birthday(age):
     """按年龄生成生日 YYYY-MM-DD (年月随机取)。"""
     import random as _r
@@ -3910,15 +3956,34 @@ def _leave_worker(ids, ws_name=None, pairs=None):
                         continue
                     # —— 纯协议优先: 有 ios.at 就不开窗 ——
                     if (a.get("ios") or {}).get("at"):
-                        ok, wsn, code, detail = \
-                            _proto_leave_ws(a, p, target)
+                        ok = wsn = code = detail = ""
+                        refreshed = False
+                        for _try in range(2):
+                            ok, wsn, code, detail = \
+                                _proto_leave_ws(a, p, target)
+                            # at 过期才刷: rt 换新 at 再协议试一轮;
+                            # 第二轮仍败/没 rt/刷新失败 → 出循环落窗口
+                            if code not in ("at_expired", "HTTP 401") \
+                                    or _try or not \
+                                    (a.get("ios") or {}).get("rt"):
+                                break
+                            log("… %s: ios.at 失效 (%s), rt 刷新再试"
+                                % (email, code))
+                            rok, rerr = _ios_refresh_at(a, p, log)
+                            if not rok:
+                                log("… %s: rt 刷新失败 %s"
+                                    % (email, rerr))
+                                code = "at_expired"
+                                break
+                            refreshed = True
                         if ok:
                             wsn = wsn or ws_name or target[:8]
                             _mark_left(a, target, wsn)
                             LEAVE_JOB["results"][aid] = \
                                 "已退 %s (%s)" % (wsn, target[:8])
-                            log("✓ %s: 已退出 %s (%s) [协议]"
-                                % (email, wsn, target[:8]))
+                            log("✓ %s: 已退出 %s (%s) [协议%s]"
+                                % (email, wsn, target[:8],
+                                   "·刷新" if refreshed else ""))
                             continue
                         if code == "not_member":
                             LEAVE_JOB["results"][aid] = \
@@ -3932,14 +3997,16 @@ def _leave_worker(ids, ws_name=None, pairs=None):
                             log("✗ %s: 是该空间唯一 owner,"
                                 " 先转交再退" % email)
                             continue
-                        if code not in ("at_expired", "HTTP 403"):
+                        if code not in ("at_expired", "HTTP 401",
+                                        "HTTP 403"):
                             LEAVE_JOB["results"][aid] = code
                             log("✗ %s: 协议退出 %s %s"
                                 % (email, code, detail))
                             continue
                         log("… %s: %s, 走窗口"
-                            % (email, "ios.at 已过期" if code
-                               == "at_expired" else "协议被CF拦截"))
+                            % (email, "ios.at 已过期" if code in
+                               ("at_expired", "HTTP 401")
+                               else "协议被CF拦截"))
                     dir_id, cws, err = _roxy_open_for(email, p)
                     if err or not cws:
                         LEAVE_JOB["results"][aid] = \
@@ -4387,6 +4454,7 @@ def _cpa_worker(ids):
                             pass
                         code = None
                         hit = {"u": None}
+                        choose_warned = {"v": False}
 
                         def _take(u):
                             """URL 是 localhost:1455 回调且 state 匹配
@@ -4432,6 +4500,40 @@ def _cpa_worker(ids):
                                 pass
                             if hit["u"]:
                                 continue
+                            # 已登录态先落 choose-an-account (选会话页):
+                            # 点文本里含本账号邮箱的 session_id 按钮进下一步;
+                            # 只一条会话时直接点它; 多条都不匹配宁可不点
+                            # (点错会把 code 发到别的账号上)
+                            try:
+                                _sess = cpg.query_selector_all(
+                                    'button[name="session_id"],'
+                                    'button[data-dd-action-name='
+                                    '"Select existing session"]')
+                                if _sess:
+                                    _pick = None
+                                    for _b in _sess:
+                                        if email.lower() in (
+                                                _b.inner_text() or ""
+                                                ).lower():
+                                            _pick = _b
+                                            break
+                                    if _pick is None and len(_sess) == 1:
+                                        _pick = _sess[0]
+                                    if _pick and _pick.is_visible():
+                                        _pick.click()
+                                        log("  %s: choose-an-account "
+                                            "已点已存会话" % email)
+                                        cpg.wait_for_timeout(1500)
+                                        continue
+                                    elif _pick is None and not \
+                                            choose_warned["v"]:
+                                        choose_warned["v"] = True
+                                        log("  %s: choose-an-account "
+                                            "有 %d 条会话但都不含本号邮箱,"
+                                            " 不敢乱点"
+                                            % (email, len(_sess)))
+                            except Exception:
+                                pass
                             # 有授权按钮就点 (尽力而为)
                             for sel in (
                                     'button:has-text("Authorize")',
