@@ -47,6 +47,22 @@
     </div>
   </div>
 
+  <!-- 邮箱商城 -->
+  <div class="card">
+    <div class="card-title"><i data-ic="cart"></i>邮箱货源（qan8 商城 —— 谷歌邮箱API业务, 进货+602自动售后）</div>
+    <div class="row">
+      <input class="form-input" id="shop-key" type="password" placeholder="API Key (nh_live_...)" style="width:300px">
+      <input class="form-input" id="shop-sku" placeholder="sku_id (默认 156=Chatgpt)" style="width:200px">
+      <button class="btn btn-outline btn-sm" id="shop-test">查余额</button>
+      <button class="btn btn-primary btn-sm" id="shop-save">保存</button>
+      <span class="subtitle" id="shop-msg"></span>
+    </div>
+    <div class="hint">
+      发货格式 <code>email----取码链接</code> 直接进账号库（账号页「购买邮箱」下单）。
+      接码接口回 602 时自动按 uid 申请售后退款。
+    </div>
+  </div>
+
   <!-- 上级代理 -->
   <div class="card">
     <div class="card-title"><i data-ic="settings"></i>上级代理（本机出网隧道 —— 测活/接码请求经它转发）</div>
@@ -114,6 +130,10 @@
         <input type="checkbox" id="st-pwd"><i data-ic="key"></i>创建密码</label>
       <label style="display:flex;align-items:center;gap:6px;font-size:13px" title="等 about-you 页后自动填姓名+年龄提交, 数据取资料生成结果">
         <input type="checkbox" id="st-prof"><i data-ic="pencil"></i>填资料</label>
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px" title="iOS 协议注册整批结束后, 对本批注册成功的账号统一自动开窗 (注册中不逐个开; 手动停止的批次不触发; 上限 50)">
+        <input type="checkbox" id="st-ios-open"><i data-ic="smartphone"></i>iOS注册完毕后自动开窗</label>
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px" title="退出空间成功后自动归档账号: 关闭浏览器进程、删除 Roxy 窗口释放配额、停监听 —— 协议/窗口两种退出路径都生效">
+        <input type="checkbox" id="st-leave-close"><i data-ic="archive"></i>退空间后自动关窗+归档</label>
     </div>
     <div class="row" style="margin-top:10px">
       <button class="btn btn-outline btn-sm" id="st-all" title="全选 = 全自动: 开窗后一路跑到注册落地"><i data-ic="check-circle"></i>全自动</button>
@@ -200,6 +220,34 @@ $("cpa-test").onclick = async e => {
   e.target.disabled = false;
   $("cpa-msg").textContent = r && r.ok
     ? `✓ 连通 ${r.ms}ms · ${r.ver} API` + (r.creds != null ? ` · 池内 ${r.creds} 条凭证` : "")
+    : "✗ " + ((r && r.error) || "请求失败");
+};
+
+// ---- 邮箱商城 ----
+async function loadShop() {
+  const r = await fetch("/api/settings").then(r => r.json());
+  $("shop-key").value = r.shop_key || "";
+  $("shop-sku").value = r.shop_sku || "156";
+}
+$("shop-save").onclick = async () => {
+  const r = await post("/api/settings",
+    { shop_key: $("shop-key").value.trim(),
+      shop_sku: $("shop-sku").value.trim() || "156" });
+  if (r.error) return toast("✗ " + r.error);
+  $("shop-msg").textContent = "✓ 已保存";
+  toast("✓ 商城配置已存");
+};
+$("shop-test").onclick = async e => {
+  await post("/api/settings",
+    { shop_key: $("shop-key").value.trim(),
+      shop_sku: $("shop-sku").value.trim() || "156" });   // 先存再测
+  e.target.disabled = true;
+  $("shop-msg").textContent = "查询中…";
+  const r = await fetch("/api/shop/info").then(r => r.json()).catch(() => null);
+  e.target.disabled = false;
+  $("shop-msg").textContent = r && !r.error
+    ? `✓ 余额 ¥${r.balance ?? "?"}` +
+      (r.product ? ` · ${r.product.name} ¥${r.product.price} 库存${r.product.stock}` : "")
     : "✗ " + ((r && r.error) || "请求失败");
 };
 
@@ -318,10 +366,14 @@ async function loadSteps() {
   const r = await fetch("/api/settings").then(r => r.json());
   STEP_KEYS.forEach((k, i) => { $(STEP_IDS[i]).checked = r[k] !== false; });
   $("st-workers").value = r.open_workers ?? 3;
+  $("st-ios-open").checked = r.ios_auto_open === true;
+  $("st-leave-close").checked = r.leave_autoclose === true;
 }
 function stepsPayload() {
   const o = { open_workers: Math.max(1, Math.min(10,
-    parseInt($("st-workers").value) || 3)) };
+    parseInt($("st-workers").value) || 3)),
+    ios_auto_open: $("st-ios-open").checked,
+    leave_autoclose: $("st-leave-close").checked };
   STEP_KEYS.forEach((k, i) => { o[k] = $(STEP_IDS[i]).checked; });
   return o;
 }
@@ -375,6 +427,7 @@ $("pace-save").onclick = async () => {
 
 loadUpstream();
 loadCpa();
+loadShop();
 loadMother();
 loadNamegen();
 loadSteps();

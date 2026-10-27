@@ -29,6 +29,7 @@
       <div class="subtitle">自动选绑定数最少的代理 → Roxy 开窗 (auto-邮箱) → 打开 <span id="target-url">chatgpt.com</span> · 母号/资料/节奏在设置页</div>
     </div>
     <div class="header-actions">
+      <button class="btn btn-outline" id="btn-buy"><i data-ic="cart"></i>购买邮箱</button>
       <button class="btn btn-primary" id="btn-import"><i data-ic="plus"></i>导入账号</button>
     </div>
   </div>
@@ -55,6 +56,27 @@
     <div style="display:flex;align-items:center;gap:10px;margin-top:10px">
       <button class="btn btn-primary btn-sm" id="do-import">确认导入</button>
       <span class="subtitle" id="import-msg"></span>
+    </div>
+  </div>
+
+  <div class="drawer-card" id="buy-box" style="display:none">
+    <div class="drawer-title">
+      <i data-ic="cart"></i><span>商城进货（qan8 · 谷歌邮箱API业务 —— 发货 <code>email----接码链接</code> 自动入库）</span>
+      <button class="btn btn-ghost btn-sm" id="buy-close"><i data-ic="x"></i>关闭</button>
+    </div>
+    <div class="subtitle" id="buy-info" style="margin-bottom:8px"></div>
+    <div style="display:flex;align-items:center;gap:10px">
+      <input class="form-input" id="buy-qty" type="number" min="1" max="5000" value="10" style="width:90px">
+      <span class="subtitle">个</span>
+      <button class="btn btn-primary btn-sm" id="buy-go">下单进货</button>
+      <span class="subtitle" id="buy-msg"></span>
+    </div>
+    <div class="subtitle" style="margin-top:8px;font-size:12px;color:var(--text-dim)">
+      API Key / 商品 sku 在设置页配 · 下单后等发货(≤2分钟)自动导入 · 超时未发货存挂单, 重开此面板自动补拉 · 接码回602自动售后退款
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;margin-top:8px">
+      <input class="form-input" id="buy-ordno" placeholder="补单: 粘贴商城 order_no (会员中心可查)" style="width:280px;font-size:12px">
+      <button class="btn btn-outline btn-sm" id="buy-retry">补拉发货</button>
     </div>
   </div>
 
@@ -572,6 +594,60 @@ $("do-import").onclick = async () => {
     (r.bad.length ? ` · ${r.bad.length} 行无法解析` : "");
   if (r.bad.length) console.warn("解析失败行:", r.bad);
   $("import-text").value = "";
+  await load();
+};
+
+// ---- 商城进货 ----
+$("btn-buy").onclick = async () => {
+  $("buy-box").style.display = "block";
+  $("buy-msg").textContent = "";
+  $("buy-info").textContent = "加载商品信息中…";
+  const r = await fetch("/api/shop/info").then(r => r.json())
+    .catch(() => null);
+  if (!r || r.error) {
+    $("buy-info").textContent = "";
+    $("buy-msg").textContent = "✗ " +
+      ((r && r.error) || "商城接口不通 —— 先到设置页配 API Key");
+    return;
+  }
+  const p = r.product || {};
+  $("buy-info").textContent =
+    `余额 ¥${r.balance ?? "?"} · ${p.name || "sku " + (p.sku_id || "?")}` +
+    ` · ¥${p.price ?? "?"}/个 · 库存 ${p.stock ?? "?"}` +
+    (r.drained ? ` · 已补拉 ${r.drained} 单` : "") +
+    (r.pending ? ` · ${r.pending} 单处理中` : "");
+};
+$("buy-close").onclick = () =>
+  $("buy-box").style.display = "none";
+$("buy-go").onclick = async e => {
+  const qty = parseInt($("buy-qty").value) || 1;
+  e.target.disabled = true;
+  $("buy-msg").textContent = "下单 + 等发货中 (≤2分钟)…";
+  const r = await post("/api/accounts/buy", { quantity: qty })
+    .catch(() => null);
+  e.target.disabled = false;
+  if (!r) { $("buy-msg").textContent = "✗ 请求失败"; return; }
+  if (r.error) { $("buy-msg").textContent = "✗ " + r.error; return; }
+  $("buy-msg").textContent = `✓ 导入 ${r.added} 个` +
+    (r.dup ? ` · 重复跳过 ${r.dup}` : "") +
+    (r.bad && r.bad.length ? ` · ${r.bad.length} 行无法识别` : "");
+  toast("✓ 进货完成");
+  await load();
+};
+$("buy-retry").onclick = async e => {
+  const ono = $("buy-ordno").value.trim();
+  if (!ono) return toast("先粘贴 order_no");
+  e.target.disabled = true;
+  $("buy-msg").textContent = "查询订单中…";
+  const r = await post("/api/accounts/buy", { order_no: ono })
+    .catch(() => null);
+  e.target.disabled = false;
+  if (!r) { $("buy-msg").textContent = "✗ 请求失败"; return; }
+  if (r.error) { $("buy-msg").textContent = "✗ " + r.error; return; }
+  $("buy-msg").textContent = `✓ 导入 ${r.added} 个` +
+    (r.dup ? ` · 重复跳过 ${r.dup}` : "");
+  $("buy-ordno").value = "";
+  toast("✓ 补拉完成");
   await load();
 };
 

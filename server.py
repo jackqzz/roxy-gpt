@@ -14,6 +14,7 @@ import secrets
 import socket
 import ssl
 import struct
+import subprocess
 import sys
 import threading
 import time
@@ -1062,6 +1063,7 @@ def _fetch_mail_code(mail_url, upstream, log,
         try:
             code, err = _mail_code_once(mail_url, upstream)
             if err == "dead":
+                _shop_aftersale(mail_url)   # 602 → 自动售后退款
                 return "dead"
             if code:
                 last_seen = code
@@ -1071,6 +1073,236 @@ def _fetch_mail_code(mail_url, upstream, log,
             log(f"  取码请求失败: {str(e)[:60]}")
         time.sleep(interval)
     return last_seen       # 兜底: 到超时仍只有旧码也返回, 让页面判定
+
+
+# ---------------- 邮箱商城 (qan8) —— gmail API 邮箱进货 ----------------
+# 谷歌邮箱API业务·Chatgpt (默认 sku 156): 发货 = email----接码链接,
+# 正好喂 _parse_account_line 入库。简易接口 /api/v1/open/* 全走
+# api_key; 接码接口回 602 时 /api/after-sales/check 按 uid 自动售后。
+_SHOP_BASE = "https://shop.qan8.com"
+_SHOP_AS_DONE = set()                 # 已报过售后的 uid (内存去重)
+SHOP_PENDING_KEY = "shop_pending"     # settings 里的未完成订单队列
+
+
+def _shop_key():
+    return (_settings().get("shop_key") or "").strip()
+
+
+def _shop_sku():
+    return (_settings().get("shop_sku") or "156").strip() or "156"
+
+
+def _shop_is_cf(st, body):
+    """Cloudflare 托管挑战页 (Just a moment / challenges.cloudflare.com)。"""
+    return st == 403 and isinstance(body, bytes) and \
+        (b"Just a moment" in body or b"challenges.cloudflare.com" in body)
+
+
+def _shop_err(st, j, body):
+    msg = None
+    if isinstance(j, dict):
+        msg = j.get("message") or \
+            (j.get("error") or {}).get("message")
+    return (msg or "HTTP %d %s"
+            % (st, body.decode(errors="ignore")[:100]))[:200]
+
+
+def _shop_get(path, timeout=20):
+    """简易接口 GET -> (data|None, err|None)。经上级代理出网;
+    CF 挑战/网络抖动退避重试 2 次。"""
+    last = "请求失败"
+    for attempt in range(3):
+        try:
+            st, body = _https_status_get(
+                _SHOP_BASE + path, _upstream(), timeout)
+        except Exception as e:
+            last = str(e)[:150]
+            time.sleep(3)
+            continue
+        if _shop_is_cf(st, body):
+            last = "Cloudflare 拦截 (出口 IP 被风控) —— 稍后再试"
+            time.sleep(4)
+            continue
+        try:
+            j = json.loads(body.decode(errors="ignore") or "{}")
+        except Exception:
+            last = "响应非 JSON: " + body.decode(errors="ignore")[:80]
+            break
+        if not 200 <= st < 300 or j.get("success") is False:
+            last = _shop_err(st, j, body)
+            break
+        return j.get("data") if isinstance(j, dict) else j, None
+    return None, last
+
+
+def _shop_post(path, payload, timeout=30):
+    """简易接口 POST (api_key 进 body) -> (data|None, err|None);
+    CF 挑战/网络抖动退避重试 2 次。"""
+    payload = dict(payload)
+    payload["api_key"] = _shop_key()
+    last = "请求失败"
+    for attempt in range(3):
+        try:
+            st, body = _http_post_json(
+                _SHOP_BASE + path, payload, upstream=_upstream(),
+                timeout=timeout)
+        except Exception as e:
+            last = str(e)[:150]
+            time.sleep(3)
+            continue
+        if _shop_is_cf(st, body):
+            last = "Cloudflare 拦截 (出口 IP 被风控) —— 稍后再试"
+            time.sleep(4)
+            continue
+        try:
+            j = json.loads(body.decode(errors="ignore") or "{}")
+        except Exception:
+            last = "响应非 JSON: " + body.decode(errors="ignore")[:80]
+            break
+        if not 200 <= st < 300 or j.get("success") is False:
+            last = _shop_err(st, j, body)
+            break
+        return j.get("data") if isinstance(j, dict) else j, None
+    return None, last
+
+
+def _shop_find(j, key):
+    """响应嵌套里递归找第一个同名 key 的值 (订单/发货字段层级
+    文档没钉死, 宽容取值)。"""
+    if isinstance(j, dict):
+        if j.get(key) is not None:
+            return j[key]
+        for v in j.values():
+            r = _shop_find(v, key)
+            if r is not None:
+                return r
+    elif isinstance(j, list):
+        for v in j:
+            r = _shop_find(v, key)
+            if r is not None:
+                return r
+    return None
+
+
+def _shop_delivery_lines(d):
+    """delivery -> [行]。兼容 str 多行 / list[str] / list[dict]
+    / 嵌套 dict 几种返回形态。"""
+    if isinstance(d, str):
+        return d.splitlines()
+    out = []
+    if isinstance(d, list):
+        for it in d:
+            if isinstance(it, str):
+                out.append(it)
+            elif isinstance(it, dict):
+                out.append(str(it.get("content") or it.get("card")
+                                 or it.get("delivery") or it))
+    elif isinstance(d, dict):
+        for v in d.values():
+            out += _shop_delivery_lines(v)
+    return out
+
+
+def _shop_import_delivery(delivery):
+    """发货内容逐行 _parse_account_line 入库。
+    没有接码链接的行对这商城没意义 —— 计入 bad。
+    返回 (added, dup, bad_lines)。"""
+    accs = _load_accounts()
+    seen = {a["email"] for a in accs}
+    added, dup, bad = 0, 0, []
+    for line in _shop_delivery_lines(delivery):
+        d, err = _parse_account_line(line)
+        if err in ("empty", "comment"):
+            continue
+        if err or not d.get("mail_url"):
+            bad.append(line.strip()[:80])
+            continue
+        if d["email"] in seen:
+            dup += 1
+            continue
+        seen.add(d["email"])
+        accs.append(_new_account(**d))
+        added += 1
+    if added:
+        _save_accounts(accs)
+    return added, dup, bad
+
+
+def _shop_poll_order(order_no):
+    """查单 -> (delivery|None, status, err)。
+    status: completed/processing/failed。"""
+    d, err = _shop_get("/api/v1/open/orders/%s?api_key=%s"
+                       % (order_no, _shop_key()))
+    if err:
+        return None, None, err
+    status = _shop_find(d, "status") or "processing"
+    if status == "completed":
+        return _shop_find(d, "delivery"), status, None
+    if status == "failed":
+        return None, status, \
+            (_shop_find(d, "message") or "订单失败")
+    return None, status, None
+
+
+def _shop_pending():
+    return list(_settings().get(SHOP_PENDING_KEY) or [])
+
+
+def _shop_pending_save(lst):
+    s = _settings()
+    s[SHOP_PENDING_KEY] = lst[-20:]
+    _save_settings(s)
+
+
+def _shop_drain_pending(log=None):
+    """补拉挂单: completed 的导入并摘除, failed 的摘除,
+    其余留队。返回 (补拉数, 剩余数)。"""
+    lst = _shop_pending()
+    if not lst:
+        return 0, 0
+    left, drained = [], 0
+    for o in lst:
+        ono = o.get("order_no")
+        dlv, status, err = _shop_poll_order(ono)
+        if dlv:
+            a, d2, b = _shop_import_delivery(dlv)
+            drained += 1
+            if log:
+                log("  补拉订单 %s: 导入 %d (重复%d 无效%d)"
+                    % (ono, a, d2, len(b)))
+        elif status == "failed":
+            drained += 1
+            if log:
+                log("  订单 %s failed: %s" % (ono, err))
+        else:
+            # out_order_no 挂的单若查单接口不认会永远 404 ——
+            # 限 20 次补拉后移除 (单号留在错误提示里, 可去会员中心手动查)
+            o["tries"] = (o.get("tries") or 0) + 1
+            if o["tries"] <= 20:
+                left.append(o)
+            elif log:
+                log("  挂单 %s 补拉 %d 次仍无货, 移出队列"
+                    % (ono, o["tries"]))
+    _shop_pending_save(left)
+    return drained, len(left)
+
+
+def _shop_aftersale(mail_url):
+    """接码链回 602 → 按 uid 自动申请售后退款。
+    uid 内存去重只报一次; 没配商城 key 或链接没 uid 时静默跳过。"""
+    if not _shop_key():
+        return
+    m = re.search(r"[?&]uid=([^&\s]+)", mail_url or "")
+    uid = m.group(1) if m else ""
+    if not uid or uid in _SHOP_AS_DONE:
+        return
+    _SHOP_AS_DONE.add(uid)
+    try:
+        _http_post_json(_SHOP_BASE + "/api/after-sales/check",
+                        {"uid": uid}, upstream=_upstream(),
+                        timeout=15)
+    except Exception:
+        pass
 
 
 # ---------------- 接码监听 (半自动模式用) ----------------
@@ -1087,6 +1319,7 @@ def _mail_watch(a):
     try:
         c0, e0 = _mail_code_once(murl, up)
         if e0 == "dead":
+            _shop_aftersale(murl)           # 602 → 自动售后退款
             MAIL_WATCH[aid].update(running=False, dead=True,
                                    ts_done=time.time())
             return
@@ -1100,6 +1333,7 @@ def _mail_watch(a):
         try:
             c, e = _mail_code_once(murl, up)
             if e == "dead":
+                _shop_aftersale(murl)       # 602 → 自动售后退款
                 MAIL_WATCH[aid].update(running=False, dead=True,
                                        ts_done=time.time())
                 return
@@ -2434,6 +2668,30 @@ def _ios_reg_worker(ids):
         IOS_JOB["running"] = False
         log("—— iOS 注册结束 ——"
             + (" (手动停止)" if IOS_JOB["stop"] else ""))
+        # 设置「iOS注册完毕后自动开窗」: 整批结束后对本批注册
+        # 成功的账号统一开窗 (注册中不逐个开)。手动停止的批次
+        # 不算"完毕", 不触发。
+        if _settings().get("ios_auto_open") \
+                and not IOS_JOB["stop"]:
+            if OPEN_JOB["running"]:
+                log("… 自动开窗: 开窗任务在跑, 跳过")
+            else:
+                ready = [a for a in _load_accounts()
+                         if a["id"] in set(ids)
+                         and a.get("reg") in ("new", "yes")
+                         and not a.get("archived")]
+                if not ready:
+                    log("… 自动开窗: 本批没有注册成功的账号")
+                else:
+                    if len(ready) > 50:
+                        log("… 自动开窗: %d 个成功, 单次上限 50,"
+                            " 其余请手动开窗" % len(ready))
+                        ready = ready[:50]
+                    log("… 自动开窗: %d 个注册成功账号开窗中"
+                        % len(ready))
+                    threading.Thread(target=_open_worker,
+                                     args=(ready,), daemon=True
+                                     ).start()
 
 
 # ---------------- 协议 PAT 检测 (不开窗) ----------------
@@ -3772,6 +4030,34 @@ def _mark_left(a, ws_id, wsn):
                         if w.get("id") != ws_id]
 
 
+def _archive_one(a):
+    """归档一个账号 dict: 停接码/资料监听 + 删 Roxy 窗口
+    (释放配额) + 标记。与 /api/accounts/archive 单账号同逻辑;
+    调用方负责 _save_accounts 落盘。返回窗口删除 err|None。"""
+    a["archived"] = True
+    a["archived_at"] = _now()
+    w = MAIL_WATCH.pop(a["id"], None)
+    if w:
+        w["stop"] = True
+    PROF_WATCH.pop(a["id"], None)
+    e = None
+    if a.get("win"):
+        e = _roxy_delete_window(a["win"])
+        a["win"] = None
+    return e
+
+
+def _leave_autoarchive(a, email, log):
+    """设置「退出空间后自动关闭浏览器窗口并归档」"""
+    if not _settings().get("leave_autoclose"):
+        return
+    e = _archive_one(a)
+    if e:
+        log("… %s: 退出后归档, 删窗失败 %s" % (email, e))
+    else:
+        log("… %s: 退出后已关窗+归档" % email)
+
+
 def _proto_leave_ws(a, p, ws_id):
     """纯协议退出: ios.at + 账号代理(链式) + chrome指纹, 不开窗。
     返回 (ok, wsn, code, detail)。code: at_expired/not_member/
@@ -3984,6 +4270,7 @@ def _leave_worker(ids, ws_name=None, pairs=None):
                             log("✓ %s: 已退出 %s (%s) [协议%s]"
                                 % (email, wsn, target[:8],
                                    "·刷新" if refreshed else ""))
+                            _leave_autoarchive(a, email, log)
                             continue
                         if code == "not_member":
                             LEAVE_JOB["results"][aid] = \
@@ -4033,6 +4320,7 @@ def _leave_worker(ids, ws_name=None, pairs=None):
                                 "已退 %s (%s)" % (wsn, target[:8])
                             log("✓ %s: 已退出 %s (%s)"
                                 % (email, wsn, target[:8]))
+                            _leave_autoarchive(a, email, log)
                         elif code == "no_token":
                             LEAVE_JOB["results"][aid] = "窗口未登录"
                             log("✗ %s: 窗口未登录" % email)
@@ -4076,17 +4364,65 @@ def _leave_worker(ids, ws_name=None, pairs=None):
             + (" (手动停止)" if LEAVE_JOB["stop"] else ""))
 
 
-def _roxy_close_window(dir_id):
-    """只关浏览器进程 —— 窗口配置留着 (不删, 下次 open 秒起)。"""
+def _roxy_win_pids(dir_id):
+    """该窗口还在跑的进程 pid —— 按启动参数里的
+    --user-data-dir=…/browser-cache/<dirId> 特征匹配。"""
+    try:
+        out = subprocess.check_output(
+            ["pgrep", "-f", "browser-cache/" + dir_id],
+            stderr=subprocess.DEVNULL)
+        return [int(x) for x in out.split() if x.strip()]
+    except Exception:
+        return []
+
+
+def _roxy_win_exists(dir_id):
+    """list_v3 里还有没有这个窗口 (delete 后复查用)。
+    None=查询挂了无法判断。"""
     cfg = _roxy_cfg()
-    return _roxy_call("/browser/close",
-                      {"workspaceId": cfg["workspace_id"],
-                       "dirId": dir_id}, timeout=30).get("error")
+    r = _roxy_call(f"/browser/list_v3?page_index=1&page_size=100"
+                   f"&workspaceId={cfg['workspace_id']}")
+    if r.get("error"):
+        return None
+    return any(w.get("dirId") == dir_id
+               for w in (r.get("data") or {}).get("rows") or [])
+
+
+def _roxy_close_window(dir_id):
+    """只关浏览器进程 —— 窗口配置留着 (不删, 下次 open 秒起)。
+    Roxy 这版 /browser/close 会假成功 (code 0 但进程不死),
+    所以调用后验尸: 还在跑就按 user-data-dir 特征 TERM→KILL。"""
+    cfg = _roxy_cfg()
+    err = _roxy_call("/browser/close",
+                     {"workspaceId": cfg["workspace_id"],
+                      "dirId": dir_id}, timeout=30).get("error")
+    if err:
+        return err
+    pids = _roxy_win_pids(dir_id)
+    if not pids:
+        return None                     # 真关了
+    for pid in pids:                    # 假成功 → 自己杀
+        try:
+            os.kill(pid, 15)
+        except Exception:
+            pass
+    time.sleep(1.5)
+    pids = _roxy_win_pids(dir_id)
+    if pids:
+        for pid in pids:
+            try:
+                os.kill(pid, 9)
+            except Exception:
+                pass
+        time.sleep(0.8)
+    return None if not _roxy_win_pids(dir_id) \
+        else "窗口进程杀不掉"
 
 
 def _roxy_delete_window(dir_id):
     """关+删一个 Roxy 窗口 (先 close 再 delete, dirIds 是数组)。
-    返回 err|None —— 尽力而为, 调用方不因此中断。"""
+    返回 err|None —— 尽力而为, 调用方不因此中断。
+    delete 也复查 list_v3 —— 这版 API 假成功不止 close 一个。"""
     cfg = _roxy_cfg()
     _roxy_close_window(dir_id)
     r = _roxy_call("/browser/delete",
@@ -4095,7 +4431,12 @@ def _roxy_delete_window(dir_id):
     err = r.get("error")
     if err and "不存在" in err:
         return None          # 已经没了 = 目标达成, 不算失败
-    return err
+    if err:
+        return err
+    time.sleep(0.5)
+    if _roxy_win_exists(dir_id):
+        return "删除后窗口仍在 (Roxy delete 假成功)"
+    return None
 
 
 # ---------------- CPA 号池 (CLIProxyAPI) ----------------
@@ -5699,7 +6040,44 @@ class H(BaseHTTPRequestHandler):
                 "cpa_url": s.get("cpa_url") or "",
                 "cpa_key": s.get("cpa_key") or "",
                 "cpa_autopush": s.get("cpa_autopush", True),
-                "cred_proxy": s.get("cred_proxy", True)})
+                "cred_proxy": s.get("cred_proxy", True),
+                "shop_key": s.get("shop_key") or "",
+                "shop_sku": s.get("shop_sku") or "156",
+                "ios_auto_open": s.get("ios_auto_open", False),
+                "leave_autoclose": s.get("leave_autoclose", False)})
+        if self.path == "/api/shop/info":
+            # 商城余额 + 配置的 sku 实况; 顺带补拉滞留挂单
+            if not _shop_key():
+                return self._json(
+                    {"error": "先到设置页填商城 API Key"})
+            bal, berr = _shop_get(
+                "/api/v1/open/balance?api_key=" + _shop_key())
+            prod, perr = None, None
+            plist, _e = _shop_get("/api/v1/open/products")
+            if isinstance(plist, list):
+                prod = next((x for x in plist
+                             if str(x.get("sku_id"))
+                             == _shop_sku()), None)
+                if prod is None:
+                    perr = "商品列表里没有 sku %s" % _shop_sku()
+            else:
+                perr = _e or "商品列表异常"
+            drained, left = _shop_drain_pending()
+            out = {"balance": _shop_find(bal, "balance"),
+                   "drained": drained, "pending": left}
+            if prod:
+                out["product"] = {"sku_id": prod.get("sku_id"),
+                                  "name": prod.get("name"),
+                                  "price": prod.get("price"),
+                                  "stock": prod.get("stock")}
+            if berr:
+                out["balance_err"] = berr
+            if perr:
+                out["product_err"] = perr
+            if bal is None and prod is None:
+                return self._json(
+                    {"error": berr or perr or "商城接口全挂"})
+            return self._json(out)
         if self.path == "/api/accounts":
             accs = _load_accounts()
             _oauth_expire(accs)   # pending 超时 → expired
@@ -6131,7 +6509,8 @@ class H(BaseHTTPRequestHandler):
                       "step_watch", "step_gen", "step_email",
                       "step_code", "step_password", "step_profile",
                       "cpa_url", "cpa_key", "cpa_autopush",
-                      "cred_proxy"):
+                      "cred_proxy", "shop_key", "shop_sku",
+                      "ios_auto_open", "leave_autoclose"):
                 if k in req:
                     s[k] = req[k]
             _save_settings(s)
@@ -6202,6 +6581,64 @@ class H(BaseHTTPRequestHandler):
                 _save_accounts(accs)
             return self._json({"ok": True, "added": added,
                                "dup": dup, "bad": bad})
+        if self.path == "/api/accounts/buy":
+            # 商城进货: 下单 → 轮询等发货(≤2min) → delivery 逐行入库。
+            # 超时未发货存 shop_pending 挂单, 下次 /api/shop/info 自动补拉。
+            req = self._body()
+            if not _shop_key():
+                return self._json(
+                    {"error": "先到设置页填商城 API Key"})
+            try:
+                qty = max(1, min(5000,
+                                 int(req.get("quantity") or 1)))
+            except Exception:
+                qty = 1
+            order_no = (req.get("order_no") or "").strip()
+            if not order_no:
+                oono = "roxy-%d-%s" % (int(time.time()),
+                                       uuid.uuid4().hex[:6])
+                d, err = _shop_post("/api/v1/open/orders", {
+                    "sku_id": _shop_sku(), "quantity": qty,
+                    "out_order_no": oono})
+                if err:
+                    return self._json({"error": "下单失败: " + err})
+                order_no = _shop_find(d, "order_no")
+            if not order_no:
+                # 钱可能已扣但单子号丢了 —— 把 out_order_no 存进挂单,
+                # 查单接口若认它则自动补回; 不认也能拿它去会员中心找单。
+                _shop_pending_save(_shop_pending() + [{
+                    "order_no": oono, "qty": qty, "at": _now(),
+                    "kind": "out_order_no"}])
+                return self._json(
+                    {"error": "下单成功但响应没带 order_no "
+                              "(商户单号 %s 已存挂单, "
+                              "也可去商城会员中心查单)"
+                              % oono})
+            dlv, status = None, "processing"
+            for _ in range(40):
+                dlv, status, perr = _shop_poll_order(order_no)
+                if dlv or status == "failed":
+                    break
+                if status is None and perr:
+                    break   # 硬错 (如订单不存在) 别空转 2 分钟
+                time.sleep(3)
+            if not dlv:
+                if status != "failed":
+                    _shop_pending_save(_shop_pending() + [{
+                        "order_no": order_no, "qty": qty,
+                        "at": _now()}])
+                return self._json({
+                    "error": "订单 %s %s%s"
+                             % (order_no,
+                                status or perr or "处理中",
+                                "" if status == "failed"
+                                else " —— 已存挂单, "
+                                     "打开购买面板时自动补拉"),
+                    "order_no": order_no})
+            added, dup, bad = _shop_import_delivery(dlv)
+            return self._json({"ok": True, "order_no": order_no,
+                               "added": added, "dup": dup,
+                               "bad": bad})
         if self.path == "/api/accounts/archive":
             # 归档 = 关/删 Roxy 窗口释放配额 + 停接码监听, 记录留着。
             # 代理绑定保留 —— 恢复开窗还是同一条 IP。
@@ -6212,17 +6649,9 @@ class H(BaseHTTPRequestHandler):
             for a in accs:
                 if a["id"] not in ids or a.get("archived"):
                     continue
-                a["archived"] = True
-                a["archived_at"] = _now()
-                w = MAIL_WATCH.pop(a["id"], None)
-                if w:
-                    w["stop"] = True
-                PROF_WATCH.pop(a["id"], None)
-                if a.get("win"):
-                    e = _roxy_delete_window(a["win"])
-                    a["win"] = None
-                    if e:
-                        werr.append(f"{a['email']}: {e}")
+                e = _archive_one(a)
+                if e:
+                    werr.append(f"{a['email']}: {e}")
                 n += 1
             _save_accounts(accs)
             return self._json({"ok": True, "archived": n,
