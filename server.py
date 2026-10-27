@@ -4329,7 +4329,8 @@ def _oauth_exchange(p, code, verifier):
 
 def _oauth_cred(j, proxy_url):
     """token 响应 → CPA codex 凭证 JSON (字段照 CodexTokenStorage,
-    带 proxy_url —— 池子消费凭证时继续走同一 IP)。"""
+    带 proxy_url —— 池子消费凭证时继续走同一 IP)。
+    proxy_url=None 时键整个省略 (设置 cred_proxy 关)。"""
     idt = j.get("id_token") or ""
     cl = _jwt_claims(idt)
     auth = cl.get("https://api.openai.com/auth") or {}
@@ -4337,7 +4338,7 @@ def _oauth_cred(j, proxy_url):
     exp = now + int(j.get("expires_in") or 0)
     rfc = lambda t: time.strftime("%Y-%m-%dT%H:%M:%SZ",
                                   time.gmtime(t))
-    return {
+    cred = {
         "id_token": idt,
         "access_token": j.get("access_token") or "",
         "refresh_token": j.get("refresh_token") or "",
@@ -4347,8 +4348,10 @@ def _oauth_cred(j, proxy_url):
         "type": "codex",
         "expired": rfc(exp),
         "plan_type": auth.get("chatgpt_plan_type") or "free",
-        "proxy_url": proxy_url,
     }
+    if proxy_url:
+        cred["proxy_url"] = proxy_url
+    return cred
 
 
 def _cred_name(cred):
@@ -4579,9 +4582,12 @@ def _cpa_worker(ids):
                             CPA_JOB["results"][aid] = "换token: " + err
                             log("✗ %s: %s" % (email, err))
                             continue
-                        # 4) 组 CPA 凭证 JSON (proxy_url=账号代理)
+                        # 4) 组 CPA 凭证 JSON (proxy_url=账号代理,
+                        #    设置 cred_proxy 关则不带)
                         cred = _oauth_cred(
-                            j, _proxy_url(p, "url"))
+                            j, _proxy_url(p, "url")
+                            if _settings().get("cred_proxy", True)
+                            else None)
                         a["cred"] = cred
                         a["cred_file"] = _cred_name(cred)
                         a["cred_at"] = _now()
@@ -4833,7 +4839,8 @@ def _gcred(j, email, pid, proxy_url):
     """token 响应 → CPA antigravity 凭证 JSON (照池内现存文件格式)。
     pid 拿不到时整个 project_id 键省略 —— 写 "" 会让 CPA 的
     ensureAntigravityProjectID (!=nil 判断) 永不懒取; 键缺席才会
-    在下次刷新时用 access_token 重查补上。"""
+    在下次刷新时用 access_token 重查补上。
+    proxy_url=None 时键省略 (G设置 cred_proxy 关)。"""
     now = time.time()
     cred = {
         "type": "antigravity",
@@ -4845,8 +4852,9 @@ def _gcred(j, email, pid, proxy_url):
                                  time.gmtime(
                                      now + int(j.get("expires_in")
                                                or 0))),
-        "timestamp": int(now * 1000),
-        "proxy_url": proxy_url}
+        "timestamp": int(now * 1000)}
+    if proxy_url:
+        cred["proxy_url"] = proxy_url
     if pid:
         cred["project_id"] = pid
     return cred
@@ -4894,7 +4902,10 @@ def _goauth_finish(p, a, code, log):
             "CPA 首刷时自补" % err)
     else:
         a.pop("cred_warn", None)
-    cred = _gcred(j, a["email"], pid or "", _proxy_url(p, "url"))
+    cred = _gcred(j, a["email"], pid or "",
+                  _proxy_url(p, "url")
+                  if _gsettings().get("cred_proxy", True)
+                  else None)
     a["cred"] = cred
     a["cred_file"] = _gcred_name(cred)
     a["cred_at"] = _now()
@@ -5687,7 +5698,8 @@ class H(BaseHTTPRequestHandler):
                 "step_profile": s.get("step_profile", True),
                 "cpa_url": s.get("cpa_url") or "",
                 "cpa_key": s.get("cpa_key") or "",
-                "cpa_autopush": s.get("cpa_autopush", True)})
+                "cpa_autopush": s.get("cpa_autopush", True),
+                "cred_proxy": s.get("cred_proxy", True)})
         if self.path == "/api/accounts":
             accs = _load_accounts()
             _oauth_expire(accs)   # pending 超时 → expired
@@ -5854,7 +5866,8 @@ class H(BaseHTTPRequestHandler):
                 "open_env": s.get("open_env") or "pc-random",
                 "cpa_url": s.get("cpa_url") or "",
                 "cpa_key": s.get("cpa_key") or "",
-                "cpa_autopush": s.get("cpa_autopush", True)})
+                "cpa_autopush": s.get("cpa_autopush", True),
+                "cred_proxy": s.get("cred_proxy", True)})
         m = re.fullmatch(r"/api/g/accounts/([0-9a-f-]+)/cred",
                          self.path)
         if m:
@@ -6117,7 +6130,8 @@ class H(BaseHTTPRequestHandler):
                       "oauth_ttl_min", "open_workers", "open_env",
                       "step_watch", "step_gen", "step_email",
                       "step_code", "step_password", "step_profile",
-                      "cpa_url", "cpa_key", "cpa_autopush"):
+                      "cpa_url", "cpa_key", "cpa_autopush",
+                      "cred_proxy"):
                 if k in req:
                     s[k] = req[k]
             _save_settings(s)
@@ -6686,7 +6700,9 @@ class H(BaseHTTPRequestHandler):
             if err:
                 return self._json(
                     {"error": "换token失败: " + err})
-            cred = _oauth_cred(j, _proxy_url(p, "url"))
+            cred = _oauth_cred(
+                j, _proxy_url(p, "url")
+                if _settings().get("cred_proxy", True) else None)
             a["cred"] = cred
             a["cred_file"] = _cred_name(cred)
             a["cred_at"] = _now()
@@ -6826,7 +6842,7 @@ class H(BaseHTTPRequestHandler):
                 s["upstream_proxy"] = raw
             for k in ("proxy_cool_min", "oauth_ttl_min",
                       "cpa_url", "cpa_key", "cpa_autopush",
-                      "open_env"):
+                      "cred_proxy", "open_env"):
                 if k in req:
                     s[k] = req[k]
             _save_gsettings(s)

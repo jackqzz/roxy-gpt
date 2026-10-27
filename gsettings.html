@@ -28,6 +28,8 @@
     <div class="row" style="margin-top:8px">
       <label style="display:flex;align-items:center;gap:6px;font-size:13px" title="OAuth 凭证生成成功后自动推入 CPA 池 —— 关掉就只备好凭证, 手动「推入池」">
         <input type="checkbox" id="cpa-autopush">OAuth 完成自动推入池</label>
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px" title="凭证 JSON 里带 proxy_url=账号代理 —— CPA 消费/刷新时走同 IP。关掉则凭证不带代理, 只对之后生成的凭证生效">
+        <input type="checkbox" id="cred-proxy">凭证内嵌代理 (proxy_url)</label>
     </div>
     <div class="hint">
       与 GPT 侧的 CPA 配置独立 —— Google 凭证可以推到另一个池。
@@ -85,6 +87,7 @@ async function load() {
   $("cpa-url").value = r.cpa_url || "";
   $("cpa-key").value = r.cpa_key || "";
   $("cpa-autopush").checked = r.cpa_autopush !== false;
+  $("cred-proxy").checked = r.cred_proxy !== false;
   $("pc-cool").value = r.proxy_cool_min ?? 20;
   $("pc-oauth-ttl").value = r.oauth_ttl_min ?? 10;
 }
@@ -93,7 +96,8 @@ $("cpa-save").onclick = async () => {
   const r = await post(API,
     { cpa_url: $("cpa-url").value.trim(),
       cpa_key: $("cpa-key").value.trim(),
-      cpa_autopush: $("cpa-autopush").checked });
+      cpa_autopush: $("cpa-autopush").checked,
+      cred_proxy: $("cred-proxy").checked });
   if (r.error) return toast("✗ " + r.error);
   $("cpa-msg").textContent = "✓ 已保存";
   toast("✓ CPA 配置已存");
