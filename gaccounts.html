@@ -72,7 +72,10 @@
     </div>
     <div class="toolbar-row">
       <button class="btn btn-outline btn-sm" id="oauth-sel" title="本地算 Google OAuth 链接 → 开(原/同IP新) gauto- 窗口授权 → :51121 常驻接收器自动接回调(手动贴也支持) → 经账号代理换token+project_id → 生成 antigravity 凭证"><i data-ic="key"></i>OAuth授权</button>
-      <button class="btn btn-outline btn-sm" id="cpa-push" title="把已生成的 antigravity 凭证 JSON 推入 CPA 号池 (auth-files)"><i data-ic="cloud-upload"></i>推入池</button>
+      <span class="dd">
+        <button class="btn btn-outline btn-sm" id="cpa-push" title="把已生成的 antigravity 凭证 JSON 推入 CPA 号池 (auth-files) —— 下拉多选目标号池"><i data-ic="cloud-upload"></i>推入池 ▾</button>
+        <div class="dd-menu" id="cpa-dd-menu" style="display:none"></div>
+      </span>
       <button class="btn btn-outline btn-sm" id="cpa-export" title="导出选中账号的凭证 JSON (zip 打包)"><i data-ic="download"></i>导凭证</button>
       <span class="tb-sep"></span>
       <button class="btn btn-outline btn-sm" id="del-sel" title="归档 = 删掉 gauto- 窗口释放配额, 账号记录+凭证+代理绑定保留"><i data-ic="archive"></i>归档选中</button>
@@ -97,19 +100,19 @@
   </div>
 
   <div class="table-card">
-    <table class="data-table">
+    <table class="data-table sticky-id">
       <thead>
         <tr>
           <th style="width:36px"><input type="checkbox" id="ck-all"></th>
           <th style="width:44px">#</th>
           <th>邮箱</th>
-          <th style="width:110px">密码</th>
+          <th style="width:96px">密码</th>
           <th style="width:190px">绑定代理</th>
-          <th style="width:90px">窗口</th>
-          <th style="width:110px">状态</th>
-          <th style="width:110px">凭证</th>
+          <th style="width:70px">窗口</th>
+          <th style="width:92px">状态</th>
+          <th style="width:96px">凭证</th>
           <th>备注/附加</th>
-          <th style="width:150px;text-align:right">操作</th>
+          <th style="text-align:right">操作</th>
         </tr>
       </thead>
       <tbody id="tbody"></tbody>
@@ -234,7 +237,7 @@ function render() {
       return h;
     })();
     const cpa = a.cpa === "yes"
-      ? `<a class="pill pill-ok" href="/api/g/accounts/${a.id}/cred" title="已入CPA池 ${esc(a.cpa_at||"")} —— 点下载凭证 ${esc(a.cred_file||"")}">已入池</a>`
+      ? `<a class="pill pill-ok" href="/api/g/accounts/${a.id}/cred" title="已入CPA池 ${esc(a.cpa_at||"")}${(a.cpa_pools||[]).length ? " · " + esc(a.cpa_pools.join(" + ")) : ""} —— 点下载凭证 ${esc(a.cred_file||"")}">已入池${(a.cpa_pools||[]).length > 1 ? "×" + a.cpa_pools.length : ""}</a>`
       : a.cpa === "ready"
         ? `<a class="pill" style="background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe" href="/api/g/accounts/${a.id}/cred" title="凭证已备好 ${esc(a.cred_at||"")} · project ${esc((a.cred||{}).project_id||"缺·CPA首刷自补")}${a.cred_warn ? " ⚠ " + esc(a.cred_warn) : ""} —— 点下载, 勾选后推入池">已生成${a.cred_warn ? "⚠" : ""}</a>`
         : a.cpa === "pending"
@@ -270,7 +273,7 @@ function render() {
       <td>${win}</td>
       <td>${st}</td>
       <td>${cpa}</td>
-      <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(a.note || a.extra || "")}">${esc(a.note || a.extra || "")}</td>
+      <td style="max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(a.note || a.extra || "")}">${esc(a.note || a.extra || "")}</td>
       <td style="text-align:right;white-space:nowrap">${acts}</td>
     </tr>`;
   }).join("") || `<tr><td colspan="10" style="text-align:center;color:var(--text-dim);padding:32px">暂无账号 —— 点右上角「导入账号」</td></tr>`;
@@ -503,17 +506,57 @@ $("oauth-sel").onclick = e => {
   if (!sel.size) return toast("先勾选账号");
   startOauth([...sel], e.target);
 };
-$("cpa-push").onclick = async e => {
-  if (!sel.size) return toast("先勾选有凭证的账号");
-  e.target.disabled = true;
-  const r = await post("/api/g/cpa-push", { ids: [...sel] });
-  e.target.disabled = false;
-  if (r.error) return toast("✗ " + r.error);
-  const f = r.failed
-    ? " · 失败 " + Object.keys(r.failed).length + "个" : "";
-  toast(`✓ 推入池 ${r.ok} 个${f}`);
-  load();
+// ---- 推入池: 下拉多选号池 + 推送按钮 ----
+function cpaMenu() {
+  const m = $("cpa-dd-menu");
+  if (!cpaPools.length) {
+    m.innerHTML = `<div class="dd-empty">未配置 CPA 号池 —— 到 G设置页「添加号池」</div>`;
+    return;
+  }
+  m.innerHTML = `<div class="dd-head">推送到号池（可多选）</div>`
+    + cpaPools.map((p, i) =>
+      `<label class="dd-opt"><input type="checkbox" class="pp-cb" value="${esc(p.name)}" ${i === 0 ? "checked" : ""}><span>${esc(p.name)}</span><span class="dd-url">${esc(p.url)}</span></label>`).join("")
+    + `<div class="dd-foot"><button class="btn btn-ghost btn-sm" id="pp-all" title="切换全选/全不选">全选</button><span style="flex:1"></span><button class="btn btn-primary btn-sm" id="pp-go">推送</button></div>`;
+}
+$("cpa-push").onclick = e => {
+  e.stopPropagation();
+  const m = $("cpa-dd-menu");
+  if (m.style.display !== "none") { m.style.display = "none"; return; }
+  cpaMenu();
+  m.style.display = "block";
 };
+document.addEventListener("click", e => {
+  const m = $("cpa-dd-menu");
+  if (m && m.style.display !== "none" && !e.target.closest(".dd"))
+    m.style.display = "none";
+});
+$("cpa-dd-menu").addEventListener("click", e => {
+  if (e.target.closest("#pp-all")) {
+    const cbs = [...$("cpa-dd-menu").querySelectorAll(".pp-cb")];
+    const all = cbs.length && cbs.every(c => c.checked);
+    cbs.forEach(c => c.checked = !all);
+    return;
+  }
+  if (e.target.closest("#pp-go")) doCpaPush();
+});
+async function doCpaPush() {
+  if (!sel.size) return toast("先勾选有凭证的账号");
+  const pools = [...$("cpa-dd-menu").querySelectorAll(".pp-cb:checked")]
+    .map(c => c.value);
+  if (!pools.length) return toast("先勾要推的号池");
+  $("cpa-dd-menu").style.display = "none";
+  const btn = $("cpa-push");
+  btn.disabled = true;
+  const r = await post("/api/g/cpa-push", { ids: [...sel], pools });
+  btn.disabled = false;
+  if (r.error) return toast("✗ " + r.error);
+  const bits = Object.entries(r.pools || {}).map(([n, v]) =>
+    `${n}✓${v.ok}` + (Object.keys(v.failed || {}).length
+      ? `✗${Object.keys(v.failed).length}` : ""));
+  toast(`✓ 推入池 ${bits.join(" · ") || r.ok + " 个"}` +
+    (r.failed ? " · 失败 " + Object.keys(r.failed).length + "个" : ""));
+  load();
+}
 $("cpa-export").onclick = async () => {
   if (!sel.size) return toast("先勾选有凭证的账号");
   const r = await fetch("/api/g/cred-export?ids=" + [...sel].join(","));
@@ -619,7 +662,9 @@ $("env-sel").innerHTML = ENV_GROUPS.map(([g, os]) =>
     `<option value="${v}">${l}</option>`).join("")
   + "</optgroup>").join("");
 ui.persistReapply();
+let cpaPools = [];
 fetch("/api/g/settings").then(r => r.json()).then(s => {
+  cpaPools = s.cpa_pools || [];
   if (s.open_env) $("env-sel").value = s.open_env;
 });
 $("env-sel").onchange = e => {

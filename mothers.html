@@ -6,7 +6,7 @@
 <link rel="stylesheet" href="/ui.css">
 <script src="/ui.js"></script>
 <style>
-  .page-container { max-width: 960px; }
+  .page-container { max-width: 1180px; }
   textarea.import-textarea {
     width: 100%; min-height: 90px; resize: vertical; font-size: 12px;
     font-family: ui-monospace, Menlo, Monaco, monospace;
@@ -39,20 +39,23 @@
 
   <div class="card">
     <div class="card-title"><i data-ic="crown"></i>母号列表 <span class="subtitle" id="m-count" style="font-weight:400"></span></div>
+    <div class="tscroll">
     <table class="data-table">
       <thead>
         <tr>
           <th style="width:36px"><input type="checkbox" id="ck-all"></th>
           <th>Roxy 窗口名</th>
-          <th style="width:280px">目标空间</th>
+          <th style="width:200px">目标空间</th>
           <th style="width:90px">拉入</th>
-          <th style="width:220px">账单</th>
-          <th style="width:110px">导入时间</th>
-          <th style="width:260px;text-align:right">操作</th>
+          <th style="width:110px">席位</th>
+          <th style="width:190px">账单</th>
+          <th style="width:96px">导入时间</th>
+          <th style="width:220px;text-align:right">操作</th>
         </tr>
       </thead>
       <tbody id="tbody"></tbody>
     </table>
+    </div>
     <div class="row" style="margin-top:10px">
       <button class="btn btn-outline btn-sm" id="bill-sel"><i data-ic="timer"></i>查账单选中</button>
       <button class="btn btn-outline btn-sm btn-danger" id="del-sel"><i data-ic="trash-2"></i>删除选中</button>
@@ -62,6 +65,29 @@
 </div>
 </div>
 <div class="toast" id="toast"></div>
+
+<div class="modal-mask" id="seat-mask" style="display:none">
+  <div class="modal-box">
+    <div class="modal-title"><i data-ic="cart"></i>购买席位 · <span id="seat-name"></span></div>
+    <div class="subtitle" id="seat-ws" style="margin-bottom:10px"></div>
+    <div id="seat-cur" class="subtitle" style="margin-bottom:8px"></div>
+    <div class="row" style="gap:14px">
+      <label style="font-size:13px">新增标准席 default
+        <input type="number" min="0" max="1000" id="seat-default"
+          style="width:80px;margin-left:6px" placeholder="+0"></label>
+      <label style="font-size:13px">新增高级席 prolite
+        <input type="number" min="0" max="1000" id="seat-prolite"
+          style="width:80px;margin-left:6px" placeholder="+0"></label>
+    </div>
+    <div class="hint" style="margin-top:8px">填的是<b>新增数量</b> —— 在现有席位上加。留空/0 = 该类型不动。估价后才允许下单。</div>
+    <div id="seat-info" style="margin-top:10px;font-size:13px"></div>
+    <div class="row" style="margin-top:14px;justify-content:flex-end">
+      <button class="btn btn-outline btn-sm" id="seat-close">关闭</button>
+      <button class="btn btn-outline btn-sm" id="seat-preview">估价</button>
+      <button class="btn btn-primary btn-sm" id="seat-buy" disabled>确认购买</button>
+    </div>
+  </div>
+</div>
 
 <script>
 const $ = id => document.getElementById(id);
@@ -142,15 +168,33 @@ function render() {
       <td class="mono">${esc(m.name)}</td>
       <td>${ws}<span class="ws-slot" data-name="${esc(m.name)}"></span></td>
       <td>${joinCell(m)}</td>
+      <td>${seatCell(m)}</td>
       <td>${billCell(m.bill)}</td>
       <td class="mono" style="color:var(--text-dim)">${esc((m.added_at || "").slice(0, 10))}</td>
       <td style="text-align:right;white-space:nowrap">
+        <button class="btn btn-ghost btn-sm" data-act="nobuy" data-name="${esc(m.name)}"
+          title="自动化是否允许在这个母号空间购买高级席位">${m.no_buy
+            ? '<span style="color:#dc2626">禁买</span>' : '可买'}</button>
+        <button class="btn btn-ghost btn-sm" data-act="seat" data-name="${esc(m.name)}">买席位</button>
         <button class="btn btn-ghost btn-sm" data-act="bill" data-name="${esc(m.name)}">查账单</button>
         <button class="btn btn-ghost btn-sm" data-act="ws" data-name="${esc(m.name)}">列空间</button>
         <button class="btn btn-ghost btn-sm btn-danger" data-act="del" data-name="${esc(m.name)}">删</button>
       </td>
     </tr>`;
-  }).join("") || `<tr><td colspan="7" style="text-align:center;color:var(--text-dim);padding:32px">暂无母号 —— 上方导入 Roxy 窗口名</td></tr>`;
+  }).join("") || `<tr><td colspan="8" style="text-align:center;color:var(--text-dim);padding:32px">暂无母号 —— 上方导入 Roxy 窗口名</td></tr>`;
+}
+
+function seatCell(m) {
+  const s = m.seat_sub;
+  if (!s || (s.default == null && s.prolite == null))
+    return `<span class="pill pill-dim">未查</span>`;
+  const bits = [];
+  if (s.default != null) bits.push(`default <b>${s.default}</b>`);
+  if (s.prolite != null) bits.push(`prolite <b>${s.prolite}</b>`);
+  const occ = s.counts
+    ? Object.entries(s.counts).filter(([, v]) => v)
+        .map(([k, v]) => `${k}:${v}`).join(" · ") : "";
+  return `<span class="pill pill-dim" title="现订阅席位${occ ? " · 占用 " + esc(occ) : ""} · 查于 ${esc((s.at || "").slice(5, 16))}">${bits.join(" · ")}</span>`;
 }
 
 async function doBilling(names, btn) {
@@ -164,7 +208,11 @@ async function doBilling(names, btn) {
   Object.entries(r.map || {}).forEach(([name, v]) => {
     const m = mothers.find(x => x.name === name);
     if (v.error) fails.push(`${name}: ${v.error}`);
-    else if (m) { m.bill = v; if (!m.ws && v.ws_id) { m.ws = v.ws_id; m.ws_name = v.ws_name; } ok++; }
+    else if (m) { m.bill = v;
+      if (v.seat_sub) m.seat_sub = { ...v.seat_sub,
+        counts: (m.seat_sub || {}).counts || {}, at: v.at || "" };
+      if (!m.ws && v.ws_id) { m.ws = v.ws_id; m.ws_name = v.ws_name; }
+      ok++; }
   });
   render();
   toast(`✓ ${ok} 个母号账单已更新`
@@ -202,8 +250,21 @@ $("tbody").addEventListener("click", async e => {
     sel.delete(name);
     await load();
   }
+  if (b.dataset.act === "nobuy") {
+    const m = mothers.find(x => x.name === name);
+    const r = await post("/api/mothers/no-buy",
+      { name, off: !(m && m.no_buy) });
+    if (r.error) return toast("✗ " + r.error);
+    if (m) m.no_buy = r.no_buy;
+    render();
+    toast(r.no_buy ? `${name} 已禁止自动购席位` : `${name} 恢复自动购席位`);
+    return;
+  }
   if (b.dataset.act === "bill") {
     doBilling([name], b);
+  }
+  if (b.dataset.act === "seat") {
+    openSeat(name);
   }
   if (b.dataset.act === "ws") {
     b.disabled = true;
@@ -234,6 +295,109 @@ $("tbody").addEventListener("change", async e => {
   toast("✓ 空间已存");
   await load();
 });
+
+// ---- 购买席位 modal ----
+let seatName = "", seatReady = false;
+function seatCurLine(cq, counts) {
+  const occ = counts
+    ? Object.entries(counts).filter(([, v]) => v)
+        .map(([k, v]) => `${esc(k)}:${v}`).join(" · ") : "";
+  return `现订阅: default <b>${cq.default ?? "?"}</b>`
+    + ` · prolite <b>${cq.prolite ?? "?"}</b>`
+    + (occ ? ` <span class="subtitle">占用 ${occ}</span>` : "");
+}
+function openSeat(name) {
+  seatName = name; seatReady = false;
+  const m = mothers.find(x => x.name === name) || {};
+  $("seat-name").textContent = name;
+  $("seat-ws").textContent = "目标空间: "
+    + (m.ws_name || m.ws || "未选 — 将自动取她 owner 空间");
+  $("seat-default").value = "";
+  $("seat-prolite").value = "";
+  $("seat-info").innerHTML = "";
+  $("seat-buy").disabled = true;
+  $("seat-cur").innerHTML = "正在查询现有席位…";
+  $("seat-mask").style.display = "flex";
+  post("/api/mothers/seats", { name, seats: {}, commit: false })
+    .then(r => {
+      if (!r) { $("seat-cur").textContent = "查询失败"; return; }
+      if (r.error) { $("seat-cur").innerHTML =
+        `<span style="color:var(--danger,#dc2626)">✗ ${esc(r.error)}</span>`; return; }
+      const cq = r.current_qty || {};
+      $("seat-cur").innerHTML = seatCurLine(cq, r.counts);
+      if (m.ws === undefined && r.ws) { m.ws = r.ws; m.ws_name = r.ws_name; }
+      m.seat_sub = { default: cq.default, prolite: cq.prolite,
+                     counts: r.counts || {}, at: "" };
+      render();
+    });
+}
+function seatQty() {
+  const q = {};
+  if ($("seat-default").value !== "" && +$("seat-default").value)
+    q.default = +$("seat-default").value;
+  if ($("seat-prolite").value !== "" && +$("seat-prolite").value)
+    q.prolite = +$("seat-prolite").value;
+  return q;
+}
+function seatQtyLine(items) {
+  return (items || []).map(x =>
+    `${esc(x.seat_type)}×${x.quantity}`).join(" · ") || "—";
+}
+async function seatReq(commit, btn, doing) {
+  const q = seatQty();
+  if (!Object.keys(q).length)
+    { toast("至少填一个新增数"); return null; }
+  btn.disabled = true; const old = btn.innerHTML;
+  btn.innerHTML = doing;
+  const r = await post("/api/mothers/seats",
+    { name: seatName, seats: q, commit }).catch(() => null);
+  btn.disabled = false; btn.innerHTML = old;
+  if (!r) { toast("✗ 请求失败"); return null; }
+  return r;
+}
+$("seat-close").onclick = () => $("seat-mask").style.display = "none";
+$("seat-mask").onclick = e => {
+  if (e.target === $("seat-mask")) $("seat-mask").style.display = "none";
+};
+$("seat-preview").onclick = async e => {
+  seatReady = false; $("seat-buy").disabled = true;
+  const r = await seatReq(false, e.target, "估价中…");
+  if (!r) return;
+  if (r.error) { $("seat-info").innerHTML =
+    `<span style="color:var(--danger,#dc2626)">✗ ${esc(r.error)}</span>`; return; }
+  const cnt = r.counts
+    ? Object.entries(r.counts).filter(([,v]) => v)
+        .map(([k, v]) => `${esc(k)}:${v}`).join(" · ") : "—";
+  const pm = r.pay_method
+    ? `${esc(r.pay_method.card_brand || "")} ****${esc(r.pay_method.card_last4 || "")}`
+    : "未知";
+  $("seat-info").innerHTML =
+    `<div>当前占用: <b>${cnt}</b> · 现订阅: ${seatQtyLine(r.current)}</div>`
+    + `<div>变更后: <b>${seatQtyLine(r.proposed_items)}</b>`
+    + (r.proposed_fmt ? ` · 续费 <b>${esc(r.proposed_fmt)}</b>/期` : "") + `</div>`
+    + `<div style="margin-top:6px;font-size:15px">本次实收: <b>${esc(r.amount_fmt || "?")}</b>`
+    + ` <span class="subtitle">(${r.requires_payment ? "需扣款" : "无需扣款"} · ${pm})</span></div>`;
+  seatReady = true; $("seat-buy").disabled = false;
+};
+$("seat-buy").onclick = async e => {
+  if (!seatReady) return;
+  if (!confirm("确认按估价扣款购买? 此操作会真实扣费。")) return;
+  const r = await seatReq(true, e.target, "下单中…");
+  if (!r) return;
+  if (r.error) { $("seat-info").innerHTML =
+    `<span style="color:var(--danger,#dc2626)">✗ ${esc(r.error)}</span>`; return; }
+  $("seat-info").innerHTML = `<span class="pill pill-ok">✓ 已购买`
+    + ` — ${seatQtyLine(r.proposed_items)}`
+    + (r.amount_fmt ? ` · 实收 ${esc(r.amount_fmt)}` : "") + `</span>`;
+  $("seat-buy").disabled = true; seatReady = false;
+  const tq = r.target_qty || {}, m = mothers.find(x => x.name === seatName);
+  if (m && (tq.default != null || tq.prolite != null)) {
+    m.seat_sub = { default: tq.default, prolite: tq.prolite,
+                   counts: r.counts || {}, at: "" };
+    render();
+  }
+  $("seat-cur").innerHTML = seatCurLine(tq, r.counts);
+};
 
 $("bill-sel").onclick = e => doBilling([...sel], e.target);
 

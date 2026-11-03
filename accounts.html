@@ -104,18 +104,22 @@
     <div class="toolbar-row">
       <input class="form-input" id="q" data-persist placeholder="搜索邮箱 / 代理 / 备注" style="width:200px">
       <select class="form-select" id="f-space" data-persist style="font-size:12px" title="按已加入的空间筛选"></select>
-      <span class="tb-sep"></span>
-      <button class="btn btn-primary btn-sm" id="open-sel"><i data-ic="app-window"></i>开窗选中</button>
-      <button class="btn btn-outline btn-sm" id="open-all"><i data-ic="layout-grid"></i>全部开窗</button>
-      <button class="btn btn-outline btn-sm" id="close-sel" title="关掉选中账号的浏览器进程 —— 窗口配置留着, 下次开窗原窗秒起 (不是归档, 不删窗)"><i data-ic="x"></i>关窗选中</button>
-      <button class="btn btn-outline btn-sm" id="ios-reg" title="iOS 协议注册: 纯接口重放 iOS App 注册流 (邮箱→OTP→资料→token), 不开窗 · 需要接码链接 + 可用代理"><i data-ic="smartphone"></i>iOS注册</button>
-      <select class="form-select" id="env-sel" data-persist style="font-size:12px" title="新建窗口的指纹环境 (PC/手机+具体系统版本) —— 已建窗口不受影响, 重建归档窗也按这个"></select>
-      <span class="subtitle" style="font-size:12px" title="到设置页勾选自动化步骤: 接码监听/资料生成/邮箱/填码/密码/资料">步骤在设置页配</span>
       <span style="flex:1"></span>
       <span class="subtitle" id="sel-hint" style="font-size:12px"></span>
       <button class="btn btn-outline btn-sm" id="view-arch" title="归档的账号在这 —— 窗口已删留记录, 可恢复/真删"><i data-ic="archive"></i>已归档 <span id="arch-n">0</span></button>
       <button class="btn btn-ghost btn-sm" id="log-toggle" title="日志窗口开关"><i data-ic="list"></i>日志<span id="log-dot" class="dot" style="display:none;margin-left:4px"></span></button>
       <button class="btn btn-ghost btn-sm" id="reload" title="刷新"><i data-ic="refresh-cw"></i></button>
+    </div>
+    <div class="toolbar-row">
+      <button class="btn btn-primary btn-sm" id="open-sel"><i data-ic="app-window"></i>开窗选中</button>
+      <button class="btn btn-outline btn-sm" id="open-all"><i data-ic="layout-grid"></i>全部开窗</button>
+      <button class="btn btn-outline btn-sm" id="close-sel" title="关掉选中账号的浏览器进程 —— 窗口配置留着, 下次开窗原窗秒起 (不是归档, 不删窗)"><i data-ic="x"></i>关窗选中</button>
+      <button class="btn btn-outline btn-sm" id="ios-reg" title="iOS 协议注册: 纯接口重放 iOS App 注册流 (邮箱→OTP→资料→token), 不开窗 · 需要接码链接 + 可用代理"><i data-ic="smartphone"></i>iOS注册</button>
+      <button class="btn btn-outline btn-sm" id="ios-sec" title="补密码+2FA: ios.at 直接打 mfa enroll/activate 绑 TOTP (secret 存 a.totp, 列表出动态码); 密码走 iOS 链 OTP 验证后 user/register 写入 —— 需要接码链接 + ios.at/rt"><i data-ic="key"></i>密码·2FA</button>
+      <button class="btn btn-outline btn-sm" id="web-mint" title="铸web会话: codex链OTP协议登录一次, 会话cookie存 a.web —— 之后 OAuth 注入cookie免开窗免再登录 (需要接码链接还活)"><i data-ic="globe"></i>Web会话</button>
+      <button class="btn btn-outline btn-sm" id="web-harvest" title="收web会话: 开窗一次抽 cookie 存 a.web —— 邮箱已死的号唯一铸法 (一次性, 之后 OAuth 免开窗)"><i data-ic="download"></i>收会话</button>
+      <select class="form-select" id="env-sel" data-persist style="font-size:12px" title="新建窗口的指纹环境 (PC/手机+具体系统版本) —— 已建窗口不受影响, 重建归档窗也按这个"></select>
+      <span class="subtitle" style="font-size:12px;white-space:nowrap" title="到设置页勾选自动化步骤: 接码监听/资料生成/邮箱/填码/密码/资料">步骤在设置页配</span>
     </div>
     <div class="toolbar-row">
       <button class="btn btn-outline btn-sm" id="pat-sel"><i data-ic="shield-check"></i>PAT检验</button>
@@ -129,11 +133,18 @@
       <button class="btn btn-outline btn-sm" id="join-sel" title="母号批量邀请 → 子号开窗刷新接受邀请"><i data-ic="user-plus"></i>加入空间</button>
       <button class="btn btn-outline btn-sm" id="leave-sel" title="子号主动退出空间: 选了空间筛选就直接退它, 否则弹窗逐个选取"><i data-ic="log-out"></i>退空间</button>
       <button class="btn btn-outline btn-sm" id="ws-refresh" title="开窗拉每个号实际所在空间 (accounts/check 实况, 写入成员列表)"><i data-ic="refresh-cw"></i>查空间</button>
-      <span class="tb-sep"></span>
+    </div>
+    <div class="toolbar-row">
       <button class="btn btn-outline btn-sm" id="cpa-sel" title="本地算OAuth链接 → 开(原/同IP新)窗口授权 → 截回调 → 经账号代理换token → 生成CPA凭证"><i data-ic="key"></i>OAuth授权</button>
-      <button class="btn btn-outline btn-sm" id="cpa-push" title="把已生成的凭证 JSON 推入 CPA 号池 (auth-files)"><i data-ic="cloud-upload"></i>推入池</button>
+      <span class="dd">
+        <button class="btn btn-outline btn-sm" id="cpa-push" title="把已生成的凭证 JSON 推入 CPA 号池 (auth-files) —— 下拉多选目标号池"><i data-ic="cloud-upload"></i>推入池 ▾</button>
+        <div class="dd-menu" id="cpa-dd-menu" style="display:none"></div>
+      </span>
+      <button class="btn btn-outline btn-sm" id="cpa-queue" title="选中账号的凭证提交到远程上号器队列 —— 不直接进池, 由远程调度器按容量模型自动推 (需上号器页切到远程模式)"><i data-ic="list"></i>推队列</button>
       <button class="btn btn-outline btn-sm" id="cpa-export" title="导出选中账号的 CPA 凭证 JSON (zip 打包)"><i data-ic="download"></i>导凭证</button>
       <span class="tb-sep"></span>
+      <button class="btn btn-outline btn-sm" id="pusher-toggle" title="上号器: 按容量模型自动把「已生成」凭证补进 CPA 号池"><i data-ic="zap"></i>上号器 <span id="pu-run-dot" class="dot" style="display:none"></span></button>
+      <span style="flex:1"></span>
       <button class="btn btn-outline btn-sm" id="del-sel" title="归档 = 删掉 Roxy 窗口释放配额, 账号记录+凭证+代理绑定保留"><i data-ic="archive"></i>归档选中</button>
     </div>
   </div>
@@ -150,21 +161,21 @@
   </div>
 
   <div class="table-card">
-    <table class="data-table">
+    <table class="data-table sticky-id">
       <thead>
         <tr>
           <th style="width:36px"><input type="checkbox" id="ck-all"></th>
           <th style="width:44px">#</th>
           <th>邮箱</th>
-          <th style="width:110px">密码/接码</th>
+          <th style="width:96px">密码/接码</th>
           <th style="width:190px">绑定代理</th>
-          <th style="width:90px">窗口</th>
-          <th style="width:80px">注册</th>
-          <th style="width:80px">PAT</th>
-          <th style="width:110px">空间</th>
+          <th style="width:72px">窗口</th>
+          <th style="width:78px">注册</th>
+          <th style="width:72px">PAT</th>
+          <th style="width:96px">空间</th>
           <th style="width:80px">凭证</th>
           <th>备注/附加</th>
-          <th style="width:150px;text-align:right">操作</th>
+          <th style="text-align:right">操作</th>
         </tr>
       </thead>
       <tbody id="tbody"></tbody>
@@ -326,6 +337,11 @@ function render() {
         : a.reg === "yes"
           ? `<span class="pill pill-ok" title="已注册老号, 登录验证通过 ${esc(a.reg_at||"")}">已注册</span>`
           : `<span class="pill pill-dim">未注册</span>`;
+    const webp = (a.web && a.web.has_cookies)
+      ? (a.web.dead
+          ? ` <span class="pill pill-bad" title="web会话已失效 (OAuth被要求重新验证), 需重铸 ${esc(a.web.got_at||"")}">web✗</span>`
+          : ` <span class="pill" style="background:#ecfeff;color:#0e7490;border:1px solid #a5f3fc" title="${a.web.how === "harvest" ? "开窗收cookie" : "codex链OTP协议登录"} ${esc(a.web.got_at||"")}${a.web.live ? " · OAuth已验证可用" : ""}">${a.web.how === "harvest" ? "web会话" : "协议登录"}${a.web.live ? "✓" : ""}</span>`)
+      : "";
     const pat = a.pat === "good"
       ? `<span class="pill pill-ok" title="建 PAT 跳身份验证 = 良好 ${esc(a.pat_at||"")}">良好</span>`
       : a.pat === "low"
@@ -356,7 +372,7 @@ function render() {
       return h || `<span class="pill pill-dim">—</span>`;
     })();
     const cpa = a.cpa === "yes"
-      ? `<a class="pill pill-ok" href="/api/accounts/${a.id}/cred" title="已入CPA池 ${esc(a.cpa_at||"")} —— 点下载凭证 ${esc(a.cred_file||"")}">已入池</a>`
+      ? `<a class="pill pill-ok" href="/api/accounts/${a.id}/cred" title="已入CPA池 ${esc(a.cpa_at||"")}${(a.cpa_pools||[]).length ? " · " + esc(a.cpa_pools.join(" + ")) : ""} —— 点下载凭证 ${esc(a.cred_file||"")}">已入池${(a.cpa_pools||[]).length > 1 ? "×" + a.cpa_pools.length : ""}</a>`
       : a.cpa === "ready"
         ? `<a class="pill" style="background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe" href="/api/accounts/${a.id}/cred" title="凭证已备好 ${esc(a.cred_at||"")} —— 点下载 ${esc(a.cred_file||"")}, 勾选后推入池">已生成</a>`
         : a.cpa === "pending"
@@ -390,11 +406,11 @@ function render() {
       <td class="mono">${pw}</td>
       <td>${px}</td>
       <td>${win}</td>
-      <td>${reg}</td>
+      <td>${reg}${webp}</td>
       <td>${pat}</td>
       <td>${sp}</td>
       <td>${cpa}</td>
-      <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(a.note || a.extra || "")}">${esc(a.note || a.extra || "")}</td>
+      <td style="max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(a.note || a.extra || "")}">${esc(a.note || a.extra || "")}</td>
       <td style="text-align:right;white-space:nowrap">${acts}</td>
     </tr>`;
   }).join("") || `<tr><td colspan="12" style="text-align:center;color:var(--text-dim);padding:32px">暂无账号 —— 点右上角「导入账号」</td></tr>`;
@@ -415,10 +431,12 @@ const TABS = {
   leave:{ icon: "log-out",      name: "退出",  api: "/api/accounts/leave/status", stop: "/api/accounts/leave/stop" },
   cpa:  { icon: "key",          name: "OAuth", api: "/api/accounts/cpa/status",   stop: "/api/accounts/cpa/stop" },
   ios:  { icon: "smartphone",   name: "iOS注册", api: "/api/accounts/ios-reg/status", stop: "/api/accounts/ios-reg/stop" },
+  sec:  { icon: "key",          name: "密码·2FA", api: "/api/accounts/ios-sec/status", stop: "/api/accounts/ios-sec/stop" },
+  web:  { icon: "globe",        name: "Web会话", api: "/api/accounts/web-mint/status", stop: "/api/accounts/web-mint/stop" },
   ppat: { icon: "zap",          name: "协议PAT", api: "/api/accounts/proto-pat/status", stop: "/api/accounts/proto-pat/stop" },
 };
 const tabData = {};
-let curTab = "open", jobPollT = null;
+let curTab = "open";
 
 $("job-tabs").innerHTML = Object.keys(TABS)
   .map(k => `<button class="job-tab" data-tab="${k}"></button>`).join("");
@@ -453,27 +471,53 @@ const logClosed = () => localStorage.getItem(LOGKEY) === "0";
 if (localStorage.getItem(LOGKEY) === "1")
   $("job-log").style.display = "block";
 
+// 只认"本次会话眼看着 running→结束"的任务完成:
+// 服务端 results 常驻, 老结果不能拿来清当前选中 (那是过去跑完的号)。
+const wasRun = {};
+let pollBusy = false, lastListPoll = 0;
 async function pollJobs() {
-  const keys = Object.keys(TABS);
-  const rs = await Promise.all(keys.map(k =>
-    fetch(TABS[k].api).then(r => r.json()).catch(() => null)));
-  keys.forEach((k, i) => { if (rs[i]) tabData[k] = rs[i]; });
-  if (!logClosed() && keys.some(k =>
-      (tabData[k].log || []).length || tabData[k].running))
-    $("job-log").style.display = "block";
-  renderJobTab();
-  const anyRun = keys.some(k => tabData[k].running);
-  $("log-dot").style.display = anyRun && $("job-log").style.display !== "block" ? "" : "none";
-  if (anyRun && !jobPollT) jobPollT = setInterval(pollJobs, 1200);
-  if (!anyRun && jobPollT) {
-    clearInterval(jobPollT); jobPollT = null; await load();
+  if (pollBusy) return;
+  pollBusy = true;
+  try {
+    const keys = Object.keys(TABS);
+    const rs = await Promise.all(keys.map(k =>
+      fetch(TABS[k].api).then(r => r.json()).catch(() => null)));
+    keys.forEach((k, i) => { if (rs[i]) tabData[k] = rs[i]; });
+    let needLoad = false;
+    keys.forEach(k => {
+      const d = tabData[k];
+      if (!d) return;
+      if (d.running) { wasRun[k] = true; return; }
+      if (wasRun[k]) {
+        // 刚跑完一批: 清掉这批的选中 + 立刻刷列表上屏结果
+        wasRun[k] = false;
+        Object.keys(d.results || {}).forEach(id => sel.delete(id));
+        $("ck-all").checked = false;
+        needLoad = true;
+      }
+    });
+    // 任务在跑时定期刷列表 (~4s): 注册/OAuth 完成的徽标及时上屏,
+    // 不用等整批结束
+    const anyRun = keys.some(k => tabData[k].running);
+    if (anyRun && Date.now() - lastListPoll > 4000) {
+      lastListPoll = Date.now();
+      needLoad = true;
+    }
+    $("sel-hint").textContent = sel.size ? `已选 ${sel.size} 个` : "";
+    if (needLoad) await load();
+    if (!logClosed() && keys.some(k =>
+        (tabData[k].log || []).length || tabData[k].running))
+      $("job-log").style.display = "block";
+    renderJobTab();
+    $("log-dot").style.display = anyRun && $("job-log").style.display !== "block" ? "" : "none";
+  } finally {
+    pollBusy = false;
   }
 }
 function jobTab(k) {
   curTab = k;
   setLog(true, true);
   renderJobTab();
-  if (!jobPollT) jobPollT = setInterval(pollJobs, 1200);
 }
 $("log-toggle").onclick = () =>
   setLog($("job-log").style.display !== "block", true);
@@ -790,6 +834,45 @@ $("ios-reg").onclick = e => {
   });
 };
 
+$("ios-sec").onclick = e => {
+  const btn = e.currentTarget;
+  if (!sel.size) return toast("先勾选账号");
+  const ids = [...sel];
+  btn.disabled = true;
+  post("/api/accounts/ios-sec", { ids }).then(r => {
+    btn.disabled = false;
+    jobTab("sec");
+    if (r.error) return toast("✗ " + r.error);
+    toast(`补密码+2FA 启动: ${r.count} 个账号`);
+  });
+};
+
+$("web-mint").onclick = e => {
+  const btn = e.currentTarget;
+  if (!sel.size) return toast("先勾选账号");
+  const ids = [...sel];
+  btn.disabled = true;
+  post("/api/accounts/web-mint", { ids }).then(r => {
+    btn.disabled = false;
+    jobTab("web");
+    if (r.error) return toast("✗ " + r.error);
+    toast(`铸web会话启动: ${r.count} 个账号`);
+  });
+};
+
+$("web-harvest").onclick = e => {
+  const btn = e.currentTarget;
+  if (!sel.size) return toast("先勾选账号");
+  const ids = [...sel];
+  btn.disabled = true;
+  post("/api/accounts/web-mint", { ids, mode: "harvest" }).then(r => {
+    btn.disabled = false;
+    jobTab("web");
+    if (r.error) return toast("✗ " + r.error);
+    toast(`收web会话启动: ${r.count} 个账号 (开窗一次性收cookie)`);
+  });
+};
+
 $("ppat-sel").onclick = e => {
   const btn = e.currentTarget;
   if (!sel.size) return toast("先勾选账号");
@@ -997,20 +1080,72 @@ $("cpa-sel").onclick = e => {
     toast(`OAuth 授权启动: ${r.count} 个账号 —— 开窗走完授权页`);
   });
 };
+// ---- 推入池: 下拉多选号池 + 推送按钮 ----
+function cpaMenu() {
+  const m = $("cpa-dd-menu");
+  if (!cpaPools.length) {
+    m.innerHTML = `<div class="dd-empty">未配置 CPA 号池 —— 到设置页「添加号池」</div>`;
+    return;
+  }
+  m.innerHTML = `<div class="dd-head">推送到号池（可多选）</div>`
+    + cpaPools.map((p, i) =>
+      `<label class="dd-opt"><input type="checkbox" class="pp-cb" value="${esc(p.name)}" ${i === 0 ? "checked" : ""}><span>${esc(p.name)}</span><span class="dd-url">${esc(p.url)}</span></label>`).join("")
+    + `<div class="dd-foot"><button class="btn btn-ghost btn-sm" id="pp-all" title="切换全选/全不选">全选</button><span style="flex:1"></span><button class="btn btn-primary btn-sm" id="pp-go">推送</button></div>`;
+}
 $("cpa-push").onclick = e => {
-  const btn = e.currentTarget;
+  e.stopPropagation();
+  const m = $("cpa-dd-menu");
+  if (m.style.display !== "none") { m.style.display = "none"; return; }
+  cpaMenu();
+  m.style.display = "block";
+};
+document.addEventListener("click", e => {
+  const m = $("cpa-dd-menu");
+  if (m && m.style.display !== "none" && !e.target.closest(".dd"))
+    m.style.display = "none";
+});
+$("cpa-dd-menu").addEventListener("click", e => {
+  if (e.target.closest("#pp-all")) {
+    const cbs = [...$("cpa-dd-menu").querySelectorAll(".pp-cb")];
+    const all = cbs.length && cbs.every(c => c.checked);
+    cbs.forEach(c => c.checked = !all);
+    return;
+  }
+  if (e.target.closest("#pp-go")) doCpaPush();
+});
+async function doCpaPush() {
   if (!sel.size) return toast("先勾选账号");
+  const pools = [...$("cpa-dd-menu").querySelectorAll(".pp-cb:checked")]
+    .map(c => c.value);
+  if (!pools.length) return toast("先勾要推的号池");
+  $("cpa-dd-menu").style.display = "none";
+  const btn = $("cpa-push");
   const ids = [...sel];
   btn.disabled = true;
-  post("/api/accounts/cpa-push", { ids }).then(r => {
-    btn.disabled = false;
-    if (r.error) return toast("✗ " + r.error);
-    const fails = r.failed
-      ? Object.entries(r.failed).map(([k, v]) => k + ": " + v).join(" · ")
-      : "";
-    toast(`已推入池 ${r.ok} 个` + (fails ? " · ✗ " + fails : ""));
-    load();
-  });
+  const r = await post("/api/accounts/cpa-push", { ids, pools });
+  btn.disabled = false;
+  if (r.error) return toast("✗ " + r.error);
+  const bits = Object.entries(r.pools || {}).map(([n, v]) =>
+    `${n}✓${v.ok}` + (Object.keys(v.failed || {}).length
+      ? `✗${Object.keys(v.failed).length}` : ""));
+  const fails = r.failed
+    ? " · ✗ " + Object.entries(r.failed).map(([k, v]) => k + ": " + v).join(" · ")
+    : "";
+  toast(`推入池 ${bits.join(" · ") || r.ok + " 个"}` + fails);
+  load();
+}
+$("cpa-queue").onclick = async () => {
+  if (!sel.size) return toast("先勾选账号");
+  const btn = $("cpa-queue"); btn.disabled = true;
+  const r = await post("/api/pusher/control",
+                       { action: "enqueue_sel", ids: [...sel] });
+  btn.disabled = false;
+  if (r.err) return toast("✗ " + r.err);
+  const fails = r.failed
+    ? " · ✗ " + Object.entries(r.failed).map(([k, v]) => k + ": " + v).join(" · ")
+    : "";
+  toast(`推队列 ✓${r.ok}` + fails);
+  load();
 };
 $("cpa-export").onclick = async () => {
   if (!sel.size) return toast("先勾选有凭证的账号");
@@ -1062,7 +1197,9 @@ $("env-sel").innerHTML = ENV_GROUPS.map(([g, os]) =>
     `<option value="${v}">${l}</option>`).join("")
   + "</optgroup>").join("");
 ui.persistReapply();
+let cpaPools = [];
 fetch("/api/settings").then(r => r.json()).then(s => {
+  cpaPools = s.cpa_pools || [];
   if (s.open_env) $("env-sel").value = s.open_env;
 });
 $("env-sel").onchange = e => {
@@ -1070,8 +1207,18 @@ $("env-sel").onchange = e => {
   toast("建窗环境 → " + e.target.selectedOptions[0].text);
 };
 
+// ---------- 上号器 (独立页 /pusher, 这里只留入口 + 运行指示点) ----------
+$("pusher-toggle").onclick = () => { location.href = "/pusher"; };
+(async () => {
+  try {
+    const d = await fetch("/api/pusher").then(r => r.json());
+    $("pu-run-dot").style.display = d.running ? "" : "none";
+  } catch (e) {}
+})();
+
 load();
-pollJobs();   // 页面打开时若正好有任务在跑则接上
+pollJobs();
+setInterval(pollJobs, 1500);  // 常驻轮询: 任务状态+列表及时上屏
 renderJobTab();
 </script>
 </body>

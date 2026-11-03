@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>上号器 · roxy-accounts</title>
+<link rel="stylesheet" href="/ui.css">
+<script src="/ui.js"></script>
+<style>
+  .page-container { max-width: 1180px; }
+  .pu-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .pu-grid > * { min-width: 0; }
+  @media (max-width: 1100px) { .pu-grid { grid-template-columns: 1fr; } }
+  .pu-box { border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; background: var(--surface); }
+  .pu-h { font-size: 12px; font-weight: 600; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+  .pu-h .sub { font-weight: 400; color: var(--text-dim); }
+  .pu-cap { display: flex; gap: 22px; align-items: baseline; flex-wrap: wrap; padding: 10px 12px; background: #f8fafc; border: 1px solid var(--border); border-radius: var(--radius); }
+  .pu-cap .k { font-size: 11px; color: var(--text-dim); }
+  .pu-cap .v { font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .pu-banner { border-radius: 6px; padding: 7px 10px; font-size: 12px; margin: 8px 0; }
+  .pu-banner.info { background: var(--primary-soft); color: var(--primary); }
+  .pu-banner.err { background: var(--danger-soft); color: #b91c1c; }
+  .pu-trig { display: flex; gap: 9px; align-items: flex-start; padding: 8px 0; border-bottom: 1px dashed var(--border); }
+  .pu-trig:last-child { border-bottom: none; }
+  .pu-trig .tt { font-size: 12px; }
+  .pu-trig .ts { font-size: 11px; color: var(--text-dim); margin-top: 3px; }
+  .pu-trig input[type=number] { width: 56px; padding: 2px 6px; font-size: 12px; border: 1px solid var(--border); border-radius: 5px; }
+  .pu-frow { display: flex; align-items: center; gap: 8px; padding: 6px 0; font-size: 12px; flex-wrap: wrap; }
+  .pu-frow label { width: 82px; flex: none; color: var(--text-dim); }
+  .pu-frow input[type=text], .pu-frow input[type=password] { flex: 1; min-width: 110px; padding: 4px 8px; font-size: 12px; border: 1px solid var(--border); border-radius: 5px; font-family: ui-monospace, Menlo, monospace; }
+  .pu-frow input[type=number] { width: 60px; padding: 4px 6px; font-size: 12px; border: 1px solid var(--border); border-radius: 5px; }
+  .sw { position: relative; display: inline-block; width: 32px; height: 18px; flex: none; margin-top: 2px; }
+  .sw input { display: none; }
+  .sw i { position: absolute; inset: 0; background: #cbd5e1; border-radius: 999px; transition: .2s; }
+  .sw i:before { content: ''; position: absolute; width: 14px; height: 14px; left: 2px; top: 2px; background: #fff; border-radius: 50%; transition: .2s; }
+  .sw input:checked + i { background: var(--primary); }
+  .sw input:checked + i:before { transform: translateX(14px); }
+  .pu-ev { font-family: ui-monospace, Menlo, monospace; font-size: 11px; max-height: 210px; overflow-y: auto; line-height: 1.8; }
+  .pu-ev .d { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; }
+  .pu-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .pu-table th { text-align: left; color: var(--text-dim); font-weight: 500; font-size: 11px; padding: 4px 8px; border-bottom: 1px solid var(--border); }
+  .pu-table td { padding: 5px 8px; border-bottom: 1px solid var(--border); }
+  .pu-save { font-size: 11px; color: #047857; opacity: 0; transition: opacity .3s; }
+  .pu-save.show { opacity: 1; }
+</style>
+</head>
+<body>
+<nav class="sidebar" data-nav="pusher"></nav>
+<div class="main">
+<div class="page-container">
+  <div class="page-header">
+    <div class="title-group">
+      <h1>上号器</h1>
+      <div class="subtitle">容量模型自动补位 —— 池内可用号不足时, 把账号页「已生成」凭证推入 CPA 号池 · 只增不减</div>
+    </div>
+    <div class="header-actions" style="align-items:center">
+      <span id="pu-pill"></span>
+      <span class="subtitle" id="pu-addr" style="font-size:11px"></span>
+      <span class="pu-save" id="pu-save">✓ 已自动保存</span>
+      <button class="btn btn-primary btn-sm" id="pu-start">开始</button>
+      <button class="btn btn-outline btn-sm" id="pu-stop">停止</button>
+      <button class="btn btn-outline btn-sm" id="pu-push-one" title="立即推一个「已生成」凭证入池">手动补一个</button>
+      <button class="btn btn-outline btn-sm" id="pu-enqueue" style="display:none" title="把本地全部「已生成」凭证投喂进远程队列">提交预备</button>
+      <button class="btn btn-outline btn-sm" id="pu-refresh-now" title="CPA /auth-files/refresh?all —— 全量刷新凭证 RT→AT">全量刷新</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div id="pu-banner"></div>
+    <div class="pu-cap" id="pu-cap"></div>
+  </div>
+
+  <div class="pu-grid" style="margin-top:14px">
+    <div>
+      <div class="pu-box" id="pu-remote-note" style="display:none">
+        <div class="pu-h">远程模式</div>
+        <div style="font-size:12px;color:var(--text-dim);line-height:1.8">
+          可用判据 / 容量模型 / 推送节奏由<b>远程上号器</b>自身调度 ——
+          本页只把「已生成」凭证投喂进远程队列
+          (<code>/api/ext/queue</code>)，并透传 start/stop/push_next 等控制。<br>
+          左侧的 CPA 地址/管理密码仍用于展示号池账号实况。
+          <div id="pu-remote-conf" style="margin-top:6px"></div>
+        </div>
+      </div>
+      <div class="pu-box" style="margin-bottom:12px">
+        <div class="pu-h">自动上号 <span class="sub">队列低位 → 自动拉人进空间 → OAuth → 推队列</span>
+          <span style="flex:1"></span><span id="au-pill"></span></div>
+        <div class="pu-frow"><label>开关</label>
+          <label class="sw"><input type="checkbox" id="au-on"><i></i></label>
+          <span id="au-phase" style="font-size:12px;color:var(--text-dim)"></span></div>
+        <div class="pu-frow"><label>缺号信号</label>
+          远程队列 pending &lt; <input type="number" id="au-q-low" value="1" min="0" style="width:56px">
+          · 补足到 <input type="number" id="au-q-target" value="3" min="1" style="width:56px"> 个</div>
+        <div class="pu-frow"><label>空闲号保底</label>
+          保持 <input type="number" id="au-idle" value="2" min="0" style="width:56px"> 个
+          <span style="color:var(--text-dim)">空闲开窗号, 少了自动注册+开窗</span></div>
+        <div class="pu-frow"><label>席位上限</label>
+          每空间高级席位 ≤ <input type="number" id="au-seat-max" value="9" min="1" style="width:56px">
+          · 单次金额 ≤ $<input type="number" id="au-amt" value="0" min="0" step="0.01" style="width:76px" placeholder="0=不限"></div>
+        <div class="pu-frow"><label>进货</label>
+          <label class="sw"><input type="checkbox" id="au-shop"><i></i></label>
+          <span style="color:var(--text-dim)">无可注册号时自动商城下单</span></div>
+        <div class="pu-frow"><label>退空间</label>
+          每空间可退成员 ≤ <input type="number" id="au-leave-max" value="8" min="1" style="width:56px"> 次
+          <span style="color:var(--text-dim)">远程归档队列 → 自动退成员腾席位 · 超次数回队待人工</span></div>
+        <div id="au-seats" style="font-size:12px;color:var(--text-dim);line-height:1.9"></div>
+        <div id="au-log" style="font-family:ui-monospace,Menlo,monospace;font-size:11px;max-height:130px;overflow-y:auto;line-height:1.8;color:var(--text-dim)"></div>
+      </div>
+      <div class="pu-box" id="pu-crit-box">
+        <div class="pu-h">可用判据 / 容量模型 <span class="sub">任一判据不过的号不计入可用 · 改动即存</span></div>
+        <div class="pu-trig">
+          <label class="sw"><input type="checkbox" id="pu-q-on"><i></i></label>
+          <div><div class="tt">额度低于 <input type="number" id="pu-q-pct" value="5" min="1" max="100"> %
+            <span style="color:var(--text-dim)">· 无信号时每 <input type="number" id="pu-q-probe" value="300" min="60" style="width:50px">s 钉选刷新</span></div>
+            <div class="ts" id="ts-quota"></div></div>
+        </div>
+        <div class="pu-trig">
+          <label class="sw"><input type="checkbox" id="pu-deg-on"><i></i></label>
+          <div><div class="tt">CPA 侧失效 / 冷却</div><div class="ts" id="ts-deg"></div></div>
+        </div>
+        <div class="pu-trig">
+          <label class="sw"><input type="checkbox" id="pu-err-on"><i></i></label>
+          <div><div class="tt">近 <input type="number" id="pu-err-win" value="10" min="1">min 错误率 &gt; <input type="number" id="pu-err-pct" value="50" min="1" max="100">% 且请求 &gt; <input type="number" id="pu-err-n" value="100" min="1"></div>
+            <div class="ts" id="ts-err"></div></div>
+        </div>
+        <div class="pu-trig">
+          <label class="sw"><input type="checkbox" id="pu-tmr-on"><i></i></label>
+          <div><div class="tt">在池超 <input type="number" id="pu-tmr" value="180" min="1"> 分钟强制轮换</div>
+            <div class="ts" id="ts-tmr"></div></div>
+        </div>
+        <div class="pu-trig">
+          <label class="sw"><input type="checkbox" id="pu-rf-on"><i></i></label>
+          <div><div class="tt">每 <input type="number" id="pu-rf" value="100" min="5"> 分钟全量刷新凭证</div>
+            <div class="ts" id="ts-rf"></div></div>
+        </div>
+        <div class="pu-frow" style="border-top:1px solid var(--border)"><label>容量模型</label>
+          单号 <input type="number" id="pu-cap-rpm" value="60" min="1"> rpm ·
+          窗口 <input type="number" id="pu-win" value="5" min="1" max="60"> min
+          <span style="color:var(--text-dim)">目标 = 1+⌊rpm÷容量⌋</span></div>
+        <div class="pu-frow"><label>推送间隔</label>
+          <input type="number" id="pu-gap" value="60" min="0"> 秒 · 防连推</div>
+      </div>
+      <div class="pu-box" style="margin-top:12px">
+        <div class="pu-h">连接 / 钉选</div>
+        <div class="pu-frow"><label>模式</label>
+          <select class="form-select" id="pu-mode" style="font-size:12px">
+            <option value="local">本地上号器 · 本地调度直推 CPA</option>
+            <option value="remote">远程上号器 · 凭证投喂 ext 队列</option>
+          </select></div>
+        <div id="pu-remote-rows" style="display:none">
+          <div class="pu-frow"><label>远程地址</label><input type="text" id="pu-r-url" placeholder="缺省 = http://<CPA主机>:8397"><span style="color:var(--text-dim)" id="pu-rurl-st"></span></div>
+          <div class="pu-frow"><label>API Key</label><input type="password" id="pu-r-key" placeholder="ext-... · 留空沿用已存"><span style="color:var(--text-dim)" id="pu-rkey-st"></span></div>
+          <div class="pu-frow"><label>池标识</label><input type="text" id="pu-r-pool" placeholder="缺省 = CPA 端口" style="flex:0 1 120px"><span style="color:var(--text-dim)" id="pu-rpool-st"></span></div>
+        </div>
+        <div class="pu-frow"><label>CPA 地址</label><input type="text" id="pu-cpa-url" placeholder="同设置页 cpa_url"></div>
+        <div class="pu-frow"><label>管理密码</label><input type="password" id="pu-cpa-key" placeholder="留空沿用已存"><span style="color:var(--text-dim)" id="pu-key-st"></span></div>
+        <div id="pu-pin-rows">
+          <div class="pu-frow"><label>池 API Key</label><input type="password" id="pu-api-key" placeholder="额度钉选刷新用 · 留空沿用已存"><span style="color:var(--text-dim)" id="pu-akey-st"></span></div>
+          <div class="pu-frow"><label>钉选模型</label><input type="text" id="pu-model" value="gpt-6-astra" style="flex:0 1 150px"></div>
+        </div>
+      </div>
+    </div>
+    <div>
+      <div class="pu-box">
+        <div class="pu-h">号池账号 <span class="sub" id="pu-pool-cnt"></span></div>
+        <div style="max-height:260px;overflow:auto">
+        <table class="pu-table"><thead><tr><th>email</th><th>状态</th><th>额度</th><th>判定</th></tr></thead>
+        <tbody id="pu-accts"></tbody></table></div>
+      </div>
+      <div class="pu-box" style="margin-top:12px">
+        <div class="pu-h">预备账号 <span class="sub" id="pu-q-cnt"></span><span style="flex:1"></span>
+          <button class="btn btn-ghost btn-sm" id="pu-clear-err" title="清掉推送失败标记">清错误</button></div>
+        <div style="max-height:230px;overflow:auto">
+        <table class="pu-table"><thead><tr><th>email</th><th>状态</th><th>备证</th><th>错误</th></tr></thead>
+        <tbody id="pu-queue"></tbody></table></div>
+      </div>
+      <div class="pu-box" style="margin-top:12px">
+        <div class="pu-h">最近事件</div>
+        <div class="pu-ev" id="pu-ev"></div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+<div class="toast" id="toast"></div>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const setV = (id, v) => { const e = $(id); if (document.activeElement !== e) e.value = v; };
+const post = (url, body) => fetch(url, {
+  method: "POST", headers: { "Content-Type": "application/json" },
+  body: JSON.stringify(body) }).then(r => r.json());
+const esc = s => String(s == null ? "" : s)
+  .replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;",
+                               '"': "&quot;", "'": "&#39;" }[c]));
+function toast(msg) {
+  const t = $("toast"); t.textContent = msg; t.style.opacity = 1;
+  clearTimeout(t._h); t._h = setTimeout(() => t.style.opacity = 0, 1800);
+}
+
+async function puCtl(action, extra = {}) {
+  const r = await fetch("/api/pusher/control", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action, ...extra }),
+  }).then(r => r.json());
+  if (r.err) toast(r.err);
+  else if (r.msg) toast(r.msg);
+  renderPu();
+}
+
+let puSaveT = null;
+function puSave() {
+  const conf = {
+    min_gap_s: +$("pu-gap").value || 60,
+    capacity_rpm: +$("pu-cap-rpm").value || 60,
+    rpm_win_min: +$("pu-win").value || 5,
+    quota_on: $("pu-q-on").checked,
+    quota_pct: +$("pu-q-pct").value || 5,
+    quota_probe_s: +$("pu-q-probe").value || 300,
+    deg_on: $("pu-deg-on").checked,
+    err_on: $("pu-err-on").checked,
+    err_win_min: +$("pu-err-win").value || 10,
+    err_pct: +$("pu-err-pct").value || 50,
+    err_min_n: +$("pu-err-n").value || 100,
+    timer_on: $("pu-tmr-on").checked,
+    timer_min: +$("pu-tmr").value || 180,
+    refresh_on: $("pu-rf-on").checked,
+    refresh_min: +$("pu-rf").value || 100,
+    probe_model: $("pu-model").value.trim(),
+    cpa_url: $("pu-cpa-url").value.trim(),
+    mode: $("pu-mode").value,
+    remote_url: $("pu-r-url").value.trim(),
+    remote_pool: $("pu-r-pool").value.trim(),
+  };
+  const k = $("pu-cpa-key").value.trim(); if (k) conf.cpa_key = k;
+  const a = $("pu-api-key").value.trim(); if (a) conf.api_key = a;
+  const rk = $("pu-r-key").value.trim(); if (rk) conf.remote_key = rk;
+  clearTimeout(puSaveT);
+  puSaveT = setTimeout(async () => {
+    const r = await fetch("/api/pusher/settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(conf),
+    }).then(r => r.json());
+    if (r.ok) {
+      const el = $("pu-save");
+      el.classList.add("show");
+      setTimeout(() => el.classList.remove("show"), 1600);
+      $("pu-cpa-key").value = ""; $("pu-api-key").value = "";
+      $("pu-r-key").value = "";
+      renderPu();
+    } else toast(r.err || "保存失败");
+  }, 500);
+}
+
+function puPill(ok, tOk, tNo) {
+  return `<span class="pill pill-${ok ? "ok" : "dim"}">${ok ? tOk : tNo}</span>`;
+}
+
+const PU_EV_C = {
+  pushed: "#059669", push_failed: "#dc2626", started: "#2563eb",
+  stopped: "#64748b", refreshed: "#7c3aed", refresh_failed: "#dc2626",
+  queue_empty: "#d97706", tick_error: "#dc2626",
+  queued_remote: "#0891b2",
+};
+
+function renderPu() {
+  fetch("/api/pusher").then(r => r.json()).then(d => {
+    if (d.err) { $("pu-banner").innerHTML =
+      `<div class="pu-banner err">上号器状态读取失败: ${esc(d.err)}</div>`; return; }
+    const c = d.conf || {}, cap = d.capacity || {};
+    const remote = d.mode === "remote", R = d.remote || {};
+    const set = (id, v) => { const e = $(id); if (document.activeElement !== e) e.value = v; };
+    const chk = (id, v) => { $(id).checked = !!v; };
+    $("pu-pill").innerHTML = puPill(d.running, remote ? "投喂中" : "运行中", "已停止");
+    $("pu-addr").textContent = remote
+      ? `远程 ${R.url || "?"} pool=${R.pool || "?"} · 调度${R.running ? "运行" : "停止"}`
+      : (d.addr || "(未配置 CPA 地址)");
+    $("pu-start").style.display = d.running ? "none" : "";
+    $("pu-stop").style.display = d.running ? "" : "none";
+    $("pu-enqueue").style.display = remote ? "" : "none";
+    // 模式相关的配置区
+    if (document.activeElement !== $("pu-mode"))
+      $("pu-mode").value = remote ? "remote" : "local";
+    $("pu-remote-rows").style.display = remote ? "" : "none";
+    $("pu-crit-box").style.display = remote ? "none" : "";
+    $("pu-remote-note").style.display = remote ? "" : "none";
+    $("pu-pin-rows").style.display = remote ? "none" : "";
+    set("pu-r-url", c.remote_url || "");
+    set("pu-r-pool", c.remote_pool || "");
+    $("pu-rurl-st").textContent = c.remote_url_eff && !c.remote_url
+      ? `→ ${c.remote_url_eff}` : "";
+    $("pu-rpool-st").textContent = c.remote_pool_eff && !c.remote_pool
+      ? `→ ${c.remote_pool_eff}` : "";
+    $("pu-rkey-st").textContent = c.remote_key_set ? "已存 ●" : "未设置";
+    if (remote && R.conf) {
+      const rc = R.conf, on = k => rc[k] ? "✓" : "✗";
+      $("pu-remote-conf").innerHTML =
+        `<span style="color:var(--text-dim)">远程判据:</span> ` +
+        `额度${on("quota_on")}${rc.quota_pct ?? ""}% · ` +
+        `失效${on("deg_on")} · 错误率${on("err_on")} · ` +
+        `轮换${on("timer_on")}${rc.timer_min ?? ""}min · ` +
+        `刷新${on("refresh_on")}${rc.refresh_min ?? ""}min`;
+    }
+    let bn = "";
+    if (remote && R.reachable === false)
+      bn = `<div class="pu-banner err">远程上号器不可达: ${esc(R.err || "?")}</div>`;
+    else if (remote && !R.key_set)
+      bn = `<div class="pu-banner err">远程模式需要配置 API Key (ext-...)</div>`;
+    else if (remote && R.running === false)
+      bn = `<div class="pu-banner info">远程调度器已停止 —— 投喂的凭证会在队列里等, 点开始拉起</div>`;
+    else if (d.pool_err) bn = `<div class="pu-banner err">号池不可达: ${esc(d.pool_err)} —— 自动重试中</div>`;
+    else if (!d.running) bn = `<div class="pu-banner info">已停止 · 开启后每 20s 检查缺口自动补位 (预备 = 账号页 cpa「已生成」的凭证)</div>`;
+    else if ((cap.deficit || 0) <= 0) bn = `<div class="pu-banner info">容量充足, 待机中</div>`;
+    else bn = `<div class="pu-banner info">缺 ${cap.deficit} 个可用号, 补位中…</div>`;
+    $("pu-banner").innerHTML = bn;
+    $("pu-cap").innerHTML = [
+      ["池 RPM", (Number(cap.rpm) || 0).toFixed(1)],
+      ["单号容量", remote
+        ? (cap.capacity_rpm != null ? cap.capacity_rpm + " rpm · 远程" : "远程管理")
+        : (c.capacity_rpm || 60) + " rpm"],
+      ["目标可用", cap.needed ?? "-"],
+      ["当前可用", cap.usable ?? "-"],
+      ["缺口", `<span style="color:${(cap.deficit || 0) > 0 ? "#dc2626" : "#059669"}">${cap.deficit ?? "-"}</span>`],
+      ["池内总数", d.pool_n ?? "-"],
+      ["预备", d.queue_n ?? "-"],
+    ].map(([k, v]) => `<div><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
+    set("pu-gap", c.min_gap_s ?? 60); set("pu-cap-rpm", c.capacity_rpm ?? 60);
+    set("pu-win", c.rpm_win_min ?? 5);
+    chk("pu-q-on", c.quota_on); set("pu-q-pct", c.quota_pct ?? 5);
+    set("pu-q-probe", c.quota_probe_s ?? 300);
+    chk("pu-deg-on", c.deg_on);
+    chk("pu-err-on", c.err_on); set("pu-err-win", c.err_win_min ?? 10);
+    set("pu-err-pct", c.err_pct ?? 50); set("pu-err-n", c.err_min_n ?? 100);
+    chk("pu-tmr-on", c.timer_on); set("pu-tmr", c.timer_min ?? 180);
+    chk("pu-rf-on", c.refresh_on); set("pu-rf", c.refresh_min ?? 100);
+    set("pu-model", c.probe_model || ""); set("pu-cpa-url", c.cpa_url || "");
+    $("pu-key-st").textContent = c.key_set ? "已存 ●" : "未设置";
+    $("pu-akey-st").textContent = c.api_key_set ? "已存 ●" : "未设置";
+    $("ts-quota").textContent = c.quota_on ? `低额 ${d.ts?.quota ?? 0} 个` : "关闭";
+    $("ts-deg").textContent = c.deg_on ? `失效/冷却 ${d.ts?.deg ?? 0} 个` : "关闭";
+    $("ts-err").textContent = c.err_on ? `高错误率 ${d.ts?.err ?? 0} 个` : "关闭";
+    $("ts-tmr").textContent = c.timer_on ? `超龄 ${d.ts?.tmr ?? 0} 个` : "关闭";
+    $("ts-rf").textContent = c.refresh_on
+      ? (d.last_refresh ? `上次 ${d.last_refresh.slice(11, 19)}` : "待首次") : "关闭";
+    $("pu-pool-cnt").textContent = `${(d.pool || []).length} 个`;
+    $("pu-accts").innerHTML = (d.pool || []).map(a => {
+      const q = a.quota_pct == null ? "—" : a.quota_pct.toFixed(0) + "%";
+      const st = a.disabled ? puPill(false, "停用") : puPill(true, "启用");
+      const bad = a.reasons && a.reasons.length;
+      return `<tr><td>${esc(a.email || a.name)}</td><td>${st}</td>` +
+        `<td>${q}</td><td>${bad
+          ? `<span style="color:#dc2626">${esc(a.reasons.join("/"))}</span>`
+          : '<span style="color:#059669">可用</span>'}</td></tr>`;
+    }).join("") || '<tr><td colspan="4" style="color:var(--text-dim)">池空 / 未连接</td></tr>';
+    $("pu-q-cnt").textContent = `${d.queue_n ?? 0} 个待补`;
+    $("pu-queue").innerHTML = (d.queue || []).map(q => {
+      let st, del = "";
+      if (q.status === "pushed")
+        st = q.live ? puPill(true, "已入池") : '<span class="pill pill-dim">已离池</span>';
+      else if (q.status === "remote_pending") {
+        st = puPill(true, "远程待推");
+        if (q.src === "remote" && q.id != null)
+          del = `<button class="btn btn-ghost btn-sm" style="padding:0 6px;font-size:11px" ` +
+                `onclick="puDel(${q.id})" title="从远程队列删除">✕</button>`;
+      } else if (q.status === "remote_sent")
+        st = '<span class="pill pill-dim">已投喂</span>';
+      else if (q.error) st = puPill(false, "失败");
+      else st = puPill(true, remote ? "待投喂" : "待补");
+      const why = (q.live_reasons || []).length
+        ? `<div style="font-size:11px;color:#d97706">${esc(q.live_reasons.join("/"))}</div>` : "";
+      return `<tr><td>${esc(q.email)}${why}</td><td>${st} ${del}</td>` +
+        `<td style="font-size:11px;color:var(--text-dim)">${esc((q.ts || "").slice(5, 16))}</td>` +
+        `<td style="font-size:11px;color:#dc2626">${esc(q.error || "")}</td></tr>`;
+    }).join("") || '<tr><td colspan="4" style="color:var(--text-dim)">无 —— 先到账号页跑 OAuth授权 生成凭证</td></tr>';
+    $("pu-ev").innerHTML = (d.events || []).map(e =>
+      `<div><span class="d" style="background:${PU_EV_C[e.kind] || "#94a3b8"}"></span>` +
+      `<span style="color:var(--text-dim)">${(e.ts || "").slice(5, 19)}</span> ${esc(e.msg)}</div>`
+    ).join("") || '<div style="color:var(--text-dim)">暂无</div>';
+  }).catch(() => {});
+}
+
+const AU_PHASE = {
+  idle: "待机", plan: "规划中", buy: "购席位", join: "入空间",
+  oauth: "OAuth中", supply: "补货", supply_reg: "注册中",
+  supply_open: "开窗中", leave: "退空间", leave_wait: "退出中"};
+
+function renderAu() {
+  fetch("/api/autopipe").then(r => r.json()).then(d => {
+    const c = d.conf || {};
+    if (document.activeElement !== $("au-on")) $("au-on").checked = !!d.on;
+    $("au-pill").innerHTML = puPill(d.on, "自动中", "关闭");
+    const busy = d.phase !== "idle";
+    $("au-phase").textContent = (AU_PHASE[d.phase] || d.phase) +
+      (d.need ? ` · 产${d.need}` : "") +
+      ((d.plan || {}).mother ? ` · 母号${d.plan.mother}` : "") +
+      (d.cooldown > 0 ? ` · 冷却${d.cooldown}s` : "");
+    setV("au-q-low", c.q_low ?? 1); setV("au-q-target", c.q_target ?? 3);
+    setV("au-idle", c.idle_keep ?? 2); setV("au-seat-max", c.seat_max ?? 9);
+    setV("au-amt", c.amt_max ?? 0); setV("au-leave-max", c.leave_max ?? 8);
+    if (document.activeElement !== $("au-shop")) $("au-shop").checked = !!c.shop_on;
+    $("au-seats").innerHTML = (d.seats || []).map(s =>
+      `<div>${esc(s.m)}: 高级席位 已用${s.used ?? "?"}/订阅${s.qty ?? "?"} ` +
+      (s.err ? `<span style="color:#dc2626">${esc(s.err)}</span>`
+             : `→ 空 <b style="color:${s.free ? "#059669" : "#dc2626"}">${s.free}</b>`)
+      + (s.expired ? ` <span style="color:#dc2626">[订阅到期]</span>` : "")
+      + (s.no_buy ? ` <span style="color:#b45309">[禁买]</span>` : "")
+      + `</div>`).join("") +
+      ((d.leave_counts || []).length || d.archive_pending
+        ? `<div style="margin-top:4px">归档待退 ${d.archive_pending || 0} 个` +
+          (d.leave_counts || []).map(l =>
+            ` · ${esc(l.mother)}已退${l.n}/${c.leave_max ?? 8}` +
+            (l.held ? `<span style="color:#dc2626">压制中</span>` : ""))
+          .join("")
+          + `</div>` : "");
+    $("au-log").innerHTML = (d.log || []).slice().reverse()
+      .map(l => `<div>${esc(l)}</div>`).join("");
+  }).catch(() => {});
+}
+
+function auSave() {
+  post("/api/autopipe/settings", {
+    auto_q_low: +$("au-q-low").value || 0,
+    auto_q_target: +$("au-q-target").value || 0,
+    auto_idle_keep: +$("au-idle").value || 0,
+    auto_seat_max: +$("au-seat-max").value || 9,
+    auto_amt_max: +$("au-amt").value || 0,
+    auto_shop_on: $("au-shop").checked,
+    auto_leave_max: +$("au-leave-max").value || 8,
+  });
+}
+$("au-on").onchange = () => post("/api/autopipe/control",
+  {action: $("au-on").checked ? "start" : "stop"}).then(renderAu);
+$("au-shop").onchange = auSave;
+["au-q-low","au-q-target","au-idle","au-seat-max","au-amt",
+ "au-leave-max"].forEach(id => $(id).onchange = auSave);
+
+window.puDel = id => puCtl("del_queue", { id });
+$("pu-start").onclick = () => puCtl("start");
+$("pu-stop").onclick = () => puCtl("stop");
+$("pu-push-one").onclick = () => puCtl("push_next");
+$("pu-enqueue").onclick = () => puCtl("enqueue_all");
+$("pu-refresh-now").onclick = () => puCtl("refresh_now");
+$("pu-clear-err").onclick = () => puCtl("clear_errors");
+$("pu-mode").onchange = puSave;
+["pu-q-on","pu-deg-on","pu-err-on","pu-tmr-on","pu-rf-on"].forEach(id =>
+  $(id).onchange = puSave);
+["pu-q-pct","pu-q-probe","pu-err-win","pu-err-pct","pu-err-n","pu-tmr",
+ "pu-rf","pu-cap-rpm","pu-win","pu-gap","pu-model","pu-cpa-url",
+ "pu-cpa-key","pu-api-key","pu-r-url","pu-r-key","pu-r-pool"
+].forEach(id => $(id).oninput = puSave);
+
+renderPu();
+renderAu();
+setInterval(renderPu, 5000);
+setInterval(renderAu, 5000);
+</script>
+</body>
+</html>

@@ -103,7 +103,7 @@
   </div>
 
   <div class="table-card">
-    <table class="data-table">
+    <table class="data-table sticky-id">
       <thead>
         <tr>
           <th style="width:36px"><input type="checkbox" id="ck-all"></th>
@@ -206,7 +206,7 @@ function render() {
     return `<tr>
       <td><input type="checkbox" class="ck" data-id="${p.id}" ${sel.has(p.id) ? "checked" : ""}></td>
       <td class="mono" style="color:var(--text-dim)">${idx}</td>
-      <td class="mono copyable" data-c="${esc(p.scheme)}://${p.host}:${p.port}" title="点击复制">${esc(p.scheme)}://${esc(p.host)}:${p.port}</td>
+      <td class="mono copyable" data-c="${esc(`${p.scheme}://${p.username ? p.username + ':' + (p.password || '') + '@' : ''}${p.host}:${p.port}`)}" title="点击复制 (含账密)">${esc(p.scheme)}://${esc(p.host)}:${p.port}</td>
       <td class="mono">${esc(p.username || "—")}</td>
       <td>${health}</td>
       <td class="mono">${esc(p.exit_ip || "—")}</td>
@@ -255,7 +255,7 @@ $("tbody").addEventListener("change", e => {
 });
 $("tbody").addEventListener("click", async e => {
   const cp = e.target.closest(".copyable");
-  if (cp) { navigator.clipboard.writeText(cp.dataset.c); toast("已复制 " + cp.dataset.c); return; }
+  if (cp) { navigator.clipboard.writeText(cp.dataset.c); toast("已复制完整代理格式"); return; }
   const b = e.target.closest("button[data-act]");
   if (!b) return;
   const id = b.dataset.id, act = b.dataset.act;

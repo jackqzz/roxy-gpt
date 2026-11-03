@@ -27,23 +27,32 @@
 
   <!-- CPA 号池 (CLIProxyAPI) -->
   <div class="card">
-    <div class="card-title"><i data-ic="link"></i>CPA 号池（CLIProxyAPI —— 子号凭证的下游池）</div>
-    <div class="row">
-      <input class="form-input" id="cpa-url" placeholder="CPA 地址, 如 http://127.0.0.1:8317" style="width:280px">
-      <input class="form-input" id="cpa-key" type="password" placeholder="管理 Key (management key)" style="width:220px">
-      <button class="btn btn-outline btn-sm" id="cpa-test">测试连通</button>
+    <div class="card-title"><i data-ic="link"></i>CPA 号池（CLIProxyAPI —— 子号凭证的下游池, 可配多个）</div>
+    <div id="cpa-pool-rows"></div>
+    <div class="row" style="margin-top:8px">
+      <button class="btn btn-outline btn-sm" id="cpa-add"><i data-ic="plus"></i>添加号池</button>
       <button class="btn btn-primary btn-sm" id="cpa-save">保存</button>
       <span class="subtitle" id="cpa-msg"></span>
     </div>
     <div class="row" style="margin-top:8px">
-      <label style="display:flex;align-items:center;gap:6px;font-size:13px" title="OAuth 凭证生成成功后自动推入 CPA 池 —— 关掉就只备好凭证, 手动「推入池」">
-        <input type="checkbox" id="cpa-autopush">OAuth 完成自动推入池</label>
       <label style="display:flex;align-items:center;gap:6px;font-size:13px" title="凭证 JSON 里带 proxy_url=账号代理 —— CPA 消费/刷新时走同 IP。关掉则凭证不带代理, 只对之后生成的凭证生效">
         <input type="checkbox" id="cred-proxy">凭证内嵌代理 (proxy_url)</label>
+      <span class="tb-sep"></span>
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px" title="写进凭证 JSON 的 max_concurrency 字段 —— CPA 池内该凭证的并发上限, 默认 40。改后对之后推送/下载/导出的凭证生效">
+        max_concurrency <input class="form-input" id="cpa-mc" type="number" min="1" step="1" style="width:70px"></label>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px" title="生成凭证时: 不用账号代理, 改从代理池挑延迟最低的节点内嵌进 proxy_url; 测速用空请求(不带凭证 —— 凭证一经某代理请求就锁死)。该节点绑一次后进入冷却, 期间不再被凭证绑">
+        凭证绑代理: 池内最低延迟 · 冷却 <input class="form-input" id="cpa-pcool" type="number" min="0" step="1" style="width:70px" title="分钟, 默认 120">min</label>
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px" title="测速目标 host[:port] —— 经上级链式 socks5 CONNECT + 明文GET测延迟, 默认 api.ipify.org:80 (同测活)">
+        ping <input class="form-input" id="cpa-ping-url" type="text" style="width:240px" placeholder="api.ipify.org:80"></label>
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px">
+        超时 <input class="form-input" id="cpa-ping-to" type="number" min="2" step="1" style="width:60px" title="秒, 默认 8">s</label>
     </div>
     <div class="hint">
-      连通测试打 <code>/v8/management/credentials</code>（v8 不在自动降 v0，顺带验证管理 key）。
-      OAuth 授权/换token 全在本地完成（账号页「OAuth授权」），凭证 JSON 备好后再「推入池」上传到这里。
+      第一个号池是<b>主池</b>：上号器、手动「推入池」默认都走它；
+      其余号池在账号页「推入池」下拉里勾选后推送（可多选）。
+      「测」打 <code>/v8/management/credentials</code>（v8 不在自动降 v0，顺带验证管理 key）。
     </div>
   </div>
 
@@ -130,8 +139,16 @@
         <input type="checkbox" id="st-pwd"><i data-ic="key"></i>创建密码</label>
       <label style="display:flex;align-items:center;gap:6px;font-size:13px" title="等 about-you 页后自动填姓名+年龄提交, 数据取资料生成结果">
         <input type="checkbox" id="st-prof"><i data-ic="pencil"></i>填资料</label>
-      <label style="display:flex;align-items:center;gap:6px;font-size:13px" title="iOS 协议注册整批结束后, 对本批注册成功的账号统一自动开窗 (注册中不逐个开; 手动停止的批次不触发; 上限 50)">
-        <input type="checkbox" id="st-ios-open"><i data-ic="smartphone"></i>iOS注册完毕后自动开窗</label>
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px" title="iOS 协议注册成功后自动登录一次保持 web 会话 (方式见右侧下拉)。手动停止的批次不触发">
+        <input type="checkbox" id="st-ios-open"><i data-ic="smartphone"></i>iOS注册完毕后自动登录保活</label>
+      <select class="form-select" id="st-web-how" style="font-size:12px;max-width:210px" title="开窗: 整批结束统一开 Roxy 窗登 (老路稳定); 协议: 注册循环内 codex链OTP登录铸cookie落盘 (不开窗, 但需再接一次码, 可能撞OTP发送压制)">
+        <option value="open">开窗浏览器登录 (稳定)</option>
+        <option value="proto">协议登录 (cookie落盘免开窗)</option>
+      </select>
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px" title="iOS 注册成功后立即补: ios.at 直连 backend-api 绑 TOTP 2FA (secret 存 a.totp); iOS 链 OTP 验证后 user/register 创建密码 (存 a.password)。需接码链接仍可用; 失败只记日志不废号">
+        <input type="checkbox" id="st-ios-sec"><i data-ic="key"></i>iOS注册后自动补密码+2FA</label>
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px" title="加入空间成功后自动给这批号跑 OAuth 授权 (协议会话优先, 没协议会话的走开窗路)。手动停止的批次不触发; CPA 任务在跑时不抢">
+        <input type="checkbox" id="st-join-oauth"><i data-ic="key"></i>加入空间后自动OAuth授权</label>
       <label style="display:flex;align-items:center;gap:6px;font-size:13px" title="退出空间成功后自动归档账号: 关闭浏览器进程、删除 Roxy 窗口释放配额、停监听 —— 协议/窗口两种退出路径都生效">
         <input type="checkbox" id="st-leave-close"><i data-ic="archive"></i>退空间后自动关窗+归档</label>
     </div>
@@ -193,34 +210,74 @@ async function post(path, body) {
   return r.json();
 }
 
-// ---- CPA 号池 ----
+// ---- CPA 号池 (多号池) ----
+function cpaPoolRow(p) {
+  return `<div class="row cpa-pool" style="margin-bottom:6px">
+    <input class="form-input cpa-name" style="width:110px" placeholder="名 (空=默认)" value="${esc(p.name || "")}">
+    <input class="form-input cpa-url" style="flex:1;min-width:200px" placeholder="CPA 地址, 如 http://127.0.0.1:8317" value="${esc(p.url || "")}">
+    <input class="form-input cpa-key" type="password" style="width:180px" placeholder="管理 Key" value="${esc(p.key || "")}">
+    <button class="btn btn-outline btn-sm cpa-test" title="测试这个号池连通">测</button>
+    <button class="btn btn-ghost btn-sm btn-danger cpa-del" title="移除这个号池"><i data-ic="x"></i></button>
+  </div>`;
+}
+function cpaAddRow(p) {
+  $("cpa-pool-rows").insertAdjacentHTML("beforeend", cpaPoolRow(p || {}));
+  ui.hydrateIcons($("cpa-pool-rows"));
+}
 async function loadCpa() {
   const r = await fetch("/api/settings").then(r => r.json());
-  $("cpa-url").value = r.cpa_url || "";
-  $("cpa-key").value = r.cpa_key || "";
-  $("cpa-autopush").checked = r.cpa_autopush !== false;
+  const pools = r.cpa_pools || (r.cpa_url
+    ? [{ name: "", url: r.cpa_url, key: r.cpa_key }] : []);
+  $("cpa-pool-rows").innerHTML = "";
+  (pools.length ? pools : [{}]).forEach(cpaAddRow);
   $("cred-proxy").checked = r.cred_proxy !== false;
+  $("cpa-mc").value = r.cpa_max_concurrency ?? 40;
+  $("cpa-pcool").value = r.cpa_pcool_min ?? 120;
+  $("cpa-ping-url").value = r.cpa_ping_url || "";
+  $("cpa-ping-to").value = r.cpa_ping_to ?? 8;
 }
+function collectCpaPools() {
+  return [...$("cpa-pool-rows").querySelectorAll(".cpa-pool")]
+    .map(row => ({
+      name: row.querySelector(".cpa-name").value.trim(),
+      url: row.querySelector(".cpa-url").value.trim(),
+      key: row.querySelector(".cpa-key").value.trim() }))
+    .filter(p => p.url);
+}
+$("cpa-add").onclick = () => cpaAddRow();
+$("cpa-pool-rows").addEventListener("click", async e => {
+  const del = e.target.closest(".cpa-del");
+  if (del) {
+    del.closest(".cpa-pool").remove();
+    if (!$("cpa-pool-rows").children.length) cpaAddRow();
+    return;
+  }
+  const t = e.target.closest(".cpa-test");
+  if (!t) return;
+  const row = t.closest(".cpa-pool");
+  t.disabled = true;
+  $("cpa-msg").textContent = "测中…";
+  const r = await post("/api/settings/test-cpa",
+    { url: row.querySelector(".cpa-url").value.trim(),
+      key: row.querySelector(".cpa-key").value.trim() }).catch(() => null);
+  t.disabled = false;
+  $("cpa-msg").textContent = r && r.ok
+    ? `✓ ${row.querySelector(".cpa-name").value.trim() || "默认"} 连通 ${r.ms}ms · ${r.ver} API`
+      + (r.creds != null ? ` · 池内 ${r.creds} 条凭证` : "")
+    : "✗ " + ((r && r.error) || "请求失败");
+});
 $("cpa-save").onclick = async () => {
   const r = await post("/api/settings",
-    { cpa_url: $("cpa-url").value.trim(),
-      cpa_key: $("cpa-key").value.trim(),
-      cpa_autopush: $("cpa-autopush").checked,
+    { cpa_pools: collectCpaPools(),
+      cpa_max_concurrency: parseInt($("cpa-mc").value, 10) || 40,
+      cpa_pcool_min: parseInt($("cpa-pcool").value, 10) || 0,
+      cpa_ping_url: $("cpa-ping-url").value.trim(),
+      cpa_ping_to: parseInt($("cpa-ping-to").value, 10) || 8,
       cred_proxy: $("cred-proxy").checked });
   if (r.error) return toast("✗ " + r.error);
   $("cpa-msg").textContent = "✓ 已保存";
   toast("✓ CPA 配置已存");
-};
-$("cpa-test").onclick = async e => {
-  e.target.disabled = true;
-  $("cpa-msg").textContent = "测中…";
-  const r = await post("/api/settings/test-cpa",
-    { url: $("cpa-url").value.trim(),
-      key: $("cpa-key").value.trim() }).catch(() => null);
-  e.target.disabled = false;
-  $("cpa-msg").textContent = r && r.ok
-    ? `✓ 连通 ${r.ms}ms · ${r.ver} API` + (r.creds != null ? ` · 池内 ${r.creds} 条凭证` : "")
-    : "✗ " + ((r && r.error) || "请求失败");
+  loadCpa();   // 重拉: 主池镜像/名字去重后的形态
 };
 
 // ---- 邮箱商城 ----
@@ -367,12 +424,18 @@ async function loadSteps() {
   STEP_KEYS.forEach((k, i) => { $(STEP_IDS[i]).checked = r[k] !== false; });
   $("st-workers").value = r.open_workers ?? 3;
   $("st-ios-open").checked = r.ios_auto_open === true;
+  $("st-ios-sec").checked = r.ios_auto_sec === true;
+  $("st-web-how").value = r.ios_web_how || "open";
+  $("st-join-oauth").checked = r.join_auto_oauth !== false;
   $("st-leave-close").checked = r.leave_autoclose === true;
 }
 function stepsPayload() {
   const o = { open_workers: Math.max(1, Math.min(10,
     parseInt($("st-workers").value) || 3)),
     ios_auto_open: $("st-ios-open").checked,
+    ios_auto_sec: $("st-ios-sec").checked,
+    ios_web_how: $("st-web-how").value,
+    join_auto_oauth: $("st-join-oauth").checked,
     leave_autoclose: $("st-leave-close").checked };
   STEP_KEYS.forEach((k, i) => { o[k] = $(STEP_IDS[i]).checked; });
   return o;

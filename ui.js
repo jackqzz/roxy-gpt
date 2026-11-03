@@ -50,6 +50,7 @@
       ["accounts", "/accounts", "users", "账号"],
       ["proxies", "/", "globe", "代理"],
       ["mothers", "/mothers", "crown", "空间母号"],
+      ["pusher", "/pusher", "zap", "上号器"],
       ["settings", "/settings", "settings", "设置"]
     ],
     g: [

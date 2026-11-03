@@ -17,11 +17,10 @@
 
   <!-- CPA 号池 -->
   <div class="card">
-    <div class="card-title"><i data-ic="link"></i>CPA 号池（CLIProxyAPI —— antigravity 凭证的下游池）</div>
-    <div class="row">
-      <input class="form-input" id="cpa-url" placeholder="CPA 地址, 如 http://127.0.0.1:8317" style="width:280px">
-      <input class="form-input" id="cpa-key" type="password" placeholder="管理 Key (management key)" style="width:220px">
-      <button class="btn btn-outline btn-sm" id="cpa-test">测试连通</button>
+    <div class="card-title"><i data-ic="link"></i>CPA 号池（CLIProxyAPI —— antigravity 凭证的下游池, 可配多个）</div>
+    <div id="cpa-pool-rows"></div>
+    <div class="row" style="margin-top:8px">
+      <button class="btn btn-outline btn-sm" id="cpa-add"><i data-ic="plus"></i>添加号池</button>
       <button class="btn btn-primary btn-sm" id="cpa-save">保存</button>
       <span class="subtitle" id="cpa-msg"></span>
     </div>
@@ -30,10 +29,13 @@
         <input type="checkbox" id="cpa-autopush">OAuth 完成自动推入池</label>
       <label style="display:flex;align-items:center;gap:6px;font-size:13px" title="凭证 JSON 里带 proxy_url=账号代理 —— CPA 消费/刷新时走同 IP。关掉则凭证不带代理, 只对之后生成的凭证生效">
         <input type="checkbox" id="cred-proxy">凭证内嵌代理 (proxy_url)</label>
+      <span class="tb-sep"></span>
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px" title="写进凭证 JSON 的 max_concurrency 字段 —— CPA 池内该凭证的并发上限, 默认 40。改后对之后推送/下载/导出的凭证生效">
+        max_concurrency <input class="form-input" id="cpa-mc" type="number" min="1" step="1" style="width:70px"></label>
     </div>
     <div class="hint">
-      与 GPT 侧的 CPA 配置独立 —— Google 凭证可以推到另一个池。
-      OAuth 授权在 G账号页完成，凭证备好后「推入池」上传到这里。
+      与 GPT 侧的 CPA 配置独立 —— Google 凭证可以推到另一组池。
+      第一个号池是<b>主池</b>（OAuth 自动推入走它），其余在 G账号页「推入池」下拉勾选（可多选）。
     </div>
   </div>
 
@@ -79,39 +81,82 @@ async function post(path, body) {
     body: JSON.stringify(body) });
   return r.json();
 }
+function esc(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+// ---- CPA 号池 (多号池) ----
+function cpaPoolRow(p) {
+  return `<div class="row cpa-pool" style="margin-bottom:6px">
+    <input class="form-input cpa-name" style="width:110px" placeholder="名 (空=默认)" value="${esc(p.name || "")}">
+    <input class="form-input cpa-url" style="flex:1;min-width:200px" placeholder="CPA 地址, 如 http://127.0.0.1:8317" value="${esc(p.url || "")}">
+    <input class="form-input cpa-key" type="password" style="width:180px" placeholder="管理 Key" value="${esc(p.key || "")}">
+    <button class="btn btn-outline btn-sm cpa-test" title="测试这个号池连通">测</button>
+    <button class="btn btn-ghost btn-sm btn-danger cpa-del" title="移除这个号池"><i data-ic="x"></i></button>
+  </div>`;
+}
+function cpaAddRow(p) {
+  $("cpa-pool-rows").insertAdjacentHTML("beforeend", cpaPoolRow(p || {}));
+  ui.hydrateIcons($("cpa-pool-rows"));
+}
+function collectCpaPools() {
+  return [...$("cpa-pool-rows").querySelectorAll(".cpa-pool")]
+    .map(row => ({
+      name: row.querySelector(".cpa-name").value.trim(),
+      url: row.querySelector(".cpa-url").value.trim(),
+      key: row.querySelector(".cpa-key").value.trim() }))
+    .filter(p => p.url);
+}
 
 async function load() {
   const r = await fetch(API).then(r => r.json());
   if (document.activeElement !== $("up-in"))
     $("up-in").value = r.upstream_proxy || "";
-  $("cpa-url").value = r.cpa_url || "";
-  $("cpa-key").value = r.cpa_key || "";
+  const pools = r.cpa_pools || (r.cpa_url
+    ? [{ name: "", url: r.cpa_url, key: r.cpa_key }] : []);
+  $("cpa-pool-rows").innerHTML = "";
+  (pools.length ? pools : [{}]).forEach(cpaAddRow);
   $("cpa-autopush").checked = r.cpa_autopush !== false;
   $("cred-proxy").checked = r.cred_proxy !== false;
+  $("cpa-mc").value = r.cpa_max_concurrency ?? 40;
   $("pc-cool").value = r.proxy_cool_min ?? 20;
   $("pc-oauth-ttl").value = r.oauth_ttl_min ?? 10;
 }
 
+$("cpa-add").onclick = () => cpaAddRow();
+$("cpa-pool-rows").addEventListener("click", async e => {
+  const del = e.target.closest(".cpa-del");
+  if (del) {
+    del.closest(".cpa-pool").remove();
+    if (!$("cpa-pool-rows").children.length) cpaAddRow();
+    return;
+  }
+  const t = e.target.closest(".cpa-test");
+  if (!t) return;
+  const row = t.closest(".cpa-pool");
+  t.disabled = true;
+  $("cpa-msg").textContent = "测中…";
+  const r = await post(API + "/test-cpa",
+    { url: row.querySelector(".cpa-url").value.trim(),
+      key: row.querySelector(".cpa-key").value.trim() }).catch(() => null);
+  t.disabled = false;
+  $("cpa-msg").textContent = r && r.ok
+    ? `✓ ${row.querySelector(".cpa-name").value.trim() || "默认"} 连通 ${r.ms}ms · ${r.ver} API`
+      + (r.creds != null ? ` · 池内 ${r.creds} 条凭证` : "")
+    : "✗ " + ((r && r.error) || "请求失败");
+});
 $("cpa-save").onclick = async () => {
   const r = await post(API,
-    { cpa_url: $("cpa-url").value.trim(),
-      cpa_key: $("cpa-key").value.trim(),
+    { cpa_pools: collectCpaPools(),
+      cpa_max_concurrency: parseInt($("cpa-mc").value, 10) || 40,
       cpa_autopush: $("cpa-autopush").checked,
       cred_proxy: $("cred-proxy").checked });
   if (r.error) return toast("✗ " + r.error);
   $("cpa-msg").textContent = "✓ 已保存";
   toast("✓ CPA 配置已存");
-};
-$("cpa-test").onclick = async e => {
-  e.target.disabled = true;
-  $("cpa-msg").textContent = "测中…";
-  const r = await post(API + "/test-cpa",
-    { url: $("cpa-url").value.trim(),
-      key: $("cpa-key").value.trim() }).catch(() => null);
-  e.target.disabled = false;
-  $("cpa-msg").textContent = r && r.ok
-    ? `✓ 连通 ${r.ms}ms · ${r.ver} API` + (r.creds != null ? ` · 池内 ${r.creds} 条凭证` : "")
-    : "✗ " + ((r && r.error) || "请求失败");
+  load();
 };
 
 $("up-save").onclick = async () => {
