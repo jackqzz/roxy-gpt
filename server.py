@@ -7259,8 +7259,15 @@ def _cpa_worker(ids):
                             log("→ %s: 协议会话免绑定, 用代理 %s:%s"
                                 % (email, p["host"], p["port"]))
                     if not p:
+                        if web.get("cookies") and not web.get("dead"):
+                            why = "有web会话但代理池选不出活代理"
+                        elif web.get("dead"):
+                            why = "没绑代理且web会话已死"
+                        else:
+                            why = "没绑代理也没web会话"
                         CPA_JOB["results"][aid] = "账号没绑代理"
-                        log("✗ %s: 没绑代理, 全链同IP做不到" % email)
+                        log("✗ %s: %s, 全链同IP做不到"
+                            % (email, why))
                         continue
                     # 1) 本地算 OAuth 链接 (不依赖 CPA)
                     url, state, verifier = _oauth_gen()
