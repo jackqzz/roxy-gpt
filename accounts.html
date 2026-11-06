@@ -117,7 +117,7 @@
       <button class="btn btn-outline btn-sm" id="ios-reg" title="iOS 协议注册: 纯接口重放 iOS App 注册流 (邮箱→OTP→资料→token), 不开窗 · 需要接码链接 + 可用代理"><i data-ic="smartphone"></i>iOS注册</button>
       <button class="btn btn-outline btn-sm" id="ios-sec" title="补密码+2FA: ios.at 直接打 mfa enroll/activate 绑 TOTP (secret 存 a.totp, 列表出动态码); 密码走 iOS 链 OTP 验证后 user/register 写入 —— 需要接码链接 + ios.at/rt"><i data-ic="key"></i>密码·2FA</button>
       <button class="btn btn-outline btn-sm" id="web-mint" title="铸web会话: codex链OTP协议登录一次, 会话cookie存 a.web —— 之后 OAuth 注入cookie免开窗免再登录 (需要接码链接还活)"><i data-ic="globe"></i>Web会话</button>
-      <button class="btn btn-outline btn-sm" id="web-harvest" title="收web会话: 开窗一次抽 cookie 存 a.web —— 邮箱已死的号唯一铸法 (一次性, 之后 OAuth 免开窗)"><i data-ic="download"></i>收会话</button>
+      <button class="btn btn-outline btn-sm" id="web-harvest" style="display:none" title="收web会话: 开窗一次抽 cookie 存 a.web —— 邮箱已死的号唯一铸法 (一次性, 之后 OAuth 免开窗)"><i data-ic="download"></i>收会话</button>
       <select class="form-select" id="env-sel" data-persist style="font-size:12px" title="新建窗口的指纹环境 (PC/手机+具体系统版本) —— 已建窗口不受影响, 重建归档窗也按这个"></select>
       <span class="subtitle" style="font-size:12px;white-space:nowrap" title="到设置页勾选自动化步骤: 接码监听/资料生成/邮箱/填码/密码/资料">步骤在设置页配</span>
     </div>
@@ -271,12 +271,13 @@ function filtered() {
     (a.extra || "").toLowerCase().includes(q));
 }
 
+const jget = u => fetch(u, { signal: AbortSignal.timeout(9000) })
+  .then(r => r.json());
 async function load() {
-  const r = await fetch("/api/accounts").then(r => r.json());
+  const r = await jget("/api/accounts");
   accounts = r.accounts || [];
   oauthTtlMin = r.oauth_ttl_min || 10;
-  const m = await fetch("/api/mother").then(r => r.json())
-    .catch(() => null);
+  const m = await jget("/api/mother").catch(() => null);
   patWsId = (m && m.mother_workspace) || "";
   patWsName = (m && m.mother_workspace_name) || "";
   const s = r.stats || {};
@@ -481,7 +482,7 @@ async function pollJobs() {
   try {
     const keys = Object.keys(TABS);
     const rs = await Promise.all(keys.map(k =>
-      fetch(TABS[k].api).then(r => r.json()).catch(() => null)));
+      jget(TABS[k].api).catch(() => null)));
     keys.forEach((k, i) => { if (rs[i]) tabData[k] = rs[i]; });
     let needLoad = false;
     keys.forEach(k => {
@@ -496,10 +497,12 @@ async function pollJobs() {
         needLoad = true;
       }
     });
-    // 任务在跑时定期刷列表 (~4s): 注册/OAuth 完成的徽标及时上屏,
-    // 不用等整批结束
+    // 定期刷列表: 任务在跑 ~4s, 空闲 ~8s。
+    // 兜底必须有无条件刷新 —— 短任务可能在两次轮询间跑完
+    // (看不到 running), 或别处在改账号数据, 都靠它上屏
     const anyRun = keys.some(k => tabData[k].running);
-    if (anyRun && Date.now() - lastListPoll > 4000) {
+    const period = anyRun ? 4000 : 8000;
+    if (Date.now() - lastListPoll > period) {
       lastListPoll = Date.now();
       needLoad = true;
     }

@@ -1626,6 +1626,38 @@ def _chatgpt_goto(ws, init_js=None):
             br.close()
 
 
+def _chatgpt_logged_in(ws, tries=5):
+    """开窗后实况: 任一 chatgpt.com 标签页 /api/auth/session
+    有 user -> 返回 session 邮箱; 没有 -> None。
+    页面可能还在跳转, 给几拍重试; 登出态很快返回 None。"""
+    from playwright.sync_api import sync_playwright
+    js = ("fetch('/api/auth/session',{credentials:'include'})"
+          ".then(r=>r.ok?r.json():null)"
+          ".then(s=>s&&s.user?s.user.email:null)"
+          ".catch(()=>null)")
+    try:
+        with sync_playwright() as pw:
+            br = pw.chromium.connect_over_cdp(ws)
+            try:
+                for _ in range(tries):
+                    for ctx0 in br.contexts:
+                        for pg0 in ctx0.pages:
+                            if "chatgpt.com" not in (pg0.url or ""):
+                                continue
+                            try:
+                                em = pg0.evaluate(js)
+                            except Exception:
+                                em = None
+                            if em:
+                                return em
+                    time.sleep(1.5)
+            finally:
+                br.close()
+    except Exception:
+        pass
+    return None
+
+
 def _pace_vals(_st):
     """注册拟人节奏参数: (步骤间隔min,max, 击键min,max, 落地等待ms)。
     pace_on=False 时返回近零值 —— 步骤/击键几乎不等, 落地只留
@@ -3483,6 +3515,28 @@ def _web_mint(a, p, log, should_stop=None):
         relay.close()
 
 
+def _web_mint3(a, p, log, should_stop=None, tries=3):
+    """铸 web 会话, 以 auth/session 复核出 user (live) 才算成。
+    不活重铸至多 tries 次; 全败当没铸过 —— a.web 不留半活
+    残件, 列表不显示「协议登录」。"""
+    old_web = a.get("web")
+    res = ""
+    for att in range(tries):
+        res = _web_mint(a, p, log, should_stop=should_stop)
+        if (a.get("web") or {}).get("live"):
+            return res
+        if should_stop and should_stop():
+            break
+        if att < tries - 1:
+            log("  第%d次没验活, 重铸" % (att + 1))
+            time.sleep(3)
+    if old_web and old_web.get("live"):
+        a["web"] = old_web     # 原有活会话: 恢复原状别越修越差
+    else:
+        a.pop("web", None)
+    return res or "协议登录未验活"
+
+
 def _web_harvest(a, p, log):
     """开窗一次, CDP 抽 openai 系 cookie -> a.web + /api/auth/session
     复核活性。邮箱已死的号这是唯一铸法 (一次性的, 之后不再开窗)。
@@ -3605,10 +3659,10 @@ def _web_mint_worker(ids, mode="mint"):
                     res = _web_harvest(a, p, log)
                     ok = res == "web会话已收"
                 else:
-                    res = _web_mint(
+                    res = _web_mint3(
                         a, p, log,
                         should_stop=lambda: WEB_JOB["stop"])
-                    ok = res == "web会话已铸"
+                    ok = bool((a.get("web") or {}).get("live"))
                 WEB_JOB["results"][aid] = \
                     ("✓ " if ok else "✗ ") + res
                 log(("✓" if ok else "✗")
@@ -3794,7 +3848,7 @@ def _ios_reg_worker(ids):
                             and _settings().get(
                                 "ios_web_how") == "proto":
                         try:
-                            r3 = _web_mint(
+                            r3 = _web_mint3(
                                 a, p, log,
                                 should_stop=lambda: IOS_JOB["stop"])
                             log("… %s: 协议铸web会话 → %s"
@@ -5141,11 +5195,19 @@ def _join_worker(ids, mname, seat="prolite"):
                         _bind_proxy(p, email)
                         a["proxy_id"] = p["id"]
                         _save_proxies(px)
-                    # 协议路径: ios.at + 邀请响应里的 invite_id
+                    # 协议路径: web.at/ios.at —— 有 invite_id 直接
+                    # accept; 没有就账号侧列自己 pending invites 接
                     iid = iid_by_email.get(email)
-                    if iid and (a.get("ios") or {}).get("at"):
-                        ok, code, detail = _proto_accept_invite(
-                            a, p, ws_id, iid)
+                    can_proto = bool(
+                        (a.get("ios") or {}).get("at")
+                        or (a.get("web") or {}).get("cookies"))
+                    if can_proto:
+                        if iid:
+                            ok, code, detail = _proto_accept_invite(
+                                a, p, ws_id, iid)
+                        else:
+                            ok, code, detail = _proto_self_accept(
+                                a, p, ws_id)
                         verified = False
                         if ok:
                             # 假成功防护: 母号复邀 —— 已落成员会进
@@ -5187,11 +5249,9 @@ def _join_worker(ids, mname, seat="prolite"):
                         elif not ok:
                             log("  %s: 协议接失败 %s %s, 转开窗"
                                 % (email, code, detail[:80]))
-                    elif iid:
-                        pass  # 无 ios.at 直接走开窗
-                    else:
-                        log("  %s: 邀请响应里没找到 "
-                            "invite_id, 走开窗碰运气" % email)
+                    elif not iid:
+                        log("  %s: 没 invite_id 也没协议会话, "
+                            "走开窗碰运气" % email)
                     dir_id, cws, err = _roxy_open_for(email, p)
                     if err or not cws:
                         JOIN_JOB["results"][aid] = "开窗: " + (err or "")
@@ -5477,17 +5537,53 @@ def _proto_leave_ws(a, p, ws_id):
         relay.close()
 
 
+def _web_at(a, p):
+    """a.web.cookies 打 /api/auth/session 刷新 web 会话,
+    顺手更新 at/st/live。返回 accessToken, 没有 -> None。"""
+    w = a.get("web") or {}
+    if not w.get("cookies"):
+        return None
+    from curl_cffi import requests as _cr
+    relay = _ChainRelay(p, _upstream())
+    try:
+        s = _cr.Session(proxy=relay.url(), impersonate="chrome",
+                        timeout=25)
+        if w.get("ua"):
+            s.headers["user-agent"] = w["ua"]
+        _jar_inject(s, w["cookies"])
+        j = s.get("https://chatgpt.com/api/auth/session",
+                  timeout=25).json()
+        if j.get("accessToken"):
+            w["at"] = j["accessToken"]
+        if j.get("sessionToken"):
+            w["st"] = j["sessionToken"]
+        if (j.get("user") or {}).get("email"):
+            w["live"] = True
+            w["live_at"] = _now()
+            w.pop("dead", None)
+        a["web"] = w
+        return w.get("at")
+    except Exception:
+        return None
+    finally:
+        relay.close()
+
+
 def _proto_accept_invite(a, p, ws_id, iid):
-    """纯协议接受邀请: ios.at + 账号代理(链式), 不开窗。
+    """纯协议接受邀请: web.at(可刷)/ios.at + 账号代理, 不开窗。
     POST /accounts/{pid}/invites/accept  {invite_id} —— 实测成功路径;
     注意 accept 常回 {"success":true} 却空炮 (席位满等), 成员确认
     交给调用方复邀一次看 already_member_emails。
     返回 (ok, code, detail)。code: no_at/at_expired/no_pid/HTTP xxx。"""
-    at = (a.get("ios") or {}).get("at")
+    ios = a.get("ios") or {}
+    # web会话 at 优先 (就是 web 端打 backend-api 的同一 token);
+    # 没有/失效用 cookie 现刷, 再退回 ios.at
+    at = (a.get("web") or {}).get("at") or _web_at(a, p)
+    if not at and ios.get("at") and not ios.get("at_dead"):
+        at = ios["at"]
     if not at:
-        return False, "no_at", ""
-    if (a.get("ios") or {}).get("at_dead"):
-        return False, "at_expired", "at_dead"
+        return (False, "at_expired", "at_dead") \
+            if ios.get("at_dead") else (False, "no_at", "")
     from curl_cffi import requests as _cr
     relay = _ChainRelay(p, _upstream())
     try:
@@ -5514,7 +5610,14 @@ def _proto_accept_invite(a, p, ws_id, iid):
 
         code, pid, found = _check()
         if code == 401:
-            return False, "at_expired", ""
+            # at 过期: web会话能刷就刷出新 at 再试一次
+            nat = _web_at(a, p)
+            if nat and nat != at:
+                at = nat
+                H["authorization"] = "Bearer " + at
+                code, pid, found = _check()
+            if code == 401:
+                return False, "at_expired", ""
         if code != 200:
             return False, "HTTP %s" % code, ""
         if found:
@@ -5528,13 +5631,116 @@ def _proto_accept_invite(a, p, ws_id, iid):
             "/invites/accept" % pid, headers=h,
             json={"invite_id": iid}))
         if ac.status_code == 401:
-            return False, "at_expired", ac.text[:150]
+            nat = _web_at(a, p)
+            if nat and nat != at:
+                at = nat
+                h["authorization"] = "Bearer " + at
+                ac = _cf_call(lambda: s.post(
+                    "https://chatgpt.com/backend-api/accounts/%s"
+                    "/invites/accept" % pid, headers=h,
+                    json={"invite_id": iid}))
+            if ac.status_code == 401:
+                return False, "at_expired", ac.text[:150]
         if ac.status_code != 200:
             return False, "HTTP %s" % ac.status_code, \
                 ac.text[:150]
         # 注意: 这里的 success 可能是假阳 (席位满等),
         # 成员确认交给调用方再邀一次看 already_member_emails
         return True, "", ""
+    finally:
+        relay.close()
+
+
+def _proto_self_accept(a, p, ws_id):
+    """账号侧协议接邀请: web.at(可刷)/ios.at 列自己名下 pending
+    invites -> 匹配目标 ws 逐个 POST accept。免开窗, 不需要
+    母号邀请响应里的 invite_id (窗口 _ACCEPT_INVITE_JS 同款)。
+    返回 (ok, code, detail)。"""
+    ios = a.get("ios") or {}
+    at = (a.get("web") or {}).get("at") or _web_at(a, p)
+    if not at and ios.get("at") and not ios.get("at_dead"):
+        at = ios["at"]
+    if not at:
+        return (False, "at_expired", "at_dead") \
+            if ios.get("at_dead") else (False, "no_at", "")
+    from curl_cffi import requests as _cr
+    relay = _ChainRelay(p, _upstream())
+    try:
+        s = _cr.Session(proxy=relay.url(),
+                        impersonate="chrome", timeout=40)
+        H = {"authorization": "Bearer " + at,
+             "content-type": "application/json"}
+
+        def _check():
+            r = _cf_call(lambda: s.get(
+                "https://chatgpt.com/backend-api/accounts"
+                "/check/v4-2023-04-27", headers=H))
+            if r.status_code != 200:
+                return r.status_code, None, False
+            pid = None
+            found = False
+            for v in (r.json().get("accounts") or {}).values():
+                x = v.get("account") or {}
+                if x.get("structure") == "personal":
+                    pid = x.get("account_id")
+                elif x.get("account_id") == ws_id:
+                    found = True
+            return 200, pid, found
+
+        code, pid, found = _check()
+        if code == 401:
+            nat = _web_at(a, p)
+            if nat and nat != at:
+                at = nat
+                H["authorization"] = "Bearer " + at
+                code, pid, found = _check()
+            if code == 401:
+                return False, "at_expired", ""
+        if code != 200:
+            return False, "HTTP %s" % code, ""
+        if found:
+            return True, "", ""
+        if not pid:
+            return False, "no_pid", ""
+        items, tried = [], []
+        for _att in range(2):
+            r = _cf_call(lambda: s.get(
+                "https://chatgpt.com/backend-api/accounts/%s"
+                "/invites" % pid, headers=H))
+            if r.status_code == 401:
+                return False, "at_expired", r.text[:150]
+            if r.status_code != 200:
+                return False, "HTTP %s" % r.status_code, \
+                    r.text[:150]
+            try:
+                j = r.json()
+            except Exception:
+                j = {}
+            items = (j.get("invites") or j.get("items")
+                     or (j if isinstance(j, list) else []))
+            if items:
+                break
+            time.sleep(5)   # 邀请传播到子号列表有延迟
+        for inv in items:
+            iid2 = inv.get("id") or inv.get("invite_id")
+            iw = (inv.get("workspace_id") or inv.get("account_id")
+                  or (inv.get("account") or {}).get("account_id"))
+            if iw and iw != ws_id:
+                continue
+            if not iid2:
+                continue
+            hh = dict(H)
+            hh["chatgpt-account-id"] = pid
+            for u in ("accounts/%s/invites/%s/accept" % (pid, iid2),
+                      "invites/%s/accept" % iid2):
+                ac = _cf_call(lambda: s.post(
+                    "https://chatgpt.com/backend-api/" + u,
+                    headers=hh, json={}))
+                tried.append(str(ac.status_code))
+                if ac.status_code == 200:
+                    return True, "", ""
+        return False, "no_invite", \
+            ",".join(tried) or "无待接邀请"
     finally:
         relay.close()
 
@@ -7914,6 +8120,21 @@ def _open_worker(accs):
             a["status"] = "opened"
             OPEN_JOB["results"][a["id"]] = "已定位, 请手动操作"
             log(f"✓ {email}: 已开到 chatgpt.com")
+            # 窗口可能带着上次的登录态 —— auth/session 有 user 就
+            # 直接通过, 不再走邮箱/验证码这套自动化
+            sem = _chatgpt_logged_in(ws)
+            if sem:
+                if sem.lower() == email.lower():
+                    if a.get("reg") not in ("new", "yes"):
+                        a["reg"] = "new"; a["reg_at"] = _now()
+                    OPEN_JOB["results"][a["id"]] = "已登录, 直接通过"
+                    log(f"✓ {email}: 窗口已登录, 跳过自动化")
+                else:
+                    OPEN_JOB["results"][a["id"]] = \
+                        f"窗口登录的是 {sem}"
+                    log(f"⚠ {email}: 窗口登录的是 {sem}"
+                        f" —— 跳过自动化, 请人工处理")
+                return
             registered = a.get("reg") in ("new", "yes")
             if registered:
                 log(f"  [{email}] ↪ 已注册账号 "
