@@ -56,6 +56,23 @@
     </div>
   </div>
 
+  <!-- Sub2API 推送 -->
+  <div class="card">
+    <div class="card-title"><i data-ic="cloud-upload"></i>Sub2API 推送（sub2api —— 子号凭证的下游池, 支持分组+代理绑定）</div>
+    <div class="row">
+      <input class="form-input" id="sub2-url" placeholder="Sub2API 地址, 如 http://127.0.0.1:8080" style="flex:1;min-width:220px">
+      <input class="form-input" id="sub2-key" type="password" placeholder="管理 API Key (x-api-key)" style="width:280px">
+      <button class="btn btn-outline btn-sm" id="sub2-test">测</button>
+      <button class="btn btn-primary btn-sm" id="sub2-save">保存</button>
+      <span class="subtitle" id="sub2-msg"></span>
+    </div>
+    <div class="hint">
+      账号页「推Sub2」下拉实时拉分组勾选推送 (batch 接口, 凭证走 <code>openai/oauth</code> 格式)；
+      默认勾选绑代理 —— 按账号代理在 Sub2 自动建/复用代理并把 <code>proxy_id</code> 绑进账号。
+      「测」拉 <code>/admin/groups/all</code> 顺带验证 key。
+    </div>
+  </div>
+
   <!-- 邮箱商城 -->
   <div class="card">
     <div class="card-title"><i data-ic="cart"></i>邮箱货源（qan8 商城 —— 谷歌邮箱API业务, 进货+602自动售后）</div>
@@ -280,6 +297,34 @@ $("cpa-save").onclick = async () => {
   loadCpa();   // 重拉: 主池镜像/名字去重后的形态
 };
 
+// ---- Sub2API ----
+async function loadSub2() {
+  const r = await fetch("/api/settings").then(r => r.json());
+  $("sub2-url").value = r.sub2_url || "";
+  $("sub2-key").value = r.sub2_key || "";
+}
+$("sub2-save").onclick = async () => {
+  const r = await post("/api/settings",
+    { sub2_url: $("sub2-url").value.trim(),
+      sub2_key: $("sub2-key").value.trim() });
+  if (r.error) return toast("✗ " + r.error);
+  $("sub2-msg").textContent = "✓ 已保存";
+  toast("✓ Sub2 配置已存");
+};
+$("sub2-test").onclick = async e => {
+  await post("/api/settings",
+    { sub2_url: $("sub2-url").value.trim(),
+      sub2_key: $("sub2-key").value.trim() });   // 先存再测
+  e.target.disabled = true;
+  $("sub2-msg").textContent = "测中…";
+  const r = await fetch("/api/sub2/groups").then(r => r.json()).catch(() => null);
+  e.target.disabled = false;
+  $("sub2-msg").textContent = r && !r.error
+    ? `✓ 连通 · ${(r.groups || []).length} 个分组` +
+      ((r.groups || [])[0] ? ` (${r.groups[0].name}…)` : "")
+    : "✗ " + ((r && r.error) || "请求失败");
+};
+
 // ---- 邮箱商城 ----
 async function loadShop() {
   const r = await fetch("/api/settings").then(r => r.json());
@@ -490,6 +535,7 @@ $("pace-save").onclick = async () => {
 
 loadUpstream();
 loadCpa();
+loadSub2();
 loadShop();
 loadMother();
 loadNamegen();

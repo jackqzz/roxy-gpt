@@ -140,6 +140,10 @@
         <button class="btn btn-outline btn-sm" id="cpa-push" title="把已生成的凭证 JSON 推入 CPA 号池 (auth-files) —— 下拉多选目标号池"><i data-ic="cloud-upload"></i>推入池 ▾</button>
         <div class="dd-menu" id="cpa-dd-menu" style="display:none"></div>
       </span>
+      <span class="dd">
+        <button class="btn btn-outline btn-sm" id="sub2-push" title="推凭证到 Sub2API —— 下拉勾选目标分组, 默认把账号代理也建/绑到 Sub2"><i data-ic="upload"></i>推Sub2 ▾</button>
+        <div class="dd-menu" id="sub2-dd-menu" style="display:none"></div>
+      </span>
       <button class="btn btn-outline btn-sm" id="cpa-queue" title="选中账号的凭证提交到远程上号器队列 —— 不直接进池, 由远程调度器按容量模型自动推 (需上号器页切到远程模式)"><i data-ic="list"></i>推队列</button>
       <button class="btn btn-outline btn-sm" id="cpa-export" title="导出选中账号的 CPA 凭证 JSON (zip 打包)"><i data-ic="download"></i>导凭证</button>
       <span class="tb-sep"></span>
@@ -388,6 +392,9 @@ function render() {
           : a.cpa === "expired"
             ? `<span class="pill pill-bad" title="授权超时, 链接已失效 —— 重跑OAuth授权">${ui.icon("clock")}已过期</span>`
             : `<span class="pill pill-dim">—</span>`;
+    const sub2 = a.sub2 === "yes"
+      ? ` <span class="pill" style="background:#f0fdf4;color:#15803d;border:1px solid #bbf7d0" title="已推 Sub2API ${esc(a.sub2_at||"")} · 远端账号#${esc(a.sub2_id ?? "?")}${(a.sub2_groups||[]).length ? " · 组 " + esc(a.sub2_groups.join(",")) : ""}">sub2✓</span>`
+      : "";
     const acts = a.archived
       ? `<button class="btn btn-ghost btn-sm" data-act="restore" data-id="${a.id}">恢复</button>
          <button class="btn btn-ghost btn-sm" data-act="bind" data-id="${a.id}" title="手动选一条代理绑给这个号 —— 恢复后开窗用这条">${ui.icon("globe")}绑IP</button>
@@ -410,7 +417,7 @@ function render() {
       <td>${reg}${webp}</td>
       <td>${pat}</td>
       <td>${sp}</td>
-      <td>${cpa}</td>
+      <td>${cpa}${sub2}</td>
       <td style="max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(a.note || a.extra || "")}">${esc(a.note || a.extra || "")}</td>
       <td style="text-align:right;white-space:nowrap">${acts}</td>
     </tr>`;
@@ -1116,6 +1123,61 @@ $("cpa-dd-menu").addEventListener("click", e => {
   }
   if (e.target.closest("#pp-go")) doCpaPush();
 });
+// ---------- 推 Sub2API ----------
+async function sub2Menu() {
+  const m = $("sub2-dd-menu");
+  m.innerHTML = `<div class="dd-opt">拉分组中…</div>`;
+  const r = await fetch("/api/sub2/groups")
+    .then(r => r.json()).catch(() => null);
+  const gs = (r && r.groups) || [];
+  m.innerHTML = gs.length
+    ? gs.map((g, i) =>
+        `<label class="dd-opt"><input type="checkbox" class="sg-cb" value="${g.id}" ${i === 0 ? "checked" : ""}><span>${esc(g.name || "#" + g.id)}</span><span class="dd-url">${esc(g.platform || "")}</span></label>`).join("")
+      + `<div class="dd-opt" style="border-top:1px solid var(--bd)"><label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="sg-bind" checked>绑账号代理</label><span class="dd-url">Sub2自动建/复用</span></div>`
+      + `<div class="dd-foot"><button class="btn btn-ghost btn-sm" id="sg-all">全选</button><span style="flex:1"></span><button class="btn btn-primary btn-sm" id="sg-go">推送</button></div>`
+    : `<div class="dd-opt">${esc((r && r.error) || "没拉到分组 — 设置页配 Sub2 或先建组")}</div>`;
+}
+$("sub2-push").onclick = e => {
+  e.stopPropagation();
+  const m = $("sub2-dd-menu");
+  if (m.style.display !== "none") { m.style.display = "none"; return; }
+  sub2Menu();
+  m.style.display = "block";
+};
+document.addEventListener("click", e => {
+  const m = $("sub2-dd-menu");
+  if (m && m.style.display !== "none" && !e.target.closest(".dd"))
+    m.style.display = "none";
+});
+$("sub2-dd-menu").addEventListener("click", e => {
+  if (e.target.closest("#sg-all")) {
+    const cbs = [...$("sub2-dd-menu").querySelectorAll(".sg-cb")];
+    const all = cbs.length && cbs.every(c => c.checked);
+    cbs.forEach(c => c.checked = !all);
+    return;
+  }
+  if (e.target.closest("#sg-go")) doSub2Push();
+});
+async function doSub2Push() {
+  if (!sel.size) return toast("先勾选账号");
+  const group_ids = [...$("sub2-dd-menu").querySelectorAll(".sg-cb:checked")]
+    .map(c => parseInt(c.value, 10)).filter(n => n > 0);
+  if (!group_ids.length) return toast("先勾目标分组");
+  const bind_proxy = $("sg-bind") ? $("sg-bind").checked : true;
+  $("sub2-dd-menu").style.display = "none";
+  const btn = $("sub2-push");
+  const ids = [...sel];
+  btn.disabled = true;
+  const r = await post("/api/accounts/sub2-push",
+    { ids, group_ids, bind_proxy });
+  btn.disabled = false;
+  if (r.error) return toast("✗ " + r.error);
+  const fails = r.failed
+    ? " · ✗ " + Object.entries(r.failed).map(([k, v]) => k + ": " + v).join(" · ")
+    : "";
+  toast(`推Sub2 ✓${r.ok}${fails}`);
+  load();
+}
 async function doCpaPush() {
   if (!sel.size) return toast("先勾选账号");
   const pools = [...$("cpa-dd-menu").querySelectorAll(".pp-cb:checked")]

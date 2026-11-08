@@ -6772,6 +6772,162 @@ def _cpa_push_cred(name, cred, st=None):
     return err
 
 
+# ---------------- Sub2API 推送 ----------------
+def _sub2_call(method, path, body=None, timeout=20, st=None):
+    """调 Sub2API 管理接口 → (status, data|None, err)。
+    认证 x-api-key; 成功响应包 {code:0, message, data}。"""
+    s = st or _settings()
+    base = (s.get("sub2_url") or "").strip().rstrip("/")
+    if not base:
+        return 0, None, "未配置 Sub2 地址 (设置页)"
+    if "://" not in base:
+        base = "http://" + base
+    key = (s.get("sub2_key") or "").strip()
+    if not key:
+        return 0, None, "未配置 Sub2 管理Key (设置页)"
+    hdrs = {"x-api-key": key}
+    url = base + path
+    up = _upstream_of(s) if url.startswith("https://") else None
+    try:
+        if method.upper() == "GET":
+            st_, b = _https_status_get(url, up, timeout,
+                                       headers=hdrs)
+        else:
+            st_, b = _http_post_json(url, body or {},
+                                     headers=hdrs, upstream=up,
+                                     timeout=timeout,
+                                     method=method.upper())
+    except Exception as e:
+        return 0, None, str(e)[:160]
+    try:
+        j = json.loads(b) if b else None
+    except Exception:
+        j = None
+    if st_ in (401, 403):
+        return st_, j, "Sub2 管理Key无效或未授权 (%d)" % st_
+    if st_ >= 400:
+        msg = (j or {}).get("message") if isinstance(j, dict) else None
+        return st_, j, "HTTP %d: %s" % (
+            st_, msg or (b or b"")[:160].decode(errors="ignore"))
+    if isinstance(j, dict) and j.get("code") not in (0, None):
+        return st_, j, str(j.get("message")
+                           or "code=%s" % j.get("code"))[:160]
+    return st_, (j.get("data") if isinstance(j, dict) else j), None
+
+
+def _sub2_groups(st=None):
+    """分组列表 → (list|None, err)。"""
+    _st, d, err = _sub2_call("GET", "/api/v1/admin/groups/all",
+                           st=st)
+    if err:
+        return None, err
+    return (d or []), None
+
+
+def _sub2_ensure_proxy(p, st=None):
+    """本地代理 dict → Sub2 远端 proxy_id: 按 协议+host+port+账密
+    匹配现成代理, 没有就建一个。返回 (id|None, err|None)。"""
+    host = (p.get("host") or "").strip()
+    try:
+        port = int(p.get("port") or 0)
+    except (TypeError, ValueError):
+        port = 0
+    if not host or not port:
+        return None, "代理字段不全"
+    scheme = (p.get("scheme") or "socks5").lower()
+    proto = "socks5h" if scheme == "socks5" else scheme
+    user = p.get("username") or ""
+    pwd = p.get("password") or ""
+    _st, d, err = _sub2_call("GET", "/api/v1/admin/proxies/all",
+                           st=st)
+    if err:
+        return None, "查代理: " + err
+    for rp in (d or []):
+        if (rp.get("protocol") or "").lower() in (proto, scheme) \
+                and (rp.get("host") or "").strip().lower() \
+                == host.lower() \
+                and int(rp.get("port") or 0) == port \
+                and (rp.get("username") or "") == user \
+                and (rp.get("password") or "") == pwd:
+            return rp.get("id"), None
+    _st2, d2, err2 = _sub2_call(
+        "POST", "/api/v1/admin/proxies",
+        {"name": "%s:%s" % (host, port), "protocol": proto,
+         "host": host, "port": port,
+         "username": user, "password": pwd}, st=st)
+    if err2:
+        return None, "建代理: " + err2
+    pid = (d2 or {}).get("id")
+    return pid, (None if pid else "建代理返回无id")
+
+
+def _sub2_jwt_payload(tok):
+    """解 JWT 中段 payload (不验签)。"""
+    try:
+        parts = str(tok or "").split(".")
+        if len(parts) < 2:
+            return {}
+        seg = parts[1] + "=" * ((4 - len(parts[1]) % 4) % 4)
+        d = json.loads(base64.urlsafe_b64decode(seg))
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _sub2_auth_claims(tok):
+    a = _sub2_jwt_payload(tok).get("https://api.openai.com/auth")
+    return a if isinstance(a, dict) else {}
+
+
+def _sub2_item(a, cred, gids):
+    """本地账号+a.cred → sub2api CreateAccountRequest
+    (platform=openai, type=oauth; 字段照 sub2api 源码对齐)。"""
+    at = str(cred.get("access_token") or "")
+    pl = _sub2_jwt_payload(at)
+    pa = _sub2_auth_claims(at)
+    exp = pl.get("exp")
+    if not isinstance(exp, int) or exp <= 0:
+        exp = int(time.time()) + 863999
+    caid = str(pa.get("chatgpt_account_id")
+               or cred.get("account_id") or "")
+    ia = _sub2_auth_claims(cred.get("id_token") or "")
+    org = str(ia.get("organization_id") or "")
+    if not org:
+        for o in (ia.get("organizations") or []):
+            if isinstance(o, dict) and o.get("id"):
+                org = str(o["id"])
+                break
+    if not org:
+        org = str(pa.get("organization_id") or pa.get("poid") or "")
+    return {
+        "name": a["email"],
+        "platform": "openai",
+        "type": "oauth",
+        "credentials": {
+            "access_token": at,
+            "refresh_token": str(cred.get("refresh_token") or ""),
+            "id_token": str(cred.get("id_token") or ""),
+            "session_token": str(cred.get("session_token") or ""),
+            "expires_in": max(0, exp - int(time.time())),
+            "expires_at": exp,
+            "chatgpt_account_id": caid,
+            "chatgpt_user_id": str(pa.get("chatgpt_user_id") or ""),
+            "organization_id": org,
+            "client_id": str(cred.get("client_id")
+                             or pl.get("client_id")
+                             or "app_EMoamEEZ73f0CkXaXp7hrann"),
+            "plan_type": str(cred.get("plan_type")
+                             or pa.get("chatgpt_plan_type") or ""),
+            "workspace_id": caid,
+        },
+        "extra": {"email": a["email"]},
+        "group_ids": [int(g) for g in gids],
+        "concurrency": 10,
+        "priority": 1,
+        "auto_pause_on_expired": True,
+    }
+
+
 # ---------------- Codex OAuth 本地实现 ----------------
 # 照 CLIProxyAPI internal/auth/codex 源码: PKCE → auth.openai.com
 # 授权 → 回调 code → 经账号代理换 token → CPA 凭证 JSON。
@@ -8042,6 +8198,14 @@ _REG_DONE_JS = ("fetch('/api/auth/session',{credentials:'include'})"
                 ".then(s=>s&&s.user?'session':null)"
                 ".catch(()=>null)")
 
+# 「You're all set」注册/登录落地页 (auth.openai.com 域,
+# session 探针够不着) —— 文本认到即算完成
+_REG_ALLSET_JS = (
+    "(()=>{var t=document.title+' '+(document.body"
+    "?document.body.innerText.slice(0,800):'');"
+    "return /you'?re all set|一切就绪|准备就绪|已完成/i"
+    ".test(t)?'allset':null})()")
+
 
 def _open_worker(accs):
     """并行: 选代理 -> 绑定 -> Roxy 开窗 -> 跳 chatgpt.com -> 按设置
@@ -8244,8 +8408,9 @@ def _open_worker(accs):
                                     a["status"] = "email_dead"
                                 done_how = "人工跳过/邮箱失效"
                                 break
-                            # 信号A: 页面实况 —— 任一 chatgpt.com
-                            # 标签页带登录态即判完成
+                            # 信号A: 页面实况 —— 任一标签页
+                            # 「You're all set」落地页或 chatgpt
+                            # .com 登录态即判完成
                             try:
                                 if brw is None:
                                     brw = pw.chromium \
@@ -8253,14 +8418,19 @@ def _open_worker(accs):
                                 hit = None
                                 for ctx0 in brw.contexts:
                                     for pg0 in ctx0.pages:
-                                        if "chatgpt.com" not in \
-                                                (pg0.url or ""):
-                                            continue
                                         try:
                                             hit = pg0.evaluate(
-                                                _REG_DONE_JS)
+                                                _REG_ALLSET_JS)
                                         except Exception:
-                                            pass
+                                            hit = None
+                                        if not hit \
+                                                and "chatgpt.com" \
+                                                in (pg0.url or ""):
+                                            try:
+                                                hit = pg0.evaluate(
+                                                    _REG_DONE_JS)
+                                            except Exception:
+                                                pass
                                         if hit:
                                             break
                                     if hit:
@@ -8269,7 +8439,10 @@ def _open_worker(accs):
                                 if hit:
                                     a["reg"] = "new"
                                     a["reg_at"] = _now()
-                                    done_how = "登录态自动识别"
+                                    done_how = (
+                                        "落地页识别"
+                                        if hit == "allset"
+                                        else "登录态自动识别")
                                     break
                             except Exception:
                                 bad_cdp += 1
@@ -8434,7 +8607,9 @@ class H(BaseHTTPRequestHandler):
                 "ios_auto_sec": s.get("ios_auto_sec", False),
                 "ios_web_how": s.get("ios_web_how") or "open",
                 "join_auto_oauth": s.get("join_auto_oauth", True),
-                "leave_autoclose": s.get("leave_autoclose", False)})
+                "leave_autoclose": s.get("leave_autoclose", False),
+                "sub2_url": s.get("sub2_url") or "",
+                "sub2_key": s.get("sub2_key") or ""})
         if self.path == "/api/shop/info":
             # 商城余额 + 配置的 sku 实况; 顺带补拉滞留挂单
             if not _shop_key():
@@ -8507,6 +8682,14 @@ class H(BaseHTTPRequestHandler):
             return self._json({"accounts": out, "stats": stats,
                                "target": TARGET_URL,
                                "oauth_ttl_min": _oauth_ttl_s() // 60})
+        if self.path == "/api/sub2/groups":
+            gs, err = _sub2_groups()
+            if err:
+                return self._json({"error": err})
+            return self._json({"groups": [
+                {"id": g.get("id"), "name": g.get("name") or "",
+                 "platform": g.get("platform") or ""}
+                for g in gs]})
         if self.path == "/api/accounts/open/status":
             return self._json({"running": OPEN_JOB["running"],
                                "log": OPEN_JOB["log"][-80:],
@@ -8693,6 +8876,20 @@ class H(BaseHTTPRequestHandler):
             if not items:
                 return self._json({"error": "没有可导出的凭证"}, 404)
             gs = _gsettings()
+            if len(items) == 1:
+                name, cred = items[0]
+                data = json.dumps(
+                    _cpa_cred_out(cred, gs),
+                    ensure_ascii=False, indent=2).encode()
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.send_header(
+                    "content-disposition",
+                    'attachment; filename="%s"' % name)
+                self.send_header("content-length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
             buf = io.BytesIO()
             with zipfile.ZipFile(buf, "w",
                                  zipfile.ZIP_DEFLATED) as z:
@@ -8778,6 +8975,21 @@ class H(BaseHTTPRequestHandler):
                     {"error": "没有可导出的凭证 (先跑🔗OAuth授权)"},
                     404)
             st = _settings()
+            if len(items) == 1:
+                # 单个号直接给 JSON 文件, 不打 zip
+                name, cred = items[0]
+                data = json.dumps(
+                    _cpa_cred_out(cred, st),
+                    ensure_ascii=False, indent=2).encode()
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.send_header(
+                    "content-disposition",
+                    'attachment; filename="%s"' % name)
+                self.send_header("content-length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
             buf = io.BytesIO()
             with zipfile.ZipFile(buf, "w",
                                  zipfile.ZIP_DEFLATED) as z:
@@ -8934,7 +9146,8 @@ class H(BaseHTTPRequestHandler):
                       "shop_key", "shop_sku",
                       "ios_auto_open", "ios_auto_sec",
                       "ios_web_how", "join_auto_oauth",
-                      "leave_autoclose"):
+                      "leave_autoclose",
+                      "sub2_url", "sub2_key"):
                 if k in req:
                     s[k] = req[k]
             err = _save_cpa_pools(s, req) or _save_cpa_misc(s, req)
@@ -9735,6 +9948,80 @@ class H(BaseHTTPRequestHandler):
             _save_accounts(accs)
             return self._json({"ok": ok, "failed": failed or None,
                                "pools": res})
+        if self.path == "/api/accounts/sub2-push":
+            req = self._body()
+            ids = req.get("ids") or []
+            if not ids:
+                return self._json({"error": "没选账号"})
+            s = _settings()
+            if not (s.get("sub2_url") or "").strip():
+                return self._json({"error": "先到设置页配 Sub2 地址"})
+            gids = []
+            for x in (req.get("group_ids") or []):
+                try:
+                    gids.append(int(x))
+                except (TypeError, ValueError):
+                    pass
+            bind = req.get("bind_proxy") is not False
+            accs = _load_accounts()
+            pmap = {p["id"]: p for p in _load_proxies()}
+            items, who, failed = [], {}, {}
+            px_cache = {}          # _proxy_key → (sub2 proxy_id, err)
+            for a in accs:
+                if a["id"] not in ids:
+                    continue
+                cred = a.get("cred")
+                if not cred or not cred.get("access_token"):
+                    failed[a["email"]] = "没有凭证 (先跑OAuth)"
+                    continue
+                it = _sub2_item(a, cred, gids)
+                if bind:
+                    p = pmap.get(a.get("proxy_id") or "") \
+                        or pmap.get((a.get("web") or {})
+                                    .get("px") or "")
+                    if not p and cred.get("proxy_url"):
+                        p, _e = _parse_proxy_line(
+                            cred["proxy_url"])
+                    if not p:
+                        failed[a["email"]] = \
+                            "没代理可绑 (proxy_id/web.px/凭证proxy_url都没有)"
+                        continue
+                    ck = _proxy_key(p)
+                    if ck not in px_cache:
+                        px_cache[ck] = _sub2_ensure_proxy(p, st=s)
+                    pid, pxerr = px_cache[ck]
+                    if not pid:
+                        failed[a["email"]] = \
+                            "Sub2代理: " + (pxerr or "?")
+                        continue
+                    it["proxy_id"] = pid
+                items.append(it)
+                who[a["email"]] = a
+            ok = 0
+            if items:
+                _st, d, err = _sub2_call(
+                    "POST", "/api/v1/admin/accounts/batch",
+                    {"accounts": items}, timeout=60, st=s)
+                if err:
+                    return self._json(
+                        {"error": "Sub2 推送失败: " + err,
+                         "failed": failed or None})
+                res = (d or {}).get("results") \
+                    if isinstance(d, dict) else d
+                for r in (res or []):
+                    em = r.get("name") or ""
+                    if r.get("success"):
+                        ok += 1
+                        a = who.get(em)
+                        if a:
+                            a["sub2"] = "yes"
+                            a["sub2_at"] = _now()
+                            a["sub2_id"] = r.get("id")
+                            a["sub2_groups"] = gids
+                    else:
+                        failed[em] = r.get("error") or "失败"
+            _save_accounts(accs)
+            return self._json({"ok": ok, "failed": failed or None})
         # ---------- Google 账号 (antigravity) ----------
         if self.path == "/api/g/proxies/import":
             try:
