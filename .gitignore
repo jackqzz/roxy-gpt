@@ -18,3 +18,4 @@ gsettings.json
 ios/
 gpusher.json
 auto_state.json
+.run/

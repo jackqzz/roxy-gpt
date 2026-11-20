@@ -164,6 +164,8 @@
       </select>
       <label style="display:flex;align-items:center;gap:6px;font-size:13px" title="iOS 注册成功后立即补: ios.at 直连 backend-api 绑 TOTP 2FA (secret 存 a.totp); iOS 链 OTP 验证后 user/register 创建密码 (存 a.password)。需接码链接仍可用; 失败只记日志不废号">
         <input type="checkbox" id="st-ios-sec"><i data-ic="key"></i>iOS注册后自动补密码+2FA</label>
+      <span class="subtitle" title="iOS 协议注册并行线程数 —— 每线程独占一条代理IP; 代理数少于并发时多余线程会复用">iOS注册并发</span>
+      <input class="form-input" id="st-ios-conc" type="number" min="1" max="10" step="1" style="width:56px">
       <label style="display:flex;align-items:center;gap:6px;font-size:13px" title="加入空间成功后自动给这批号跑 OAuth 授权 (协议会话优先, 没协议会话的走开窗路)。手动停止的批次不触发; CPA 任务在跑时不抢">
         <input type="checkbox" id="st-join-oauth"><i data-ic="key"></i>加入空间后自动OAuth授权</label>
       <label style="display:flex;align-items:center;gap:6px;font-size:13px" title="退出空间成功后自动归档账号: 关闭浏览器进程、删除 Roxy 窗口释放配额、停监听 —— 协议/窗口两种退出路径都生效">
@@ -470,6 +472,7 @@ async function loadSteps() {
   $("st-workers").value = r.open_workers ?? 3;
   $("st-ios-open").checked = r.ios_auto_open === true;
   $("st-ios-sec").checked = r.ios_auto_sec === true;
+  $("st-ios-conc").value = r.ios_reg_conc ?? 3;
   $("st-web-how").value = r.ios_web_how || "open";
   $("st-join-oauth").checked = r.join_auto_oauth !== false;
   $("st-leave-close").checked = r.leave_autoclose === true;
@@ -479,6 +482,8 @@ function stepsPayload() {
     parseInt($("st-workers").value) || 3)),
     ios_auto_open: $("st-ios-open").checked,
     ios_auto_sec: $("st-ios-sec").checked,
+    ios_reg_conc: Math.max(1, Math.min(10,
+      parseInt($("st-ios-conc").value) || 3)),
     ios_web_how: $("st-web-how").value,
     join_auto_oauth: $("st-join-oauth").checked,
     leave_autoclose: $("st-leave-close").checked };

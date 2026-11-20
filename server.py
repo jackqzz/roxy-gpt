@@ -28,6 +28,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import gpusher
+import totp_binding as _totp_binding
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PORT = 8322
@@ -801,18 +802,40 @@ def _bound_count(p):
     return len(p.get("bound") or [])
 
 
-def _pick_proxy(px, email=None, limit=PICK_LIMIT, excl=None):
+_PX_LOCK = threading.Lock()     # proxies.json 读改写串行
+_ACCT_LOCK = threading.Lock()   # accounts.json 读改写串行
+_REG_PX_INUSE = set()           # iOS并行注册在飞的代理id (线程独占IP)
+
+
+def _pick_proxy(px, email=None, limit=PICK_LIMIT, excl=None,
+                rand=False, cf_ttl=0):
     """未封禁 + 绑定<limit + 非冷却(对 email) + 不在 excl;
-    排序: 绑定数 -> 已知失效沉底 -> 最久未用。"""
+    排序: 绑定数 -> 已知失效沉底 -> 最久未用。
+    rand=True 时在可用池里随机挑 (OAuth等要摊IP的场景,
+    不然每次都钉死前几条)。
+    cf_ttl>0 时排除 cf_oai 标记未超 cf_ttl 秒的代理
+    (OpenAI CF挑战拦过的; 过滤后没候选则自动放宽)。"""
     cands = [p for p in px if not p.get("banned")
+             and not p.get("auth_dead")
              and _bound_count(p) < limit
              and (not excl or p.get("id") not in excl)]
     avail = [p for p in cands if not _cooling(p, email)]
+    if cf_ttl and avail:
+        clean = [p for p in avail
+                 if time.time() - (p.get("cf_oai") or 0)
+                 > cf_ttl]
+        if clean:
+            avail = clean
     PICK_LAST["cooled"] = len(cands) - len(avail)
+    if not avail:
+        return None
+    if rand:
+        import random
+        return random.choice(avail)
     avail.sort(key=lambda p: (_bound_count(p),
                               p.get("alive") is False,
                               p.get("last_used") or "1970-01-01"))
-    return avail[0] if avail else None
+    return avail[0]
 
 
 def _bind_proxy(p, email, secs=None):
@@ -1052,16 +1075,32 @@ def _mail_code_once(mail_url, upstream):
 
 def _fetch_mail_code(mail_url, upstream, log,
                      timeout=240, interval=5, exclude=(),
-                     should_stop=None):
+                     should_stop=None, resend=None,
+                     resend_after=45, reset_exclude_on_resend=False,
+                     strict=False):
     """轮询接码链接拿新验证码。
     exclude=已知旧码 —— 供应商接口有缓存滞后, 新邮件进来前会把
-    上一次的旧码再返回一阵, 必须排除, 否则填旧码被页面拒。"""
+    上一次的旧码再返回一阵, 必须排除, 否则填旧码被页面拒。
+    resend=等不到时调一次的触发器 (如 lg.resend_otp), resend_after
+    秒后还没新码才触发; reset_exclude_on_resend=触发被接受后
+    旧码名单清零 (服务端重发会出新码, 也可能撞回旧码)。
+    strict=True 时超时只见过排除码也返回 None (不给页面喂废码)。"""
     excl = set(exclude)
     deadline = time.time() + timeout
+    t0 = time.time()
     last_seen = None
+    resent = False
     while time.time() < deadline:
         if should_stop and should_stop():
             return None
+        if resend and not resent \
+                and time.time() - t0 >= resend_after:
+            resent = True
+            try:
+                if resend() and reset_exclude_on_resend:
+                    excl.clear()
+            except Exception:
+                pass
         try:
             code, err = _mail_code_once(mail_url, upstream)
             if err == "dead":
@@ -1074,6 +1113,8 @@ def _fetch_mail_code(mail_url, upstream, log,
         except Exception as e:
             log(f"  取码请求失败: {str(e)[:60]}")
         time.sleep(interval)
+    if strict:
+        return None
     return last_seen       # 兜底: 到超时仍只有旧码也返回, 让页面判定
 
 
@@ -2297,6 +2338,7 @@ class _ChainRelay:
     def __init__(self, p, up, timeout=30):
         self.p, self.up, self.timeout = p, up, timeout
         self.dead = False
+        self.last_err = None     # 最后一次链式拨号失败原因
         import socketserver
         me = self
 
@@ -2318,12 +2360,35 @@ class _ChainRelay:
                         c.sendall(b"HTTP/1.1 400 Bad\r\n\r\n")
                         return
                     host, port = m.group(1), int(m.group(2))
-                    s = _dial_via_account_proxy(
-                        me.p, host, port, me.timeout, me.up)
+                    last = None
+                    for _try in range(3):
+                        try:
+                            s = _dial_via_account_proxy(
+                                me.p, host, port, me.timeout, me.up)
+                            break
+                        except Exception as e:
+                            last = e
+                            s = None
+                    if s is None:
+                        raise last
                     c.sendall(b"HTTP/1.1 200 Connection established"
                               b"\r\n\r\n")
                     me._pipe(c, s)
-                except Exception:
+                except Exception as e:
+                    me.last_err = str(e)[:150]
+                    if (isinstance(me.p, dict) and me.p.get("id")
+                            and "账号代理" in me.last_err
+                            and ("认证" in me.last_err
+                                 or "auth" in me.last_err.lower())):
+                        # 账号代理账密失效 —— 统一打标, 不再被选
+                        try:
+                            pxs = _load_proxies()
+                            for _p in pxs:
+                                if _p.get("id") == me.p["id"]:
+                                    _p["auth_dead"] = time.time()
+                            _save_proxies(pxs)
+                        except Exception:
+                            pass
                     try:
                         c.sendall(b"HTTP/1.1 502 Upstream\r\n\r\n")
                     except Exception:
@@ -2407,6 +2472,23 @@ class _IosRegistrar:
     def _jd(self, obj):
         return json.dumps(obj, separators=(",", ":"))
 
+    def _req(self, method, url, **kw):
+        """传输层重试: 链式隧道被代理/上级空闲杀掉时 curl 报
+        连接类错误 —— 重发走新 CONNECT=新链路, 至多3次;
+        HTTP 层状态码原样返回不重试。"""
+        err = None
+        for att in range(3):
+            try:
+                return getattr(self.s, method)(url, **kw)
+            except Exception as e:
+                err = e
+                if att < 2:
+                    self.log("  %s 传输失败, 重连隧道重试(%d/3): %s"
+                             % (method, att + 2, str(e)[:60]))
+                    time.sleep(0.8 * (att + 1))
+        raise err
+
+
     def headers(self, extra=None):
         h = [("content-type", "application/json"),
              ("accept", "application/json"),
@@ -2454,7 +2536,7 @@ class _IosRegistrar:
                 b64(r.to_bytes(32, "big") + s.to_bytes(32, "big")))
 
     def warmup(self):
-        r = self.s.get(
+        r = self._req("get",
             "https://ios.chat.openai.com"
             "/public-api/mobile/server_status/v1",
             headers=self.headers())
@@ -2486,8 +2568,8 @@ class _IosRegistrar:
             ("ios_app_version", "37999862476"),
         ]
         for att in range(1, 4):
-            r = self.s.get(_IOS_AUTH_URL, params=params,
-                           headers=self.headers())
+            r = self._req("get", _IOS_AUTH_URL, params=params,
+                          headers=self.headers())
             cf = r.headers.get("cf-mitigated", "-")
             self.log("  authorize #%d: %d cf=%s"
                      % (att, r.status_code, cf))
@@ -2501,8 +2583,8 @@ class _IosRegistrar:
         raise RuntimeError("authorize 一直拿不到 200")
 
     def next_step(self, body, expect, tag):
-        r = self.s.post(_IOS_NEXT_URL, data=self._jd(body),
-                        headers=self.headers([("accept", "*/*")]))
+        r = self._req("post", _IOS_NEXT_URL, data=self._jd(body),
+                      headers=self.headers([("accept", "*/*")]))
         try:
             data = r.json()
         except Exception:
@@ -2522,8 +2604,8 @@ class _IosRegistrar:
                 "code_verifier": self.code_verifier,
                 "grant_type": "authorization_code",
                 "code": code}
-        r = self.s.post(_IOS_TOKEN_URL, data=self._jd(body),
-                        headers=self.headers(
+        r = self._req("post", _IOS_TOKEN_URL, data=self._jd(body),
+                      headers=self.headers(
                             [("accept", "*/*"),
                              ("dpop", self.dpop()),
                              ("oai-uit", "True")]))
@@ -2538,8 +2620,8 @@ class _IosRegistrar:
         body = {"client_id": _IOS_CLIENT_ID,
                 "grant_type": "refresh_token",
                 "refresh_token": rt}
-        r = self.s.post(_IOS_TOKEN_URL, data=self._jd(body),
-                        headers=self.headers(
+        r = self._req("post", _IOS_TOKEN_URL, data=self._jd(body),
+                      headers=self.headers(
                             [("accept", "*/*"),
                              ("dpop", self.dpop()),
                              ("oai-uit", "True")]))
@@ -2548,6 +2630,34 @@ class _IosRegistrar:
             raise RuntimeError("refresh 失败: %d %s"
                                % (r.status_code, r.text[:200]))
         return r.json()
+
+
+def _reg_next(reg, body, tag):
+    """next_step 非严格版: 不校验返回 type, 给步进分支判型用。
+    返回 (status, data)。"""
+    r = reg.s.post(_IOS_NEXT_URL, data=reg._jd(body),
+                   headers=reg.headers([("accept", "*/*")]))
+    try:
+        j = r.json()
+    except Exception:
+        j = {}
+    reg.log("  %s: %d type=%s" % (tag, r.status_code, j.get("type")))
+    return r.status_code, j
+
+
+def _reg_password(reg, a, log):
+    """create_account_password 页 → next 提交生成密码。
+    服务端主动给这步时必须交 (不是可选): iOS 客户端注册同流。
+    成功落 a.password/password_at。返回 (status, data)。"""
+    pwd = _gen_password()
+    st, j = _reg_next(
+        reg, {"data": {"password": pwd},
+              "origin_page_type": "create_account_password"}, "pwd")
+    if st == 200:
+        a["password"] = pwd
+        a["password_at"] = _now()
+        log("  密码已提交注册 (create_account_password)")
+    return st, j
 
 
 def _ios_refresh_at(a, p, log):
@@ -2628,35 +2738,9 @@ _PWD_REG_URL = ("https://auth.openai.com"
 
 def _mfa_totp_present(info):
     """mfa_info 响应里 totp factor 已启用?
-    实测形态: factors.totp 是列表 ([]=未绑, 非空=已绑 factor 对象),
-    也可能退化成 {enabled:…} 单 dict 或 factors 本身是 factor 列表。"""
-    def _on(v):
-        """单个 factor 值是否算已绑 (None/False/显式 disabled 不算)。"""
-        if v is None or v is False:
-            return False
-        if isinstance(v, list):
-            return any(_on(x) for x in v)
-        if isinstance(v, dict):
-            e = v.get("enabled", v.get("verified",
-                                     v.get("is_enabled")))
-            if e is not None:
-                return str(e).strip().lower() not in (
-                    "", "0", "false", "off", "none")
-            return bool(v)          # 空 dict 按 auto-team 口径=已绑
-        return bool(v)
-    f = (info or {}).get("factors") if isinstance(info, dict) \
-        else None
-    if isinstance(f, dict):
-        return _on(f.get("totp"))
-    if isinstance(f, list):
-        for it in f:
-            if not isinstance(it, dict):
-                continue
-            if str(it.get("type") or it.get("factor_type")
-                   or "").strip().lower() != "totp":
-                continue
-            return _on(it)
-    return False
+    (totp_binding.totp_present: active/verified/enabled 等
+    启用态才算, pending/disabled 不算)。"""
+    return _totp_binding.totp_present(info)
 
 
 def _open_pwd_step(lg, log):
@@ -2730,93 +2814,217 @@ def _user_register(lg, email, password, log):
     return ok, ("HTTP %d %s" % (r.status_code, body[:150]))
 
 
-def _mfa_ops(s, at, a, log):
-    """会话 s + Bearer at 打 backend-api 绑 TOTP:
-    mfa_info -> enroll -> (secret 先落盘) -> activate -> 复核。
-    成功写 a.totp/a.totp_id/a.totp_ok/a.totp_at。
-    返回 (ok, code, detail); code: ""|at_expired|reauth|other。
-    enroll 的 401 "User must re-authenticate" = at 的
-    pwd_auth_time 太旧, 要登录链现场换 at —— code='reauth'。"""
-    H = {"authorization": "Bearer " + at,
-         "content-type": "application/json"}
-    r = _cf_call(lambda: s.get(
-        _MFA_BASE + "/mfa_info", headers=H))
-    if r.status_code == 401:
-        return False, "at_expired", ""
-    if r.status_code != 200:
-        return False, "other", "mfa_info HTTP %d %s" % (
-            r.status_code, (r.text or "")[:80])
-    info = r.json() if r.text else {}
-    if _mfa_totp_present(info):
-        if not (a.get("totp") or "").strip():
-            return False, "other", "服务端已绑2FA,本地无secret(取不回)"
-        a["totp_ok"] = True          # 对账: 服务端认账则补标
-        return True, "", "已绑"
-    r3 = _cf_call(lambda: s.post(
-        _MFA_BASE + "/mfa/enroll", headers=H,
-        json={"factor_type": "totp"}))
-    if r3.status_code == 401:
-        if "re-authenticate" in (r3.text or "").lower():
-            return False, "reauth", ""
-        return False, "at_expired", ""
-    if r3.status_code != 200:
-        return False, "other", "enroll HTTP %d %s" % (
-            r3.status_code, (r3.text or "")[:100])
-    en = r3.json() or {}
-    secret = en.get("secret") or ""
-    sid = en.get("session_id") or ""
-    fid = (en.get("factor") or {}).get("id") or ""
-    if not secret or not sid:
-        return False, "other", "enroll 缺 secret/session_id: %s" % (
-            str(en)[:100])
-    # ★ secret 只下发一次 —— 先落盘再激活, 激活挂了也还有 secret
-    a["totp"] = secret
-    if fid:
-        a["totp_id"] = fid
-    r4 = _cf_call(lambda: s.post(
-        _MFA_BASE + "/mfa/user/activate_enrollment",
-        headers=H,
-        json={"code": _totp_code(secret),
-              "factor_type": "totp",
-              "session_id": sid}))
-    if r4.status_code != 200:
-        return False, "other", "activate HTTP %d %s" % (
-            r4.status_code, (r4.text or "")[:100])
-    time.sleep(2)
-    r5 = _cf_call(lambda: s.get(
-        _MFA_BASE + "/mfa_info", headers=H))
-    ok5 = r5.status_code == 200 and _mfa_totp_present(
-        r5.json() if r5.text else {})
-    log("  mfa_info 复核: %s" % (
-        "enabled" if ok5 else "未确认 (enroll+activate 均 200,"
-                              " 按成功算)"))
-    a["totp_ok"] = True      # activate 200 = 已绑; 复核仅信息
-    a["totp_at"] = _now()
-    return True, "", ""
-
-
-def _ios_bind_totp(a, p, log):
-    """ios.at 快通道绑 TOTP。返回 (True,"") / (False, code):
-    at_expired=调用方 rt 刷新重试; reauth=at.auth_time 太老,
-    要走 codex 登录链现场换 at。"""
-    ios = a.get("ios") or {}
-    at = ios.get("at")
-    if not at:
-        return False, "没有 ios.at"
-    if ios.get("at_dead"):
-        return False, "at_expired"
-    from curl_cffi import requests as _cr
-    relay = _ChainRelay(p, _upstream())
+def _save_acct(a):
+    """单号字段 merge 落盘: 重读 accounts.json 找同 id 覆盖写。
+    给长流程中途存档 (密码/2FA 断点) 用。并发注册会并行调
+    它 —— 读改写全程持 _ACCT_LOCK, 否则两线程互丢修改。"""
     try:
-        s = _cr.Session(proxy=relay.url(),
-                        impersonate="chrome", timeout=40)
-        ok, code, detail = _mfa_ops(s, at, a, log)
-        if ok:
-            return True, detail or ""
-        return False, code if code in ("at_expired", "reauth") \
-            else detail
-    finally:
-        relay.close()
+        with _ACCT_LOCK:
+            rows = _load_accounts()
+            cur = next(
+                (x for x in rows if x["id"] == a["id"]), None)
+            if cur is None:
+                return False
+            cur.clear()
+            cur.update(a)
+            _save_accounts(rows)
+        return True
+    except Exception:
+        return False
+
+
+def _mfa_ops(s, at, a, log, persist=None, should_stop=None):
+    """会话 s + Bearer at 打 backend-api 绑 TOTP ——
+    totp_binding.bind_totp 的薄封装 (可断点续激活:
+    enroll 后 secret+session 落 a.totp_enrollment 先存档再激活,
+    激活挂了重跑续激活不再重 enroll; factor ID 双向核对)。
+    返回 (ok, code, detail); code: ""|at_expired|reauth|other。
+    enroll 的 401 "re-authenticate" = at 的 pwd_auth_time 太旧,
+    要登录链现场换 at —— code='reauth'。"""
+    return _totp_binding.bind_totp(
+        s, at, a, log,
+        persist=persist or _save_acct,
+        should_stop=should_stop,
+        request=_cf_call,
+        generate_code=_totp_code, now=_now)
+
+
+def _account_bind_totp(a, p, log, should_stop=None):
+    """多凭据源绑 TOTP: ios.at → web.at 依次试, 各自带刷新通道。
+    ios: at_dead/rt 换新; web: cookies 打 _web_at 现刷 (协议铸的
+    web 会话没 ios.at 也能绑 —— 不用邮箱)。
+    返回 (ok, code, detail); code: at_expired|reauth|other。
+    at_expired/reauth = 调用方该走 codex 登录链现场换 at。"""
+    from curl_cffi import requests as _cr
+    last = (False, "missing_at", "没有可用的 iOS/Web 登录凭据")
+    for source in ("ios", "web"):
+        if should_stop and should_stop():
+            raise InterruptedError("已停止绑定2FA")
+        cred = a.get(source) or {}
+        if not cred.get("at") \
+                and not (source == "web" and cred.get("cookies")):
+            continue
+        refreshed = False
+        if cred.get("at_dead") or not cred.get("at"):
+            if source == "ios":
+                if not cred.get("rt"):
+                    continue
+                if not _ios_refresh_at(a, p, log)[0]:
+                    continue
+                cred = a.get("ios") or {}
+                refreshed = True
+            else:
+                if not _web_at(a, p):
+                    continue
+                cred = a.get("web") or {}
+                refreshed = True
+        for attempt in range(2):
+            if not cred.get("at"):
+                break
+            relay = _ChainRelay(p, _upstream())
+            try:
+                s = _cr.Session(proxy=relay.url(),
+                                impersonate="chrome", timeout=40)
+                if source == "web":
+                    if cred.get("ua"):
+                        s.headers.update(
+                            {"user-agent": cred["ua"]})
+                    _jar_inject(s, cred.get("cookies") or {})
+                last = _mfa_ops(s, cred["at"], a, log,
+                                should_stop=should_stop)
+            except InterruptedError:
+                raise
+            except Exception as exc:
+                return False, "other", \
+                    "2FA请求失败（%s）" % type(exc).__name__
+            finally:
+                relay.close()
+            if last[0]:
+                return last
+            if last[1] == "at_expired" and attempt == 0 \
+                    and not refreshed:
+                if source == "ios" and cred.get("rt") \
+                        and _ios_refresh_at(a, p, log)[0]:
+                    cred = a.get("ios") or {}
+                    refreshed = True
+                    continue
+                if source == "web" and cred.get("cookies") \
+                        and _web_at(a, p):
+                    cred = a.get("web") or {}
+                    refreshed = True
+                    continue
+            break
+        if last[1] not in ("at_expired", "reauth"):
+            return last         # 真错误不拖去下一个源
+    return last
+
+
+def _require_email_otp(status, payload):
+    """codex 邮箱提交后的页面判定 → 返回 email_verification_mode。
+    没进 email_otp_verification 直接抛错 (要密码/未注册等)。"""
+    page = payload.get("type", "") if isinstance(payload, dict) else ""
+    if status != 200:
+        raise RuntimeError(
+            "登录邮箱步骤失败 HTTP %d，未进入验证码等待" % status)
+    if page != "email_otp_verification":
+        raise RuntimeError(
+            "登录需要密码" if "password" in page
+            else "登录未进入邮箱验证码步骤")
+    mode = (payload.get("payload") or {}).get(
+        "email_verification_mode") or ""
+    if mode == "passwordless_signup":
+        raise RuntimeError("账号尚未注册，请先完成注册")
+    return mode
+
+
+def _codex_wait_otp(login, account, log,
+                    should_stop=None, timeout=240):
+    """在活动的登录会话里等邮箱 OTP 并逐码提交校验。
+    比一次性等码强: 发送压制时 ~45s 没新码自动 resend 一次;
+    被拒的码进 rejected 名单继续等下一封 (至多 3 个候选)。"""
+    deadline = time.monotonic() + timeout
+    rejected = set()
+    resend_attempted = False
+
+    def stopped():
+        return bool(should_stop and should_stop())
+
+    def resend():
+        nonlocal resend_attempted
+        if resend_attempted or stopped():
+            return False
+        resend_attempted = True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        accepted = login.resend_otp(timeout=min(15, remaining))
+        if accepted:
+            rejected.clear()
+        return accepted
+
+    # passwordless_login: 进 OTP 页不保证已发信 —— 显式补一发
+    if getattr(login, "otp_mode", "") == "passwordless_login":
+        log("  免密码登录：请求发送本轮邮箱验证码")
+        resend()
+
+    for attempt in range(3):
+        if stopped():
+            raise InterruptedError("已停止等待邮箱验证码")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("等待邮箱验证码超时，未取得新码")
+        code = _fetch_mail_code(
+            account["mail_url"], _upstream(), log, timeout=remaining,
+            interval=5, exclude=set(rejected), should_stop=should_stop,
+            resend=resend if not resend_attempted else None,
+            resend_after=45, reset_exclude_on_resend=True,
+            strict=True)
+        if stopped():
+            raise InterruptedError("已停止等待邮箱验证码")
+        if code == "dead":
+            account["email_dead"] = True
+            raise RuntimeError("邮箱取码接口报告账号失效 (602)")
+        if not code:
+            raise TimeoutError("等待邮箱验证码超时，取码源未提供新码")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("等待邮箱验证码超时，未继续提交候选码")
+        log("  已取得验证码候选，正在由登录服务校验（第%d次）"
+            % (attempt + 1))
+        status, payload = login.next(
+            {"data": {"code": code, "intent": "validate",
+                      "username_kind": "email"},
+             "origin_page_type": "email_otp_verification"},
+            "otp", timeout=min(40, remaining))
+        if stopped():
+            raise InterruptedError("已停止邮箱验证任务")
+        page = payload.get("type") or "" \
+            if isinstance(payload, dict) else ""
+        if status == 200 and isinstance(payload, dict) \
+                and not payload.get("error") \
+                and page != "email_otp_verification" \
+                and (page or payload.get("continue_url")):
+            return status, payload
+        error = payload.get("error") or {} \
+            if isinstance(payload, dict) else {}
+        error_code = str(error.get("code") or error.get("type") or "") \
+            if isinstance(error, dict) else ""
+        if status == 429:
+            raise RuntimeError("邮箱验证请求受到限流 (HTTP 429)，请稍后重试")
+        if status >= 500:
+            raise RuntimeError("邮箱验证服务异常 HTTP %d，请稍后重试"
+                               % status)
+        if error_code in ("invalid_state", "invalid_auth_step",
+                          "invalid_session", "session_expired"):
+            raise RuntimeError("邮箱验证会话已失效，请重新开始登录")
+        if page != "email_otp_verification" and error_code not in (
+                "invalid_otp", "incorrect_otp", "invalid_code",
+                "incorrect_code", "email_otp_invalid"):
+            raise RuntimeError("邮箱验证码校验失败 HTTP %d (%s)" % (
+                status, error_code or "unexpected_state"))
+        rejected.add(code)
+        log("  验证码未被接受，仍在邮箱验证步骤；排除此码并等待更新")
+    raise RuntimeError("验证码连续3次未被接受，已结束本账号任务")
 
 
 def _codex_sec(a, p, log, want_pwd, want_2fa, should_stop=None):
@@ -2837,40 +3045,16 @@ def _codex_sec(a, p, log, want_pwd, want_2fa, should_stop=None):
     try:
         lg = _CodexLogin(relay.url(), log)
         lg.authorize()
-        stale, _ = _mail_code_once(a["mail_url"], _upstream())
         st, es = lg.next(
             {"data": {"kind": "username",
                       "username": {"kind": "email",
                                    "value": email}},
              "origin_page_type": "login_start"},
             "email")
-        pt = (es.get("type") or "") if isinstance(es, dict) else ""
-        if st != 200 or pt != "email_otp_verification":
-            return {"login_err":
-                    ("服务端要密码登录(已有密码?)" if "password" in pt
-                     else "提交邮箱异常: %d %s" % (
-                         st, str(es)[:120]))}
-        mode = (es.get("payload") or {}).get(
-            "email_verification_mode") or ""
-        if mode == "passwordless_signup":
-            return {"login_err": "该号未注册(signup流,先iOS注册)"}
+        mode = _require_email_otp(st, es)
         log("  等 OTP (接码轮询)… mode=%s" % (mode or "-"))
-        code = _fetch_mail_code(
-            a["mail_url"], _upstream(), log, timeout=240,
-            interval=5, exclude={stale} if stale else (),
-            should_stop=should_stop)
-        if code == "dead":
-            a["email_dead"] = True
-            return {"login_err": "邮箱失效(602)"}
-        if not code or (stale and code == stale):
-            # 超时兜底回吐的是旧码 —— 提交必判 Incorrect
-            return {"login_err":
-                    "等码超时(疑似OTP发送限流,稍后重试)"}
-        st, vs = lg.next(
-            {"data": {"code": code, "intent": "validate",
-                      "username_kind": "email"},
-             "origin_page_type": "email_otp_verification"},
-            "otp")
+        st, vs = _codex_wait_otp(lg, a, log,
+                                 should_stop=should_stop)
         vt = (vs.get("type") or "") if isinstance(vs, dict) else ""
         if st != 200 or (vt not in ("token_exchange", "")
                          and not vs.get("continue_url")):
@@ -2906,7 +3090,9 @@ def _codex_sec(a, p, log, want_pwd, want_2fa, should_stop=None):
                     if not at2:
                         out["2fa"] = (False, "exchange 缺 at")
                     else:
-                        ok3, _c3, d3 = _mfa_ops(lg.s, at2, a, log)
+                        ok3, _c3, d3 = _mfa_ops(
+                            lg.s, at2, a, log,
+                            should_stop=should_stop)
                         out["2fa"] = (ok3, d3 or (_c3 or ""))
                 except Exception as e:
                     out["2fa"] = (False, "exchange: " + str(e)[:100])
@@ -2917,14 +3103,367 @@ def _codex_sec(a, p, log, want_pwd, want_2fa, should_stop=None):
         relay.close()
 
 
+_PWD_ADD_URL = ("https://auth.openai.com"
+                "/api/accounts/password/add")
+
+
+def _pwd_sec(a, p, log, want_pwd, want_2fa, should_stop=None):
+    """web 补密码维护旅程, 一次 OTP 补齐缺口
+    (friend password_add.py 移植, 引导链同 _web_mint):
+      warmup → csrf → signin?post_login_add_password → authorize
+      → sentinel → continue → OTP → [password/add]
+      → callback → web 会话顺带落 a.web → [at→_mfa_ops 绑2FA]
+    want_pwd=False 时 signin 不带补密码参数 = 普通登录旅程,
+    只取 at 绑 2FA (顺带铸会话)。返回 {"pwd"/"2fa": (ok,msg)}
+    或 {"login_err": str}。"""
+    import fingerprint as _fpm
+    import sentinel as _stm
+    email = a["email"]
+    if not a.get("mail_url"):
+        return {"login_err": "没有接码链接"}
+    pwd_new = _gen_password() if want_pwd else ""
+    relay = _ChainRelay(p, _upstream())
+
+    def _sentinel(s, did, flow, fp, ua):
+        return _stm.get_sentinel_token(
+            s, did or "pwdadd", flow=flow, user_agent=ua,
+            screen=fp.get("screen", ""), lang=fp.get("lang", ""),
+            lang_full=fp.get("lang_full", ""),
+            browser_type=fp.get("browser_type", ""),
+            navigator_platform=fp.get("navigator_platform", ""),
+            navigator_vendor=fp.get("navigator_vendor"),
+            hardware_concurrency=fp.get("hardware_concurrency", 0),
+            device_memory=fp.get("device_memory"),
+            max_touch_points=fp.get("max_touch_points", 0),
+            device_pixel_ratio=fp.get("device_pixel_ratio", 0.0),
+            timezone=fp.get("timezone", ""))
+
+    try:
+        from curl_cffi import requests as _cr
+        fp = _fpm.generate_fingerprint()
+        ua = fp["user_agent"]
+        s = _cr.Session(impersonate=fp["impersonate"],
+                        proxy=relay.url(), timeout=40)
+        _CH_KEYS = (("sec_ch_ua", "sec-ch-ua"),
+                    ("sec_ch_ua_mobile", "sec-ch-ua-mobile"),
+                    ("sec_ch_ua_platform", "sec-ch-ua-platform"),
+                    ("sec_ch_ua_full_version_list",
+                     "sec-ch-ua-full-version-list"),
+                    ("sec_ch_ua_arch", "sec-ch-ua-arch"),
+                    ("sec_ch_ua_bitness", "sec-ch-ua-bitness"),
+                    ("sec_ch_ua_model", "sec-ch-ua-model"),
+                    ("sec_ch_ua_platform_version",
+                     "sec-ch-ua-platform-version"))
+        did = ""
+
+        def _ch(h):
+            for ks, kd in _CH_KEYS:
+                v = fp.get(ks)
+                if v:
+                    h[kd] = v
+            return h
+
+        def nav_headers(site="none"):
+            h = {"accept": "text/html,application/xhtml+xml,"
+                           "application/xml;q=0.9,image/avif,"
+                           "image/webp,image/apng,*/*;q=0.8",
+                 "accept-language": fp.get("lang_full")
+                    or "en-US,en;q=0.9",
+                 "sec-fetch-dest": "document",
+                 "sec-fetch-mode": "navigate",
+                 "sec-fetch-site": site,
+                 "upgrade-insecure-requests": "1",
+                 "priority": "u=0, i",
+                 "user-agent": ua}
+            return _ch(h)
+
+        def api_headers(referer):
+            origin = "https://" + (
+                urllib.parse.urlparse(referer).netloc
+                or "chatgpt.com")
+            h = {"accept": "application/json",
+                 "referer": referer,
+                 "origin": origin,
+                 "user-agent": ua,
+                 "accept-language": fp.get("lang_full")
+                    or "en-US,en;q=0.9",
+                 "sec-fetch-dest": "empty",
+                 "sec-fetch-mode": "cors",
+                 "sec-fetch-site": "same-origin",
+                 "priority": "u=1, i"}
+            if "auth.openai.com" in origin and did:
+                h["oai-device-id"] = did
+            return _ch(h)
+
+        # 1) warmup 种 oai-did -> csrf
+        s.get("https://chatgpt.com/", headers=nav_headers(),
+              timeout=30)
+        did = s.cookies.get("oai-did") or did
+        j = s.get("https://chatgpt.com/api/auth/csrf",
+                  headers=api_headers("https://chatgpt.com/"),
+                  timeout=30).json()
+        # 2) signin: want_pwd 时声明补密码意图 (post-OTP 落
+        #    /reset-password/new-password 而不是 callback)
+        params = {"prompt": "login",
+                  "screen_hint": "login_or_signup",
+                  "ext-oai-did": did, "login_hint": email,
+                  "auth_session_logging_id": str(uuid.uuid4())}
+        if want_pwd:
+            params.update({"connection": "password",
+                           "post_login_add_password": "true",
+                           "reauth": "password",
+                           "max_age": "0"})
+        h = api_headers("https://chatgpt.com/")
+        h["content-type"] = "application/x-www-form-urlencoded"
+        r = s.post("https://chatgpt.com/api/auth/signin/openai?"
+                   + urllib.parse.urlencode(params),
+                   data={"csrfToken": j.get("csrfToken") or "",
+                         "callbackUrl": "https://chatgpt.com/",
+                         "json": "true"}, headers=h, timeout=30)
+        url = (r.json() or {}).get("url") or ""
+        if "auth.openai.com" not in url:
+            return {"login_err": "signin 没返 authorize URL"}
+        # 3) authorize init 建 state 会话
+        h = nav_headers("cross-site")
+        h["referer"] = "https://chatgpt.com/"
+        r = s.get(url, headers=h, timeout=40)
+        log("  authorize init %d" % r.status_code)
+        if r.status_code != 200:
+            return {"login_err": "authorize init %d"
+                                 % r.status_code}
+        did = s.cookies.get("oai-did") or did
+        # 4) sentinel -> authorize/continue 触发 OTP
+        try:
+            tok, so = _sentinel(s, did, "authorize_continue",
+                                fp, ua)
+        except Exception as e:
+            log("  sentinel 失败(%s) 重试…" % str(e)[:50])
+            tok, so = _sentinel(s, did, "authorize_continue",
+                                fp, ua)
+        h = api_headers("https://auth.openai.com/log-in")
+        h["content-type"] = "application/json"
+        h["openai-sentinel-token"] = tok
+        if so:
+            h["openai-sentinel-so-token"] = so
+        stale, _ = _mail_code_once(a["mail_url"], _upstream())
+        r = s.post(
+            "https://auth.openai.com/api/accounts/"
+            "authorize/continue", headers=h, timeout=30,
+            json={"username": {"value": email, "kind": "email"},
+                  "screen_hint": "login"})
+        d = r.json() if r.text else {}
+        pt = (d.get("page") or {}).get("type") or ""
+        mode = (d.get("payload") or {}).get(
+            "email_verification_mode") or ""
+        log("  authorize/continue %d page=%s mode=%s"
+            % (r.status_code, pt, mode or "-"))
+        if r.status_code == 429:
+            return {"login_err": "发送限流(429)"}
+        if r.status_code != 200 or pt != "email_otp_verification":
+            return {"login_err": "continue %d page=%s"
+                                 % (r.status_code, pt)}
+        # 发码确认 (friend _prepare_password_add_otp):
+        # client_auth_session_dump 的 send_pending=True 说明
+        # 服务端还没真发信 —— 必须显式 send-otp, 否则白等。
+        send_pending = mode == "passwordless_login"
+        try:
+            h2 = api_headers(
+                "https://auth.openai.com/email-verification")
+            dj = s.get("https://auth.openai.com/api/accounts/"
+                       "client_auth_session_dump",
+                       headers=h2, timeout=20).json()
+            st0 = dj.get("client_auth_session") or {}
+            if st0.get("passwordless_email_otp_send_pending"):
+                send_pending = True
+        except Exception:
+            pass
+        if send_pending:
+            h2 = api_headers(
+                "https://auth.openai.com/log-in/password")
+            h2["content-type"] = "application/json"
+            r2 = s.post("https://auth.openai.com/api/accounts/"
+                        "passwordless/send-otp",
+                        headers=h2, json={}, timeout=20)
+            log("  补发码 %d" % r2.status_code)
+        # 5) 等码 -> email-otp/validate; 被拒码进黑名单
+        #    等下一封, 至多3个候选 (friend 同款)。
+        #    慢投递邮箱 (供应商侧 ~10min 才出新码) 给 900s。
+        rejected = {stale} if stale else set()
+        d, cu = {}, ""
+        for _try in range(3):
+            code = _fetch_mail_code(
+                a["mail_url"], _upstream(), log, timeout=900,
+                interval=5, exclude=rejected,
+                should_stop=should_stop)
+            if code == "dead":
+                a["email_dead"] = True
+                return {"login_err": "邮箱失效(602)"}
+            if not code or code in rejected:
+                return {"login_err": "等码超时(发送未达)"}
+            h = api_headers(
+                "https://auth.openai.com/email-verification")
+            h["content-type"] = "application/json"
+            h["x-access-flow-invocation-id"] = \
+                str(uuid.uuid4())
+            r = s.post("https://auth.openai.com/api/accounts/"
+                       "email-otp/validate",
+                       headers=h, timeout=30, json={"code": code})
+            d = r.json() if r.text else {}
+            log("  otp/validate %d" % r.status_code)
+            if r.status_code == 200:
+                cu = d.get("continue_url") or ""
+                break
+            ec = str((d.get("error") or {}).get("code")
+                     or d.get("code") or "").lower()
+            if r.status_code in (400, 401, 403) \
+                    and ("otp" in ec or "code" in ec):
+                rejected.add(code)
+                log("  码被拒(%s), 等下一封" % (ec or r.status_code))
+                continue
+            return {"login_err": "OTP校验 %d %s"
+                                 % (r.status_code, str(d)[:120])}
+        else:
+            return {"login_err": "验证码连续3次被拒"}
+        out = {}
+        # 5b) 已绑 TOTP 的号 OTP 后落 mfa-challenge —
+        #     issue_challenge 发挑战 + 本地 secret 算码 verify
+        #     (friend password_login._verify_totp 移植)。
+        if "mfa-challenge" in cu:
+            fid = (a.get("totp_id") or "").strip()
+            if not fid:
+                for f in ((d.get("payload") or {})
+                          .get("factors") or []):
+                    if str(f.get("factor_type")
+                           or "").lower() == "totp" \
+                            and f.get("id"):
+                        fid = str(f["id"])
+                        break
+            code2 = _totp_code(a.get("totp") or "")
+            if not fid or not code2:
+                return {"login_err":
+                        "登录要2FA但本地缺 TOTP 凭据"}
+            h = api_headers("https://auth.openai.com"
+                            "/mfa-challenge")
+            h["content-type"] = "application/json"
+            s.post("https://auth.openai.com/api/accounts/"
+                   "mfa/issue_challenge", headers=h, timeout=30,
+                   json={"id": fid, "type": "totp",
+                         "force_fresh_challenge": False})
+            h["x-access-flow-invocation-id"] = \
+                str(uuid.uuid4())
+            r = s.post("https://auth.openai.com/api/accounts/"
+                       "mfa/verify", headers=h, timeout=30,
+                       json={"id": fid, "type": "totp",
+                             "code": code2})
+            d = r.json() if r.text else {}
+            log("  mfa/verify %d" % r.status_code)
+            if r.status_code != 200:
+                return {"login_err": "mfa/verify %d %s" % (
+                    r.status_code, str(d)[:120])}
+            cu = d.get("continue_url") or cu
+        # 6) [want_pwd] OTP 后落 /reset-password/new-password →
+        #    POST password/add (不 GET 那页, 实测流直接 POST)
+        if want_pwd:
+            if "reset-password" not in cu:
+                out["pwd"] = (False,
+                              "OTP后未落密码页: %s" % cu[:60])
+            else:
+                try:
+                    tok2, so2 = _sentinel(
+                        s, did, "password_reset", fp, ua)
+                except Exception:
+                    tok2, so2 = "", None
+                h = api_headers(
+                    "https://auth.openai.com"
+                    "/reset-password/new-password")
+                h["content-type"] = "application/json"
+                h["x-access-flow-invocation-id"] = \
+                    str(uuid.uuid4())
+                if tok2:
+                    h["openai-sentinel-token"] = tok2
+                if so2:
+                    h["openai-sentinel-so-token"] = so2
+                r = s.post(_PWD_ADD_URL, headers=h, timeout=30,
+                           json={"password": pwd_new})
+                body = (r.text or "")[:200]
+                log("  password/add %d %s"
+                    % (r.status_code, body[:100]))
+                if r.status_code == 200:
+                    a["password"] = pwd_new
+                    a["password_at"] = _now()
+                    a["signup_state"] = "password_set"
+                    _save_acct(a)
+                    out["pwd"] = (True, "")
+                    d2 = r.json() if r.text else {}
+                    cu = d2.get("continue_url") or cu
+                else:
+                    out["pwd"] = (False, "add %d %s"
+                                  % (r.status_code, body[:120]))
+        # 7) consume continue_url -> callback -> NextAuth 会话
+        if cu:
+            try:
+                cb = _authz_code(s, cu, a, log)
+                if "/api/auth/callback" in cb:
+                    r = s.get(cb, allow_redirects=False,
+                              timeout=30)
+                    log("  web callback %d" % r.status_code)
+            except Exception as e:
+                log("  callback 链: %s" % str(e)[:80])
+        web_at = ""
+        cks = _jar_dump(s)
+        usc = [k for pairs in cks.values()
+               for k in pairs if k.startswith("__Host-usc")]
+        if usc:
+            try:
+                j = s.get("https://chatgpt.com/api/auth/session",
+                          timeout=25).json()
+                web_at = j.get("accessToken") or ""
+                web = {"cookies": _jar_dump(s), "did": did,
+                       "px": p.get("id"), "ua": ua,
+                       "how": "password_add" if want_pwd
+                             else "proto",
+                       "got_at": _now(), "at": web_at,
+                       "st": j.get("sessionToken") or ""}
+                if (j.get("user") or {}).get("email"):
+                    web["live"] = True
+                    web["live_at"] = _now()
+                a["web"] = web
+                _save_acct(a)
+                log("  web 会话落盘 how=%s live=%s"
+                    % (web["how"], bool(web.get("live"))))
+            except Exception as e:
+                log("  会话读取: %s" % str(e)[:60])
+        # 8) [want_2fa] 旅程 at -> _mfa_ops; 密码未加成不绑
+        #    (先补密码语义: 密码失败的号不先挂2FA)
+        pwd_ok = (not want_pwd) \
+            or (out.get("pwd") or (False,))[0]
+        if want_2fa and pwd_ok:
+            if not web_at:
+                out["2fa"] = (False, "旅程未取得 web at")
+            else:
+                ok3, _c3, d3 = _mfa_ops(
+                    s, web_at, a, log, should_stop=should_stop)
+                out["2fa"] = (ok3, d3 or (_c3 or ""))
+        elif want_2fa:
+            out["2fa"] = (False, "密码未成, 暂不绑")
+        return out
+    except InterruptedError:
+        raise
+    except Exception as e:
+        return {"login_err": str(e)[:120]}
+    finally:
+        relay.close()
+
+
 def _ios_sec_one(a, p, log, should_stop=None):
-    """单号补 2FA + 密码, 各自独立结算。返回结果串。
-    2FA 先走 ios.at 快通道 (注册刚完成的 at auth_time 新鲜,
-    enroll 的 re-auth 检查能过); 老了报 reauth 就和密码一起
-    走 codex OTP 链 —— 一次接码, 密码+2FA 都办。"""
+    """单号补密码+2FA, 密码优先: 密码补不上的号不绑2FA。
+    want_pwd 的号先走 _pwd_sec web 旅程一趟办
+    密码+web会话+(旅程内 at 绑2FA); 旅程挂了 2FA 跟着跳过。
+    密码已有(原生/刚补上)只缺2FA时走 _account_bind_totp
+    快通道 (ios.at→web.at 双源), 报 reauth/at_expired 再退
+    web 旅程只绑2FA。signup_state 记账:
+    password_pending/totp_pending/complete, 半途落盘重跑可续。"""
     want_pwd = not (a.get("password") or "").strip()
-    # totp 在但 totp_ok 不在 = enroll 拿到 secret 但 activate
-    # 没成 —— 重跑会 mfa_info 对账 (服务端认了→补标; 没认→重enroll)
     want_2fa = not ((a.get("totp") or "").strip()
                     and a.get("totp_ok"))
     out, errs = [], []
@@ -2932,48 +3471,54 @@ def _ios_sec_one(a, p, log, should_stop=None):
         out.append("密码已有")
     if not want_2fa:
         out.append("2FA已有")
-    pend_2fa = False
-    if want_2fa:
-        try:
-            ok, err = _ios_bind_totp(a, p, log)
-            if not ok and err == "at_expired" \
-                    and (a.get("ios") or {}).get("rt"):
-                log("… ios.at 失效, rt 刷新再绑")
-                rok, rerr = _ios_refresh_at(a, p, log)
-                if rok:
-                    # 新 at 后端传播有几秒延迟, 立刻打还会 401
-                    time.sleep(3)
-                    ok, err = _ios_bind_totp(a, p, log)
-                else:
-                    err = "rt刷新失败:" + rerr
-        except Exception as e:
-            ok, err = False, str(e)[:100]
-        if ok:
-            want_2fa = False
-            out.append("2FA✓")
-        elif err == "reauth":
-            pend_2fa = True          # sudo 态: codex 链现场换 at
-        else:
-            want_2fa = False
-            errs.append("2FA:" + err)
-    if want_pwd or pend_2fa:
-        res = _codex_sec(a, p, log, want_pwd, pend_2fa,
-                         should_stop)
+    if want_pwd:
+        res = _pwd_sec(a, p, log, True, want_2fa, should_stop)
         lerr = res.get("login_err")
         if lerr:
-            if want_pwd:
-                errs.append("密码:" + lerr)
-            if pend_2fa:
-                errs.append("2FA:" + lerr)
+            errs.append("密码:" + lerr)
         else:
-            if want_pwd:
-                pr = res.get("pwd") or (False, "异常")
-                (out.append("密码✓") if pr[0]
-                 else errs.append("密码:" + (pr[1] or "异常")))
-            if pend_2fa:
-                tr = res.get("2fa") or (False, "异常")
+            pr = res.get("pwd") or (False, "异常")
+            if pr[0]:
+                out.append("密码✓")
+                a["signup_state"] = "password_set"
+                _save_acct(a)
+                if want_2fa:
+                    tr = res.get("2fa") or (False, "异常")
+                    if tr[0]:
+                        out.append("2FA✓")
+                        want_2fa = False
+                    # 旅程内 2fa 失败 → 下面快通道补试
+            else:
+                errs.append("密码:" + (pr[1] or "异常"))
+    if want_2fa:
+        if not (a.get("password") or "").strip():
+            errs.append("2FA:跳过(密码未成)")
+        else:
+            # 密码已有 (原生/刚补上): 快通道 ios.at→web.at
+            try:
+                ok, code, err = _account_bind_totp(
+                    a, p, log, should_stop)
+            except Exception as e:
+                ok, code, err = False, "other", str(e)[:100]
+            if ok:
+                out.append("2FA✓")
+            elif code in ("reauth", "at_expired"):
+                res = _pwd_sec(a, p, log, False, True,
+                               should_stop)
+                tr = res.get("2fa") or \
+                    (False, res.get("login_err") or "异常")
                 (out.append("2FA✓") if tr[0]
                  else errs.append("2FA:" + (tr[1] or "异常")))
+            else:
+                errs.append("2FA:" + (err or "未确认"))
+    # 断点状态记账: 卡在哪步一目了然, 重跑续上
+    if not (a.get("password") or "").strip():
+        a["signup_state"] = "password_pending"
+    elif not ((a.get("totp") or "").strip() and a.get("totp_ok")):
+        a["signup_state"] = "totp_pending"
+    else:
+        a["signup_state"] = "complete"
+    _save_acct(a)
     if errs:
         return ("+".join(out) + " · " if out else "") \
             + "✗ " + " / ".join(errs)
@@ -3220,7 +3765,7 @@ def _authz_code(s, url, a, log, hops=10):
     raise RuntimeError("授权跳转超 %d 跳" % hops)
 
 
-def _proto_oauth(a, p, state, verifier, log):
+def _proto_oauth(a, p, state, verifier, log, skip_wpx=False):
     """注入 a.web 会话 -> codex OAuth authorize -> 拿 code (不开窗)。
     返回 (code|None, err|None)。err='session_dead' 表示会话失效
     (该重铸), 'step_up' 表示会话被要邮箱验证 (非 web 登录态),
@@ -3229,12 +3774,16 @@ def _proto_oauth(a, p, state, verifier, log):
     web = a.get("web") or {}
     if not web.get("cookies"):
         return None, "没存web会话"
-    # 会话可能绑 IP —— 优先用铸会话时的同一个代理
+    # 会话可能绑 IP —— 优先用铸会话时的同一个代理;
+    # skip_wpx=True (403换IP重试): 铸会话IP很可能就是被墙的, 直接用传入的
     mp = p
     wpx = web.get("px")
-    if wpx and wpx != (p or {}).get("id"):
-        cand = next((x for x in _load_proxies()
-                     if x["id"] == wpx and not x.get("banned")), None)
+    if wpx and not skip_wpx and wpx != (p or {}).get("id"):
+        cand = next(
+            (x for x in _load_proxies()
+             if x["id"] == wpx and not x.get("banned")
+             and time.time() - (x.get("cf_oai") or 0) > 21600),
+            None)
         if cand:
             mp = cand
     relay = _ChainRelay(mp, _upstream())
@@ -3260,6 +3809,15 @@ def _proto_oauth(a, p, state, verifier, log):
         try:
             cb = _authz_code(s, OAUTH_AUTH_URL + "?" + q, a, log)
         except RuntimeError as e:
+            if "403" in str(e) and mp:
+                # Cloudflare 挑战页 —— 记下这代理对
+                # auth.openai.com 的拦截标记, 一段时间内
+                # OAuth 路不再选它 (别的用途不受影响)
+                pxs = _load_proxies()
+                for _p in pxs:
+                    if _p.get("id") == mp.get("id"):
+                        _p["cf_oai"] = time.time()
+                _save_proxies(pxs)
             return None, str(e)
         code = urllib.parse.parse_qs(
             urllib.parse.urlparse(cb).query).get("code", [None])[0]
@@ -3267,7 +3825,18 @@ def _proto_oauth(a, p, state, verifier, log):
             return None, "回调没带 code"
         return code, None
     except Exception as e:
-        return None, str(e)[:100]
+        err = str(e)[:100]
+        if relay.last_err:
+            err += " ←链:%s" % relay.last_err
+            if mp and ("认证" in relay.last_err
+                       or "auth" in relay.last_err.lower()):
+                # 账号代理账密失效 —— 打标, 以后不再被选
+                pxs = _load_proxies()
+                for _p in pxs:
+                    if _p.get("id") == mp.get("id"):
+                        _p["auth_dead"] = time.time()
+                _save_proxies(pxs)
+        return None, err
     finally:
         relay.close()
 
@@ -3453,6 +4022,25 @@ def _web_mint(a, p, log, should_stop=None):
             return "该号未注册(先iOS注册)"
         if pt != "email_otp_verification":
             return "page=%s 非OTP页" % pt
+        # 发码确认: dump 的 send_pending=True 说明服务端
+        # 没真发信 —— 显式 send-otp 补一发, 否则白等。
+        try:
+            h2 = api_headers(
+                "https://auth.openai.com/email-verification")
+            dj = s.get("https://auth.openai.com/api/accounts/"
+                       "client_auth_session_dump",
+                       headers=h2, timeout=20).json()
+            st0 = dj.get("client_auth_session") or {}
+            if st0.get("passwordless_email_otp_send_pending"):
+                h2 = api_headers(
+                    "https://auth.openai.com/log-in/password")
+                h2["content-type"] = "application/json"
+                r2 = s.post("https://auth.openai.com/api/"
+                            "accounts/passwordless/send-otp",
+                            headers=h2, json={}, timeout=20)
+                log("  补发码 %d" % r2.status_code)
+        except Exception:
+            pass
         # 6) 等码 -> email-otp/validate
         code = _fetch_mail_code(
             a["mail_url"], _upstream(), log, timeout=240,
@@ -3700,176 +4288,228 @@ def _ios_reg_worker(ids):
         log("✗ 缺依赖: .venv/bin/pip install curl_cffi cryptography")
         IOS_JOB["running"] = False
         return
-    log("iOS 协议注册: %d 个账号 (纯接口, 不开窗, "
-        "dc-token 每号自造)" % len(ids))
-    try:
-        for aid in ids:
-            if IOS_JOB["stop"]:
-                log("⏹ 已手动停止")
-                break
-            a = next((x for x in _load_accounts()
-                      if x["id"] == aid), None)
-            if not a:
-                continue
-            email = a["email"]
-            try:
-                if not a.get("mail_url"):
-                    IOS_JOB["results"][aid] = "没有接码链接"
-                    log("✗ %s: 没有接码链接" % email)
-                    continue
-                # iOS注册不绑定代理 (不占 bound 空位): 取占用最少
-                # 的可用代理, 且避开本号上次注册用的那条 (ios_px)
+    conc = max(1, int(_settings().get("ios_reg_conc") or 3))
+    log("iOS 协议注册: %d 个账号 ×并发%d (纯接口, 不开窗, "
+        "dc-token 每号自造, 每线程独占代理)"
+        % (len(ids), min(conc, len(ids) or 1)))
+
+    def one(aid):
+        if IOS_JOB["stop"]:
+            return
+        a = next((x for x in _load_accounts()
+                  if x["id"] == aid), None)
+        if not a:
+            return
+        email = a["email"]
+        px_held = None          # 本线程占用的代理id (独占IP)
+        try:
+            if not a.get("mail_url"):
+                IOS_JOB["results"][aid] = "没有接码链接"
+                log("✗ %s: 没有接码链接" % email)
+                return
+            # iOS注册不绑定代理 (不占 bound 空位): 取占用最少
+            # 的可用代理; 并行时独占一条 (_REG_PX_INUSE),
+            # 且避开本号上次注册用的那条 (ios_px)
+            with _PX_LOCK:
                 px = _load_proxies()
                 last = a.get("ios_px")
-                p = _pick_proxy(px, email,
-                                excl={last} if last else None) \
-                    or _pick_proxy(px, email)  # 排光则允许复用
+                excl = set(_REG_PX_INUSE)
+                if last:
+                    excl.add(last)
+                p = _pick_proxy(px, email, excl=excl or None) \
+                    or _pick_proxy(
+                        px, email,
+                        excl=_REG_PX_INUSE or None) \
+                    or _pick_proxy(px, email)  # 池尽才复用
                 if not p:
                     IOS_JOB["results"][aid] = "没有可用代理"
                     log("✗ %s: 没有可用代理" % email)
-                    continue
+                    return
                 p["last_used"] = _now()
                 _touch_cool(p, email)   # 他号冷却, 不占 bound 位
+                _REG_PX_INUSE.add(p["id"])
+                px_held = p["id"]
                 a["ios_px"] = p["id"]
                 _save_proxies(px)
-                prof = _gen_profile(email, log)
-                name = (prof[0] if prof else None) or "John"
-                age = prof[1] if prof else 28
-                birthday = _ios_birthday(age)
-                log("→ %s: %s 代理开跑 (%s, %s)"
-                    % (email, p.get("host"), name, birthday))
-                relay = _ChainRelay(p, _upstream())
-                try:
-                    reg = _IosRegistrar(relay.url(), log)
-                    reg.warmup()
-                    reg.authorize()
-                    stale, _ = _mail_code_once(
-                        a["mail_url"], _upstream())
-                    es = reg.next_step(
-                        {"data": {"kind": "username",
-                                  "username": {"kind": "email",
-                                               "value": email}},
-                         "origin_page_type":
-                             "login_or_signup_start"},
-                        "email_otp_verification", "email")
-                    if (es.get("payload") or {}).get(
-                            "email_verification_mode") \
-                            == "passwordless_login":
-                        # OpenAI 侧已有此号 → 走的是登录流,
-                        # OTP 后必撞 preauth cookie 死局(409)。
-                        # 直接标 reg=yes 跳过, 别浪费接码轮询
-                        a["reg"] = "yes"
-                        a["reg_how"] = "exists"
-                        a["reg_at"] = _now()
-                        IOS_JOB["results"][aid] = \
-                            "已是注册账号"
-                        log("… %s: OpenAI 已有此号"
-                            " (passwordless_login), 标记已注册"
-                            % email)
-                        continue
-                    log("  %s: 等 OTP (接码轮询)…" % email)
-                    code = _fetch_mail_code(
-                        a["mail_url"], _upstream(), log,
-                        timeout=240, interval=5,
-                        exclude={stale} if stale else (),
-                        should_stop=lambda: IOS_JOB["stop"])
-                    if code == "dead":
-                        a["email_dead"] = True
-                        IOS_JOB["results"][aid] = "邮箱失效(602)"
-                        log("✗ %s: 邮箱不可用 (602)" % email)
-                        continue
-                    if not code:
-                        IOS_JOB["results"][aid] = "等码超时"
-                        log("✗ %s: 等码超时" % email)
-                        continue
-                    reg.next_step(
-                        {"data": {"code": code,
-                                  "intent": "validate",
-                                  "username_kind": "email"},
-                         "origin_page_type":
-                             "email_otp_verification"},
-                        "about_you", "otp")
-                    final = reg.next_step(
-                        {"data": {"name": name,
-                                  "birthday": birthday,
-                                  "is_explicit_consent_required":
-                                      False},
-                         "origin_page_type": "about_you"},
-                        "token_exchange", "profile")
-                    grant = (final.get("payload") or {}).get("code")
-                    if not grant:
-                        raise RuntimeError(
-                            "token_exchange 没带授权码: %s"
-                            % str(final)[:150])
-                    tokens = reg.exchange(grant)
-                    from cryptography.hazmat.primitives \
-                        import serialization as _ser
-                    a["reg"] = "new"
-                    a["reg_how"] = "ios"
+            prof = _gen_profile(email, log)
+            name = (prof[0] if prof else None) or "John"
+            age = prof[1] if prof else 28
+            birthday = _ios_birthday(age)
+            log("→ %s: %s 代理开跑 (%s, %s)"
+                % (email, p.get("host"), name, birthday))
+            relay = _ChainRelay(p, _upstream())
+            try:
+                reg = _IosRegistrar(relay.url(), log)
+                reg.warmup()
+                reg.authorize()
+                stale, _ = _mail_code_once(
+                    a["mail_url"], _upstream())
+                _st, es = _reg_next(
+                    reg,
+                    {"data": {"kind": "username",
+                              "username": {"kind": "email",
+                                           "value": email}},
+                     "origin_page_type":
+                         "login_or_signup_start"},
+                    "email")
+                etype = es.get("type") or ""
+                # 服务端分流: 可能先要密码 (create_account_
+                # password —— iOS 客户端注册原生步) 再发 OTP。
+                if etype == "create_account_password":
+                    _st, es = _reg_password(reg, a, log)
+                    etype = es.get("type") or ""
+                if etype != "email_otp_verification":
+                    raise RuntimeError(
+                        "email 失败: %d %s" % (_st, str(es)[:200]))
+                if (es.get("payload") or {}).get(
+                        "email_verification_mode") \
+                        == "passwordless_login":
+                    # OpenAI 侧已有此号 → 走的是登录流,
+                    # OTP 后必撞 preauth cookie 死局(409)。
+                    # 直接标 reg=yes 跳过, 别浪费接码轮询
+                    a["reg"] = "yes"
+                    a["reg_how"] = "exists"
                     a["reg_at"] = _now()
-                    a["ios"] = {
-                        "at": tokens.get("access_token"),
-                        "rt": tokens.get("refresh_token"),
-                        "id_token": tokens.get("id_token"),
-                        "expires_in": tokens.get("expires_in"),
-                        "earliest_refresh_at":
-                            tokens.get("earliest_refresh_at"),
-                        "device_id": reg.device_id,
-                        "cookies": reg.s.cookies.get_dict(),
-                        "dpop": reg.dpop_key.private_bytes(
-                            _ser.Encoding.PEM,
-                            _ser.PrivateFormat.PKCS8,
-                            _ser.NoEncryption()).decode(),
-                        "got_at": _now()}
-                    IOS_JOB["results"][aid] = "✓ iOS 注册完成"
-                    log("✓ %s: iOS 注册完成, token 已存 a.ios"
+                    IOS_JOB["results"][aid] = \
+                        "已是注册账号"
+                    log("… %s: OpenAI 已有此号"
+                        " (passwordless_login), 标记已注册"
                         % email)
-                    # 注册后自动补密码+2FA (设置 ios_auto_sec,
-                    # 默认关): 刚注册完的 OTP 验证态/at 最新鲜,
-                    # 趁热打 mfa enroll 成功率最高。失败不废号,
-                    # 只记日志 —— 注册本身已经成功。
-                    if _settings().get("ios_auto_sec", False):
-                        try:
-                            r2 = _ios_sec_one(
-                                a, p, log,
-                                should_stop=lambda: IOS_JOB["stop"])
-                            log("… %s: 补密码/2FA → %s"
-                                % (email, r2))
-                            IOS_JOB["results"][aid] += \
-                                " · " + r2
-                        except Exception as e2:
-                            log("… %s: 补密码/2FA 异常 %s"
-                                % (email, str(e2)[:100]))
-                    # 注册后自动登录保活 (总开关 ios_auto_open):
-                    # 方式=proto 时本循环内 codex链OTP登录铸cookie
-                    # (OTP最新鲜); 方式=open 时整批结束统一开窗。
-                    # 失败不废号只记日志。
-                    if _settings().get("ios_auto_open") \
-                            and _settings().get(
-                                "ios_web_how") == "proto":
-                        try:
-                            r3 = _web_mint3(
-                                a, p, log,
-                                should_stop=lambda: IOS_JOB["stop"])
-                            log("… %s: 协议铸web会话 → %s"
-                                % (email, r3))
-                            IOS_JOB["results"][aid] += \
-                                " · " + r3
-                        except Exception as e3:
-                            log("… %s: 协议铸web会话异常 %s"
-                                % (email, str(e3)[:100]))
-                finally:
-                    relay.close()
-            except Exception as e:
-                IOS_JOB["results"][aid] = str(e)[:120]
-                log("✗ %s: %s" % (email, str(e)[:120]))
+                    return
+                log("  %s: 等 OTP (接码轮询)…" % email)
+                code = _fetch_mail_code(
+                    a["mail_url"], _upstream(), log,
+                    timeout=240, interval=5,
+                    exclude={stale} if stale else (),
+                    should_stop=lambda: IOS_JOB["stop"])
+                if code == "dead":
+                    a["email_dead"] = True
+                    IOS_JOB["results"][aid] = "邮箱失效(602)"
+                    log("✗ %s: 邮箱不可用 (602)" % email)
+                    return
+                if not code:
+                    IOS_JOB["results"][aid] = "等码超时"
+                    log("✗ %s: 等码超时" % email)
+                    return
+                _st, ov = _reg_next(
+                    reg,
+                    {"data": {"code": code,
+                              "intent": "validate",
+                              "username_kind": "email"},
+                     "origin_page_type":
+                         "email_otp_verification"},
+                    "otp")
+                # OTP 后也可能轮到密码步 (分流顺序不定),
+                # 还没有密码就交一枚。
+                if (ov.get("type") == "create_account_password"
+                        and not (a.get("password") or "").strip()):
+                    _st, ov = _reg_password(reg, a, log)
+                if ov.get("type") != "about_you":
+                    raise RuntimeError(
+                        "otp 失败: %d %s" % (_st, str(ov)[:200]))
+                # 注: OTP-first 分流下 about_you 态试
+                # user/register 实测 400 且毒死授权事务
+                # (profile 提交 Invalid authorization step) ——
+                # 注册期密码只认服务端主动给的
+                # create_account_password 步, 别在这里补。
+                final = reg.next_step(
+                    {"data": {"name": name,
+                              "birthday": birthday,
+                              "is_explicit_consent_required":
+                                  False},
+                     "origin_page_type": "about_you"},
+                    "token_exchange", "profile")
+                grant = (final.get("payload") or {}).get("code")
+                if not grant:
+                    raise RuntimeError(
+                        "token_exchange 没带授权码: %s"
+                        % str(final)[:150])
+                tokens = reg.exchange(grant)
+                from cryptography.hazmat.primitives \
+                    import serialization as _ser
+                a["reg"] = "new"
+                a["reg_how"] = "ios"
+                a["reg_at"] = _now()
+                a["ios"] = {
+                    "at": tokens.get("access_token"),
+                    "rt": tokens.get("refresh_token"),
+                    "id_token": tokens.get("id_token"),
+                    "expires_in": tokens.get("expires_in"),
+                    "earliest_refresh_at":
+                        tokens.get("earliest_refresh_at"),
+                    "device_id": reg.device_id,
+                    "cookies": reg.s.cookies.get_dict(),
+                    "dpop": reg.dpop_key.private_bytes(
+                        _ser.Encoding.PEM,
+                        _ser.PrivateFormat.PKCS8,
+                        _ser.NoEncryption()).decode(),
+                    "got_at": _now()}
+                IOS_JOB["results"][aid] = "✓ iOS 注册完成"
+                log("✓ %s: iOS 注册完成, token 已存 a.ios"
+                    % email)
+                # 注册后自动补密码+2FA (设置 ios_auto_sec,
+                # 默认关): 刚注册完的 OTP 验证态/at 最新鲜,
+                # 趁热打 mfa enroll 成功率最高。失败不废号,
+                # 只记日志 —— 注册本身已经成功。
+                if _settings().get("ios_auto_sec", False):
+                    try:
+                        r2 = _ios_sec_one(
+                            a, p, log,
+                            should_stop=lambda: IOS_JOB["stop"])
+                        log("… %s: 补密码/2FA → %s"
+                            % (email, r2))
+                        IOS_JOB["results"][aid] += \
+                            " · " + r2
+                    except Exception as e2:
+                        log("… %s: 补密码/2FA 异常 %s"
+                            % (email, str(e2)[:100]))
+                # 注册后自动登录保活 (总开关 ios_auto_open):
+                # 方式=proto 时本循环内 codex链OTP登录铸cookie
+                # (OTP最新鲜); 方式=open 时整批结束统一开窗。
+                # 失败不废号只记日志。
+                if _settings().get("ios_auto_open") \
+                        and _settings().get(
+                            "ios_web_how") == "proto":
+                    try:
+                        r3 = _web_mint3(
+                            a, p, log,
+                            should_stop=lambda: IOS_JOB["stop"])
+                        log("… %s: 协议铸web会话 → %s"
+                            % (email, r3))
+                        IOS_JOB["results"][aid] += \
+                            " · " + r3
+                    except Exception as e3:
+                        log("… %s: 协议铸web会话异常 %s"
+                            % (email, str(e3)[:100]))
             finally:
+                relay.close()
+        except Exception as e:
+            IOS_JOB["results"][aid] = str(e)[:120]
+            log("✗ %s: %s" % (email, str(e)[:120]))
+        finally:
+            with _ACCT_LOCK:
                 accs_all = _load_accounts()
                 for x in accs_all:
                     if x["id"] == aid:
                         x.clear(); x.update(a)
                         break
                 _save_accounts(accs_all)
+            if px_held:
+                with _PX_LOCK:
+                    _REG_PX_INUSE.discard(px_held)
+
+    try:
+        if conc > 1 and len(ids) > 1:
+            with ThreadPoolExecutor(max_workers=conc) as ex:
+                futs = [ex.submit(one, aid) for aid in ids]
+                for f in futs:
+                    f.result()
+        else:
+            for aid in ids:
+                if IOS_JOB["stop"]:
+                    log("⏹ 已手动停止")
+                    break
+                one(aid)
     finally:
         IOS_JOB["running"] = False
         log("—— iOS 注册结束 ——"
@@ -3879,6 +4519,7 @@ def _ios_reg_worker(ids):
         # 批次不算"完毕", 不触发。proto 方式已在注册循环内逐号铸。
         if _settings().get("ios_auto_open") \
                 and _settings().get("ios_web_how") != "proto" \
+                and not _settings().get("ios_auto_sec") \
                 and not IOS_JOB["stop"]:
             if OPEN_JOB["running"]:
                 log("… 自动开窗: 开窗任务在跑, 跳过")
@@ -3886,9 +4527,14 @@ def _ios_reg_worker(ids):
                 ready = [a for a in _load_accounts()
                          if a["id"] in set(ids)
                          and a.get("reg") in ("new", "yes")
-                         and not a.get("archived")]
+                         and not a.get("archived")
+                         # 补密码旅程已铸出活会话的号不开窗
+                         # (ios_auto_sec 的 _pwd_sec 顺带 mint)
+                         and not (a.get("web") or {})
+                             .get("live")]
                 if not ready:
-                    log("… 自动开窗: 本批没有注册成功的账号")
+                    log("… 自动开窗: 本批没有需要开窗的账号"
+                        " (注册未成或已有活会话)")
                 else:
                     if len(ready) > 50:
                         log("… 自动开窗: %d 个成功, 单次上限 50,"
@@ -3899,6 +4545,12 @@ def _ios_reg_worker(ids):
                     threading.Thread(target=_open_worker,
                                      args=(ready,), daemon=True
                                      ).start()
+        elif _settings().get("ios_auto_open") \
+                and _settings().get("ios_web_how") != "proto" \
+                and _settings().get("ios_auto_sec") \
+                and not IOS_JOB["stop"]:
+            log("… 自动开窗: 已开启补密码+2FA, 跳过"
+                " (失败的号可手动重跑 密码·2FA)")
 
 
 # ---------------- 协议 PAT 检测 (不开窗) ----------------
@@ -3931,6 +4583,7 @@ class _CodexLogin:
         self.verifier = _b64u(os.urandom(48))
         self.state = _b64u(os.urandom(32))
         self.dc_token = dc_token or _gen_dc_token()
+        self.otp_mode = ""              # next() 追踪 email_verification_mode
         from cryptography.hazmat.primitives.asymmetric import ec
         self.dk = ec.generate_private_key(ec.SECP256R1())
 
@@ -4003,13 +4656,50 @@ class _CodexLogin:
         raise RuntimeError("authorize %d %s"
                            % (r.status_code, r.text[:120]))
 
-    def next(self, body, tag):
+    def next(self, body, tag, timeout=40):
         r = self.s.post(_CODEX_NEXT_URL, data=self._jd(body),
-                        headers=self.headers([("accept", "*/*")]))
+                        headers=self.headers([("accept", "*/*")]),
+                        timeout=timeout)
         d = r.json() if r.text else {}
+        if d.get("type") == "email_otp_verification":
+            self.otp_mode = (d.get("payload") or {}).get(
+                "email_verification_mode") or self.otp_mode
         self.log("   next[%s] %d type=%s"
                  % (tag, r.status_code, d.get("type")))
         return r.status_code, d
+
+    def resend_otp(self, timeout=15):
+        """同登录会话内请求重发一次邮箱 OTP (发送压制下救急)。
+        passwordless_login 走 send-otp 端点, 其余走 resend。"""
+        passwordless = self.otp_mode == "passwordless_login"
+        endpoint = ("/api/accounts/passwordless/send-otp"
+                    if passwordless
+                    else "/api/accounts/email-otp/resend")
+        referer = ("https://auth.openai.com/log-in/password"
+                   if passwordless
+                   else "https://auth.openai.com/email-verification")
+        headers = self.headers([("referer", referer)])
+        if not passwordless:
+            headers = [(k, v) for k, v in headers
+                       if k.lower() != "content-type"]
+        try:
+            r = self.s.post("https://auth.openai.com" + endpoint,
+                            headers=headers,
+                            data="{}" if passwordless else None,
+                            timeout=timeout)
+        except Exception:
+            self.log("   OTP 重发请求未取得响应，继续等待原邮件")
+            return False
+        if 200 <= r.status_code < 300:
+            self.log("   OTP 重发请求已接受")
+            return True
+        if r.status_code in (409, 425, 429):
+            self.log("   OTP 重发处于冷却或状态受限 (HTTP %d)，"
+                     "不连续重试" % r.status_code)
+        else:
+            self.log("   OTP 重发未被接受 (HTTP %d)，"
+                     "继续等待原邮件" % r.status_code)
+        return False
 
     def ws_select(self, wid):
         r = self.s.post(_CODEX_WS_SEL,
@@ -4315,6 +5005,53 @@ def _pat_probe_http(at, ws, proxy, log):
     return verdict or "unknown:%d/%s" % (r.status_code, code)
 
 
+def _web_pat(a, p, log, ws_id):
+    """a.web 会话纯协议 PAT 探测 —— 不吃邮箱不开窗:
+    web.cookies → /api/auth/session?exchange_workspace_token
+    换 ws-scoped at (同 _PAT_PROBE_JS 的浏览器内调用) →
+    wham 探针。返回 verdict 串; 会话不行/取不到 at 返回 None
+    (调用方走邮箱链兜底)。"""
+    web = a.get("web") or {}
+    if not web.get("cookies") or web.get("dead"):
+        return None
+    from curl_cffi import requests as _cr
+    relay = _ChainRelay(p, _upstream())
+    try:
+        s = _cr.Session(proxy=relay.url(), impersonate="chrome",
+                        timeout=40)
+        if web.get("ua"):
+            s.headers.update({"user-agent": web["ua"]})
+        _jar_inject(s, web["cookies"])
+        # 母号邀请只建 pending —— 子号先自接成成员, ws-scoped
+        # token 才换得出 (已是成员/no_invite 都不挡, 继续换)
+        try:
+            ok2, _c2, _d2 = _proto_self_accept(a, p, ws_id)
+            if ok2:
+                log("   已接目标空间邀请")
+        except Exception as e:
+            log("   接邀请异常 %s" % str(e)[:50])
+        r = s.get("https://chatgpt.com/api/auth/session"
+                  "?exchange_workspace_token=true"
+                  "&workspace_id=%s&reason=setCurrentAccount"
+                  % ws_id, timeout=30)
+        j = r.json() if r.text else {}
+        at = j.get("accessToken") or ""
+        if not at:
+            log("   web会话换ws-AT失败 %d %s"
+                % (r.status_code, r.text[:100]))
+            return None
+        # 顺手把 at/st 存回 a.web (会话就是活的)
+        web["at"] = at
+        if j.get("sessionToken"):
+            web["st"] = j["sessionToken"]
+        web["live"] = True
+        web["live_at"] = _now()
+        a["web"] = web
+        return _pat_probe_http(at, ws_id, relay.url(), log)
+    finally:
+        relay.close()
+
+
 def _proto_pat_worker(ids):
     PROTO_PAT_JOB["running"] = True
     PROTO_PAT_JOB["stop"] = False
@@ -4371,14 +5108,17 @@ def _proto_pat_worker(ids):
                 continue
             email = a["email"]
             try:
-                if not a.get("mail_url"):
-                    PROTO_PAT_JOB["results"][aid] = "没有接码链接"
-                    log("✗ %s: 没有接码链接" % email)
-                    continue
                 px = _load_proxies()
-                p = next((x for x in px
-                          if x["id"] == a.get("proxy_id")), None)
-                if not p or p.get("banned"):
+                p = None
+                for pid in (a.get("proxy_id"),
+                            (a.get("web") or {}).get("px"),
+                            a.get("ios_px")):
+                    cand = next((x for x in px
+                                 if x["id"] == pid), None)
+                    if cand and not cand.get("banned"):
+                        p = cand
+                        break
+                if not p:
                     p = _pick_proxy(px, email)
                     if not p:
                         PROTO_PAT_JOB["results"][aid] = "没有可用代理"
@@ -4387,6 +5127,37 @@ def _proto_pat_worker(ids):
                     _bind_proxy(p, email)
                     a["proxy_id"] = p["id"]
                     _save_proxies(px)
+                # 纯协议 PAT: a.web 会话换 ws-scoped at 直接探,
+                # 不吃邮箱不开窗
+                web = a.get("web") or {}
+                if web.get("cookies") and not web.get("dead"):
+                    log("→ %s: web会话 PAT 探测 (%s)"
+                        % (email, p["host"]))
+                    try:
+                        verdict = _web_pat(a, p, log, ws_id)
+                    except Exception as e:
+                        verdict = None
+                        log("   web会话探测异常 %s, 走邮箱链"
+                            % str(e)[:60])
+                    if verdict is not None:
+                        a["pat"] = verdict
+                        a["pat_at"] = _now()
+                        a["ws_id"] = ws_id
+                        _ws_list_add(a, ws_id, ws_name,
+                                     "standard-user")
+                        if not a.get("reg"):
+                            a["reg"] = "yes"
+                            a["reg_at"] = a.get("reg_at") or _now()
+                        PROTO_PAT_JOB["results"][aid] = verdict
+                        tag = {"good": "✓ 良好", "low": "✗ 低级"} \
+                            .get(verdict, "? " + verdict)
+                        log("%s %s" % (tag, email))
+                        continue
+                    log("   web会话探测没成, 走邮箱链兜底")
+                if not a.get("mail_url"):
+                    PROTO_PAT_JOB["results"][aid] = "没有接码链接"
+                    log("✗ %s: 没有接码链接" % email)
+                    continue
                 log("→ %s: codex 登录 (%s)" % (email, p["host"]))
                 relay = _ChainRelay(p, _upstream())
                 try:
@@ -4908,7 +5679,7 @@ def _pat_worker(ids):
                     px = _load_proxies()
                     p = next((x for x in px
                               if x["id"] == a.get("proxy_id")), None)
-                    if not p or p.get("banned"):
+                    if not p or p.get("banned") or p.get("auth_dead"):
                         p = _pick_proxy(px, email)
                         if not p:
                             cool = (" (冷却中 %d 条)"
@@ -5181,7 +5952,7 @@ def _join_worker(ids, mname, seat="prolite"):
                     px = _load_proxies()
                     p = next((x for x in px
                               if x["id"] == a.get("proxy_id")), None)
-                    if not p or p.get("banned"):
+                    if not p or p.get("banned") or p.get("auth_dead"):
                         p = _pick_proxy(px, email)
                         if not p:
                             cool = (" (冷却中 %d 条)"
@@ -5200,7 +5971,8 @@ def _join_worker(ids, mname, seat="prolite"):
                     iid = iid_by_email.get(email)
                     can_proto = bool(
                         (a.get("ios") or {}).get("at")
-                        or (a.get("web") or {}).get("cookies"))
+                        or (a.get("web") or {}).get("cookies")
+                        or (a.get("cred") or {}).get("access_token"))
                     if can_proto:
                         if iid:
                             ok, code, detail = _proto_accept_invite(
@@ -5472,67 +6244,155 @@ def _leave_autoarchive(a, email, log):
 
 
 def _proto_leave_ws(a, p, ws_id):
-    """纯协议退出: ios.at + 账号代理(链式) + chrome指纹, 不开窗。
-    返回 (ok, wsn, code, detail)。code: at_expired/not_member/
-    sole_owner/HTTP xxx/no_at。"""
-    at = (a.get("ios") or {}).get("at")
+    """纯协议退出: web.at(可刷)/ios.at + 账号代理(链式) + chrome
+    指纹, 不开窗。返回 (ok, wsn, code, detail)。
+    code: at_expired/not_member/sole_owner/HTTP xxx/no_at/chain。"""
+    ios = a.get("ios") or {}
+    # web会话 at 优先 (同 web 端打 backend-api 的 token);
+    # 没有/失效用 cookie 现刷, 再退 ios.at → cred.at (OAuth凭证)
+    at = (a.get("web") or {}).get("at") or _web_at(a, p)
+    at_src = "web" if at else ""
+    if not at and ios.get("at") and not ios.get("at_dead"):
+        at, at_src = ios["at"], "ios"
+    if not at and (a.get("cred") or {}).get("access_token"):
+        at, at_src = a["cred"]["access_token"], "cred"
     if not at:
-        return False, "", "no_at", ""
-    if (a.get("ios") or {}).get("at_dead"):
-        # 退过一次空间后 at 服务端作废, 不再浪费请求
-        return False, "", "at_expired", "at_dead"
+        return (False, "", "at_expired", "at_dead") \
+            if ios.get("at_dead") else (False, "", "no_at", "")
     from curl_cffi import requests as _cr
     relay = _ChainRelay(p, _upstream())
     try:
         s = _cr.Session(proxy=relay.url(),
                         impersonate="chrome", timeout=40)
         H = {"authorization": "Bearer " + at}
-        r = _cf_call(lambda: s.get(
-            "https://chatgpt.com/backend-api/accounts"
-            "/check/v4-2023-04-27", headers=H))
-        if r.status_code == 401:
-            return False, "", "at_expired", r.text[:150]
-        if r.status_code != 200:
-            return False, "", "HTTP %s" % r.status_code, \
-                r.text[:150]
-        mine, names = None, []
-        for v in (r.json().get("accounts") or {}).values():
-            x = v.get("account") or {}
-            if x.get("structure") != "workspace":
-                continue
-            names.append(x.get("name") or "")
-            if x.get("account_id") == ws_id:
-                mine = x
-        if not mine:
-            return False, "", "not_member", \
-                ",".join(n for n in names if n)
-        uid = (mine.get("account_user_id")
-               or "").split("__")[0]
-        hw = dict(H)
-        hw["chatgpt-account-id"] = ws_id
-        if "owner" in str(
-                mine.get("account_user_role") or "").lower():
-            oc = _cf_call(lambda: s.get(
+
+        def _check():
+            r = _cf_call(lambda: s.get(
                 "https://chatgpt.com/backend-api/accounts"
-                "/%s/users/owner_count" % ws_id, headers=hw))
-            if oc.status_code == 200 and \
-                    (oc.json().get("owner_count") or 0) <= 1:
-                return False, "", "sole_owner", ""
-        # 429 "subscription update in progress" 是瞬时锁, 轮重试
-        d = None
-        for _try in range(4):
-            d = _cf_call(lambda: s.delete(
-                "https://chatgpt.com/backend-api/accounts/%s"
-                "/users/%s" % (ws_id, uid), headers=hw))
-            if d.status_code != 429:
+                "/check/v4-2023-04-27", headers=H))
+            if r.status_code == 401:
+                # 瞬时 401 (CF/后端抖动) —— 歇 2s 重发一次再判死
+                time.sleep(2)
+                r = _cf_call(lambda: s.get(
+                    "https://chatgpt.com/backend-api/accounts"
+                    "/check/v4-2023-04-27", headers=H))
+            return r
+
+        def _do(at, uid_o=None):
+            """单枚 token 打全程 check→DELETE; 途中任何 401
+            (check 或 DELETE) 返回 (None, body) 交外层换下
+            一枚, 其余结果直接定案 (成功/成员/权限/HTTP错)。"""
+            H["authorization"] = "Bearer " + at
+            r = _check()
+            if r.status_code == 401:
+                return None, r.text
+            if r.status_code != 200:
+                return (False, "", "HTTP %s" % r.status_code,
+                        r.text[:150]), ""
+            mine, names = None, []
+            for v in (r.json().get("accounts") or {}).values():
+                x = v.get("account") or {}
+                if x.get("structure") != "workspace":
+                    continue
+                names.append(x.get("name") or "")
+                if x.get("account_id") == ws_id:
+                    mine = x
+            if not mine:
+                return (False, "", "not_member",
+                        ",".join(n for n in names if n)), ""
+            uid = uid_o or (mine.get("account_user_id")
+                            or "").split("__")[0]
+            hw = dict(H)
+            hw["chatgpt-account-id"] = ws_id
+            if "owner" in str(
+                    mine.get("account_user_role") or "").lower():
+                oc = _cf_call(lambda: s.get(
+                    "https://chatgpt.com/backend-api/accounts"
+                    "/%s/users/owner_count" % ws_id,
+                    headers=hw))
+                if oc.status_code == 200 and \
+                        (oc.json().get("owner_count") or 0) <= 1:
+                    return (False, "", "sole_owner", ""), ""
+            # 429 "subscription update in progress" 是瞬时锁, 轮重试
+            d = None
+            for _try in range(4):
+                d = _cf_call(lambda: s.delete(
+                    "https://chatgpt.com/backend-api/accounts/%s"
+                    "/users/%s" % (ws_id, uid), headers=hw))
+                if d.status_code != 429:
+                    break
+                time.sleep(10)
+            if d.status_code == 401:
+                return None, d.text
+            if d.status_code == 200:
+                # 退出成功后该 at 服务端作废 —— 标记,
+                # 后续协议操作 (退出/接邀) 全部转窗口
+                a.setdefault("ios", {})["at_dead"] = True
+                return (True, mine.get("name") or "", "", ""), ""
+            return (False, "", "HTTP %s" % d.status_code,
+                    d.text[:150]), ""
+
+        # —— 首选: web 会话换「空间作用域」令牌 + 会话真 uid ——
+        # 浏览器退空间走的就是 exchange_workspace_token;
+        # 裸 at 过得了 check 但 DELETE users/{uid} 会 401
+        uid_o = None
+        wc = (a.get("web") or {}).get("cookies")
+        if wc:
+            try:
+                _jar_inject(s, wc)
+                ej = s.get(
+                    "https://chatgpt.com/api/auth/session"
+                    "?exchange_workspace_token=true"
+                    "&workspace_id=%s&reason=setCurrentAccount"
+                    % ws_id, timeout=30).json()
+                if ej.get("accessToken"):
+                    at, at_src = ej["accessToken"], "空间令牌"
+                    uid_o = (ej.get("user") or {}).get("id")
+            except Exception:
+                pass
+
+        # token 轮换包住全程: 任一环节 401 顺次换
+        # web.at→web刷新→ios→cred 重打全程, 全灭才判 at_expired
+        tried, srcs = {at}, [at_src]
+        cands, res, last = None, None, ""
+        while res is None:
+            res, last = _do(at, uid_o)
+            if res is not None:
                 break
-            time.sleep(10)
-        if d.status_code == 200:
-            # 退出成功后该 at 服务端作废 —— 标记, 后续协议操作
-            # (退出/接邀) 全部转窗口
-            a.setdefault("ios", {})["at_dead"] = True
-            return True, mine.get("name") or "", "", ""
-        return False, "", "HTTP %s" % d.status_code, d.text[:150]
+            uid_o = None
+            if cands is None:
+                cands = []
+                wat = (a.get("web") or {}).get("at")
+                if wat and wat not in tried:
+                    tried.add(wat)
+                    cands.append((wat, "web"))
+                nat = _web_at(a, p)
+                if nat and nat not in tried:
+                    tried.add(nat)
+                    cands.append((nat, "web刷新"))
+                iat = ios.get("at")
+                if iat and not ios.get("at_dead") \
+                        and iat not in tried:
+                    tried.add(iat)
+                    cands.append((iat, "ios"))
+                cat = (a.get("cred") or {}).get("access_token")
+                if cat and cat not in tried:
+                    tried.add(cat)
+                    cands.append((cat, "cred"))
+            if not cands:
+                break
+            at, at_src = cands.pop(0)
+            srcs.append(at_src)
+        if res is None:
+            return False, "", "at_expired", \
+                "%s 401: %s" % ("+".join(srcs),
+                                (last or "")[:120])
+        return res
+    except Exception as e:
+        # 链式拨号失败 (代理死/上级断) —— 报真实原因,
+        # 调用方转开窗兜底而不是整号报错
+        return False, "", "chain", \
+            relay.last_err or str(e)[:80]
     finally:
         relay.close()
 
@@ -5577,10 +6437,13 @@ def _proto_accept_invite(a, p, ws_id, iid):
     返回 (ok, code, detail)。code: no_at/at_expired/no_pid/HTTP xxx。"""
     ios = a.get("ios") or {}
     # web会话 at 优先 (就是 web 端打 backend-api 的同一 token);
-    # 没有/失效用 cookie 现刷, 再退回 ios.at
+    # 没有/失效用 cookie 现刷, 再退 ios.at → cred.at (OAuth凭证)
     at = (a.get("web") or {}).get("at") or _web_at(a, p)
+    at_src = "web" if at else ""
     if not at and ios.get("at") and not ios.get("at_dead"):
-        at = ios["at"]
+        at, at_src = ios["at"], "ios"
+    if not at and (a.get("cred") or {}).get("access_token"):
+        at, at_src = a["cred"]["access_token"], "cred"
     if not at:
         return (False, "at_expired", "at_dead") \
             if ios.get("at_dead") else (False, "no_at", "")
@@ -5593,9 +6456,15 @@ def _proto_accept_invite(a, p, ws_id, iid):
              "content-type": "application/json"}
 
         def _check():
-            r = _cf_call(lambda: s.get(
-                "https://chatgpt.com/backend-api/accounts"
-                "/check/v4-2023-04-27", headers=H))
+            def _hit():
+                return _cf_call(lambda: s.get(
+                    "https://chatgpt.com/backend-api/accounts"
+                    "/check/v4-2023-04-27", headers=H))
+            r = _hit()
+            if r.status_code == 401:
+                # 瞬时 401 (CF/后端抖动) —— 歇 2s 重发一次再判死
+                time.sleep(2)
+                r = _hit()
             if r.status_code != 200:
                 return r.status_code, None, False
             pid = None
@@ -5608,45 +6477,67 @@ def _proto_accept_invite(a, p, ws_id, iid):
                     found = True
             return 200, pid, found
 
-        code, pid, found = _check()
-        if code == 401:
-            # at 过期: web会话能刷就刷出新 at 再试一次
-            nat = _web_at(a, p)
-            if nat and nat != at:
-                at = nat
-                H["authorization"] = "Bearer " + at
-                code, pid, found = _check()
+        def _do(at):
+            """单枚 token 打全程 check→accept; 途中任何 401
+            返回 None 交外层换下一枚, 其余结果直接定案。"""
+            H["authorization"] = "Bearer " + at
+            code, pid, found = _check()
             if code == 401:
-                return False, "at_expired", ""
-        if code != 200:
-            return False, "HTTP %s" % code, ""
-        if found:
-            return True, "", ""
-        if not pid:
-            return False, "no_pid", ""
-        h = dict(H)
-        h["chatgpt-account-id"] = pid
-        ac = _cf_call(lambda: s.post(
-            "https://chatgpt.com/backend-api/accounts/%s"
-            "/invites/accept" % pid, headers=h,
-            json={"invite_id": iid}))
-        if ac.status_code == 401:
-            nat = _web_at(a, p)
-            if nat and nat != at:
-                at = nat
-                h["authorization"] = "Bearer " + at
-                ac = _cf_call(lambda: s.post(
-                    "https://chatgpt.com/backend-api/accounts/%s"
-                    "/invites/accept" % pid, headers=h,
-                    json={"invite_id": iid}))
+                return None
+            if code != 200:
+                return False, "HTTP %s" % code, ""
+            if found:
+                return True, "", ""
+            if not pid:
+                return False, "no_pid", ""
+            h = dict(H)
+            h["chatgpt-account-id"] = pid
+            ac = _cf_call(lambda: s.post(
+                "https://chatgpt.com/backend-api/accounts/%s"
+                "/invites/accept" % pid, headers=h,
+                json={"invite_id": iid}))
             if ac.status_code == 401:
-                return False, "at_expired", ac.text[:150]
-        if ac.status_code != 200:
-            return False, "HTTP %s" % ac.status_code, \
-                ac.text[:150]
-        # 注意: 这里的 success 可能是假阳 (席位满等),
-        # 成员确认交给调用方再邀一次看 already_member_emails
-        return True, "", ""
+                return None
+            if ac.status_code != 200:
+                return False, "HTTP %s" % ac.status_code, \
+                    ac.text[:150]
+            # 注意: 这里的 success 可能是假阳 (席位满等),
+            # 成员确认交给调用方再邀一次看 already_member_emails
+            return True, "", ""
+
+        # token 轮换包住全程: 任一环节 401 顺次换
+        # web刷新→ios→cred 重打全程, 全灭才判 at_expired
+        tried, srcs = {at}, [at_src]
+        cands, res = None, None
+        while res is None:
+            res = _do(at)
+            if res is not None:
+                break
+            if cands is None:
+                cands = []
+                nat = _web_at(a, p)
+                if nat and nat not in tried:
+                    tried.add(nat)
+                    cands.append((nat, "web刷新"))
+                iat = ios.get("at")
+                if iat and not ios.get("at_dead") \
+                        and iat not in tried:
+                    tried.add(iat)
+                    cands.append((iat, "ios"))
+                cat = (a.get("cred") or {}).get("access_token")
+                if cat and cat not in tried:
+                    tried.add(cat)
+                    cands.append((cat, "cred"))
+            if not cands:
+                return False, "at_expired", "+".join(srcs)
+            at, _src = cands.pop(0)
+            srcs.append(_src)
+        return res
+    except Exception as e:
+        # 链式拨号失败 (代理死/上级断) —— 报真实原因,
+        # 调用方转开窗兜底而不是整号报错
+        return False, "chain", \
+            relay.last_err or str(e)[:80]
     finally:
         relay.close()
 
@@ -5657,9 +6548,13 @@ def _proto_self_accept(a, p, ws_id):
     母号邀请响应里的 invite_id (窗口 _ACCEPT_INVITE_JS 同款)。
     返回 (ok, code, detail)。"""
     ios = a.get("ios") or {}
+    # web.at → _web_at刷新 → ios.at → cred.at (OAuth凭证)
     at = (a.get("web") or {}).get("at") or _web_at(a, p)
+    at_src = "web" if at else ""
     if not at and ios.get("at") and not ios.get("at_dead"):
-        at = ios["at"]
+        at, at_src = ios["at"], "ios"
+    if not at and (a.get("cred") or {}).get("access_token"):
+        at, at_src = a["cred"]["access_token"], "cred"
     if not at:
         return (False, "at_expired", "at_dead") \
             if ios.get("at_dead") else (False, "no_at", "")
@@ -5672,9 +6567,15 @@ def _proto_self_accept(a, p, ws_id):
              "content-type": "application/json"}
 
         def _check():
-            r = _cf_call(lambda: s.get(
-                "https://chatgpt.com/backend-api/accounts"
-                "/check/v4-2023-04-27", headers=H))
+            def _hit():
+                return _cf_call(lambda: s.get(
+                    "https://chatgpt.com/backend-api/accounts"
+                    "/check/v4-2023-04-27", headers=H))
+            r = _hit()
+            if r.status_code == 401:
+                # 瞬时 401 (CF/后端抖动) —— 歇 2s 重发一次再判死
+                time.sleep(2)
+                r = _hit()
             if r.status_code != 200:
                 return r.status_code, None, False
             pid = None
@@ -5687,60 +6588,97 @@ def _proto_self_accept(a, p, ws_id):
                     found = True
             return 200, pid, found
 
-        code, pid, found = _check()
-        if code == 401:
-            nat = _web_at(a, p)
-            if nat and nat != at:
-                at = nat
-                H["authorization"] = "Bearer " + at
-                code, pid, found = _check()
+        def _do(at):
+            """单枚 token 打全程 check→列邀请→accept; 途中任何
+            401 返回 None 交外层换下一枚, 其余结果直接定案。"""
+            H["authorization"] = "Bearer " + at
+            code, pid, found = _check()
             if code == 401:
-                return False, "at_expired", ""
-        if code != 200:
-            return False, "HTTP %s" % code, ""
-        if found:
-            return True, "", ""
-        if not pid:
-            return False, "no_pid", ""
-        items, tried = [], []
-        for _att in range(2):
-            r = _cf_call(lambda: s.get(
-                "https://chatgpt.com/backend-api/accounts/%s"
-                "/invites" % pid, headers=H))
-            if r.status_code == 401:
-                return False, "at_expired", r.text[:150]
-            if r.status_code != 200:
-                return False, "HTTP %s" % r.status_code, \
-                    r.text[:150]
-            try:
-                j = r.json()
-            except Exception:
-                j = {}
-            items = (j.get("invites") or j.get("items")
-                     or (j if isinstance(j, list) else []))
-            if items:
+                return None
+            if code != 200:
+                return False, "HTTP %s" % code, ""
+            if found:
+                return True, "", ""
+            if not pid:
+                return False, "no_pid", ""
+            items, tried2 = [], []
+            for _att in range(2):
+                r = _cf_call(lambda: s.get(
+                    "https://chatgpt.com/backend-api/accounts/%s"
+                    "/invites" % pid, headers=H))
+                if r.status_code == 401:
+                    return None
+                if r.status_code != 200:
+                    return False, "HTTP %s" % r.status_code, \
+                        r.text[:150]
+                try:
+                    j = r.json()
+                except Exception:
+                    j = {}
+                items = (j.get("invites") or j.get("items")
+                         or (j if isinstance(j, list) else []))
+                if items:
+                    break
+                time.sleep(5)   # 邀请传播到子号列表有延迟
+            for inv in items:
+                iid2 = inv.get("id") or inv.get("invite_id")
+                iw = (inv.get("workspace_id")
+                      or inv.get("account_id")
+                      or (inv.get("account") or {})
+                      .get("account_id"))
+                if iw and iw != ws_id:
+                    continue
+                if not iid2:
+                    continue
+                hh = dict(H)
+                hh["chatgpt-account-id"] = pid
+                for u in ("accounts/%s/invites/%s/accept"
+                          % (pid, iid2),
+                          "invites/%s/accept" % iid2):
+                    ac = _cf_call(lambda: s.post(
+                        "https://chatgpt.com/backend-api/" + u,
+                        headers=hh, json={}))
+                    tried2.append(str(ac.status_code))
+                    if ac.status_code == 401:
+                        return None
+                    if ac.status_code == 200:
+                        return True, "", ""
+            return False, "no_invite", \
+                ",".join(tried2) or "无待接邀请"
+
+        # token 轮换包住全程: 任一环节 401 顺次换
+        # web刷新→ios→cred 重打全程, 全灭才判 at_expired
+        tried, srcs = {at}, [at_src]
+        cands, res = None, None
+        while res is None:
+            res = _do(at)
+            if res is not None:
                 break
-            time.sleep(5)   # 邀请传播到子号列表有延迟
-        for inv in items:
-            iid2 = inv.get("id") or inv.get("invite_id")
-            iw = (inv.get("workspace_id") or inv.get("account_id")
-                  or (inv.get("account") or {}).get("account_id"))
-            if iw and iw != ws_id:
-                continue
-            if not iid2:
-                continue
-            hh = dict(H)
-            hh["chatgpt-account-id"] = pid
-            for u in ("accounts/%s/invites/%s/accept" % (pid, iid2),
-                      "invites/%s/accept" % iid2):
-                ac = _cf_call(lambda: s.post(
-                    "https://chatgpt.com/backend-api/" + u,
-                    headers=hh, json={}))
-                tried.append(str(ac.status_code))
-                if ac.status_code == 200:
-                    return True, "", ""
-        return False, "no_invite", \
-            ",".join(tried) or "无待接邀请"
+            if cands is None:
+                cands = []
+                nat = _web_at(a, p)
+                if nat and nat not in tried:
+                    tried.add(nat)
+                    cands.append((nat, "web刷新"))
+                iat = ios.get("at")
+                if iat and not ios.get("at_dead") \
+                        and iat not in tried:
+                    tried.add(iat)
+                    cands.append((iat, "ios"))
+                cat = (a.get("cred") or {}).get("access_token")
+                if cat and cat not in tried:
+                    tried.add(cat)
+                    cands.append((cat, "cred"))
+            if not cands:
+                return False, "at_expired", "+".join(srcs)
+            at, _src = cands.pop(0)
+            srcs.append(_src)
+        return res
+    except Exception as e:
+        # 链式拨号失败 (代理死/上级断) —— 报真实原因,
+        # 调用方转开窗兜底而不是整号报错
+        return False, "chain", \
+            relay.last_err or str(e)[:80]
     finally:
         relay.close()
 
@@ -5799,14 +6737,22 @@ def _leave_worker(ids, ws_name=None, pairs=None):
                             " —— 记录过期先「查空间」"
                             % (email, ws_name or "?", known))
                         continue
-                    p = next((x for x in _load_proxies()
+                    px = _load_proxies()
+                    p = next((x for x in px
                               if x["id"] == a.get("proxy_id")), None)
-                    if not p or p.get("banned"):
-                        LEAVE_JOB["results"][aid] = "没绑代理"
-                        log("✗ %s: 没绑代理" % email)
-                        continue
-                    # —— 纯协议优先: 有 ios.at 就不开窗 ——
-                    if (a.get("ios") or {}).get("at"):
+                    if not p or p.get("banned") or p.get("auth_dead"):
+                        p = _pick_proxy(px, email)
+                        if not p:
+                            LEAVE_JOB["results"][aid] = "没绑代理"
+                            log("✗ %s: 没绑代理" % email)
+                            continue
+                        _bind_proxy(p, email)
+                        a["proxy_id"] = p["id"]
+                        _save_proxies(px)
+                    # —— 纯协议优先: ios.at/web会话/cred.at 任一就不开窗 ——
+                    if (a.get("ios") or {}).get("at") \
+                            or (a.get("web") or {}).get("cookies") \
+                            or (a.get("cred") or {}).get("access_token"):
                         ok = wsn = code = detail = ""
                         refreshed = False
                         for _try in range(2):
@@ -5818,8 +6764,10 @@ def _leave_worker(ids, ws_name=None, pairs=None):
                                     or _try or not \
                                     (a.get("ios") or {}).get("rt"):
                                 break
-                            log("… %s: ios.at 失效 (%s), rt 刷新再试"
-                                % (email, code))
+                            log("… %s: at 失效 (%s%s), rt 刷新再试"
+                                % (email, code,
+                                   (" " + detail[:60])
+                                   if detail else ""))
                             rok, rerr = _ios_refresh_at(a, p, log)
                             if not rok:
                                 log("… %s: rt 刷新失败 %s"
@@ -5856,9 +6804,11 @@ def _leave_worker(ids, ws_name=None, pairs=None):
                                 % (email, code, detail))
                             continue
                         log("… %s: %s, 走窗口"
-                            % (email, "ios.at 已过期" if code in
+                            % (email, "at已过期" if code in
                                ("at_expired", "HTTP 401")
-                               else "协议被CF拦截"))
+                               else "协议被CF拦截")
+                            + ((" (%s)" % detail[:80])
+                               if detail else ""))
                     dir_id, cws, err = _roxy_open_for(email, p)
                     if err or not cws:
                         LEAVE_JOB["results"][aid] = \
@@ -6757,11 +7707,14 @@ def _cpa_test(url, key, up):
         return {"error": str(e)[:200]}
 
 
-def _cpa_push_cred(name, cred, st=None):
+def _cpa_push_cred(name, cred, st=None, purl=None):
     """推凭证 JSON 入 CPA 池 (v8/v0 auth-files?name=, 原始 JSON body)。
+    purl=绑定的出口代理URL (写进凭证的 proxy_url 字段)。
     返回 err|None。st 缺省 GPT settings; G 侧传 _gsettings()。"""
     q = "?name=" + urllib.parse.quote(name)
     cred = _cpa_cred_out(cred, st)
+    if purl:
+        cred["proxy_url"] = purl
     st_, j, err = _cpa_call(
         "POST", "/v8/management/auth-files" + q, cred,
         timeout=30, st=st)
@@ -6769,6 +7722,14 @@ def _cpa_push_cred(name, cred, st=None):
         st_, j, err = _cpa_call(
             "POST", "/v0/management/auth-files" + q, cred,
             timeout=30, st=st)
+    return err
+
+
+def _cpa_disable_cred(name, st=None):
+    """把池内凭证置为禁用 (PATCH auth-files/status)。返回 err|None。"""
+    st_, j, err = _cpa_call(
+        "PATCH", "/v0/management/auth-files/status",
+        {"name": name, "disabled": True}, timeout=15, st=st)
     return err
 
 
@@ -6926,6 +7887,49 @@ def _sub2_item(a, cred, gids):
         "priority": 1,
         "auto_pause_on_expired": True,
     }
+
+
+def _sub2_proxy_key(p):
+    """sub2api-data 格式 proxy_key: protocol|host|port|user|pass
+    (本地 socks5 → 远端 socks5h, 与 _sub2_ensure_proxy 一致)。"""
+    scheme = (p.get("scheme") or "socks5").lower()
+    proto = "socks5h" if scheme == "socks5" else scheme
+    return "%s|%s|%s|%s|%s" % (
+        proto, (p.get("host") or "").strip(),
+        int(p.get("port") or 0),
+        (p.get("username") or "").strip(),
+        (p.get("password") or "").strip())
+
+
+def _sub2_data_account(a, cred):
+    """a.cred → sub2api-data accounts[] 条目 (DataAccount)。"""
+    it = _sub2_item(a, cred, [])
+    c = it["credentials"]
+    c["email"] = a["email"]
+    c.pop("client_id", None)
+    return {
+        "name": a["email"],
+        "platform": "openai",
+        "type": "oauth",
+        "credentials": c,
+        "extra": {"email": a["email"],
+                  "name": a["email"],
+                  "auth_provider": "openai",
+                  "source": "roxy-accounts"},
+        "concurrency": 10,
+        "priority": 1,
+        "expires_at": c["expires_at"],
+        "auto_pause_on_expired": True,
+    }
+
+
+def _acct_proxy(a, cred, pmap):
+    """推送/导出共用的代理解析: proxy_id → web.px → cred.proxy_url。"""
+    p = pmap.get(a.get("proxy_id") or "") \
+        or pmap.get((a.get("web") or {}).get("px") or "")
+    if not p and cred.get("proxy_url"):
+        p, _e = _parse_proxy_line(cred["proxy_url"])
+    return p
 
 
 # ---------------- Codex OAuth 本地实现 ----------------
@@ -7400,6 +8404,10 @@ def _cpa_worker(ids):
                     p = next((x for x in px
                               if x["id"] == a.get("proxy_id")),
                              None)
+                    if p and (p.get("banned") or p.get("auth_dead")):
+                        # 绑定代理已死 —— 当有web会话仍可换活代理
+                        # 走协议; 否则 _pick_proxy 补一条
+                        p = None
                     web = a.get("web") or {}
                     if not p and web.get("cookies") \
                             and not web.get("dead"):
@@ -7409,8 +8417,12 @@ def _cpa_worker(ids):
                         p = next(
                             (x for x in px
                              if x["id"] == wpx
-                             and not x.get("banned")), None) \
-                            or _pick_proxy(px, email)
+                             and not x.get("banned")
+                             and time.time() - (x.get("cf_oai")
+                                                or 0) > 21600),
+                            None) \
+                            or _pick_proxy(px, email, rand=True,
+                                           cf_ttl=21600)
                         if p:
                             log("→ %s: 协议会话免绑定, 用代理 %s:%s"
                                 % (email, p["host"], p["port"]))
@@ -7437,28 +8449,53 @@ def _cpa_worker(ids):
                     #    拿码, 免开窗; 失败回退窗口路
                     code = None
                     if web.get("cookies") and not web.get("dead"):
-                        code, perr = _proto_oauth(
-                            a, p, state, verifier, log)
-                        if code:
-                            log("  %s: 协议OAuth出码, 免开窗 ✓"
-                                % email)
-                            web["live"] = True
-                            web["live_at"] = _now()
-                        else:
-                            if perr in ("session_dead", "step_up"):
-                                web["dead"] = True
-                            if perr == "add_phone":
-                                # 会话已认证 (免登录✓) 但账号撞
-                                # 绑手机硬门 —— 开窗同堵墙
+                        # 协议路至多3次: session 死/step_up 不重试;
+                        # 其余失败 (403/超时等IP级) 换代理再试
+                        tried = {p["id"]} if p else set()
+                        perr = None
+                        for att in range(1, 4):
+                            code, perr = _proto_oauth(
+                                a, p, state, verifier, log,
+                                skip_wpx=att > 1)
+                            if code:
+                                log("  %s: 协议OAuth出码%s, 免开窗 ✓"
+                                    % (email,
+                                       " (换IP第%d次)" % att
+                                       if att > 1 else ""))
                                 web["live"] = True
                                 web["live_at"] = _now()
-                                CPA_JOB["results"][aid] = \
-                                    "blocked:add_phone"
-                                log("✗ %s: OAuth 免登录✓ 但撞 "
-                                    "add_phone 硬门" % email)
-                                continue
-                            log("  %s: 协议OAuth未成(%s), 回退开窗"
-                                % (email, perr))
+                                break
+                            if perr in ("session_dead", "step_up"):
+                                web["dead"] = True
+                                break
+                            if perr == "add_phone":
+                                break
+                            p2 = _pick_proxy(px, email,
+                                             excl=tried,
+                                             rand=True,
+                                             cf_ttl=21600) \
+                                if att < 3 else None
+                            if not p2:
+                                log("  %s: 协议OAuth未成"
+                                    "(%s, 试%dIP), 回退开窗"
+                                    % (email, perr, att))
+                                break
+                            tried.add(p2["id"])
+                            log("  %s: 协议OAuth %s → 换IP "
+                                "%s:%s 重试(%d/3)"
+                                % (email, perr, p2["host"],
+                                   p2["port"], att))
+                            p = p2
+                        if perr == "add_phone":
+                            # 会话已认证 (免登录✓) 但账号撞
+                            # 绑手机硬门 —— 开窗同堵墙
+                            web["live"] = True
+                            web["live_at"] = _now()
+                            CPA_JOB["results"][aid] = \
+                                "blocked:add_phone"
+                            log("✗ %s: OAuth 免登录✓ 但撞 "
+                                "add_phone 硬门" % email)
+                            continue
                     # 3) 窗口路兜底
                     if code is None:
                         code, werr = _cpa_window_code(
@@ -8199,12 +9236,34 @@ _REG_DONE_JS = ("fetch('/api/auth/session',{credentials:'include'})"
                 ".catch(()=>null)")
 
 # 「You're all set」注册/登录落地页 (auth.openai.com 域,
-# session 探针够不着) —— 文本认到即算完成
+# session 探针够不着) —— URL 带 all-set 或多语文本认到即算完成;
+# 认到后顺手点掉页上 Continue/继续 按钮让它跳转走完登录。
+# 注意撇号兼容: OpenAI 用排版撇号 ’ (U+2019) 不是 ASCII '。
 _REG_ALLSET_JS = (
-    "(()=>{var t=document.title+' '+(document.body"
-    "?document.body.innerText.slice(0,800):'');"
-    "return /you'?re all set|一切就绪|准备就绪|已完成/i"
-    ".test(t)?'allset':null})()")
+    "(()=>{var u=(location.href||'').toLowerCase();"
+    "var t=(document.title||'')+' '+(document.body"
+    "?document.body.innerText.slice(0,1500):'');"
+    "var ok=/all-?set/.test(u)"
+    "||/you['\\u2019]?re all set|all set|一切就绪|准备就绪|已完成|"
+    "tudo certo|tudo pronto|est[aá] tudo|todo listo|"
+    "todo est[aá] listo|vous êtes pr[eê]t|alles bereit|"
+    "tutto pronto/i.test(t);"
+    "if(!ok)return null;"
+    "var bs=[].slice.call(document.querySelectorAll("
+    "'button,[role=button],a,input[type=submit]'));"
+    "var b=null,i,tx;"
+    "for(i=0;i<bs.length;i++){"
+    "tx=((bs[i].innerText||bs[i].value||'')+'').trim().toLowerCase();"
+    "if(!tx||bs[i].offsetParent===null)continue;"
+    "if(/continue|back|return|start|done|finish|open|"
+    "继续|返回|完成|开始|continuar|voltar|continuer|"
+    "weiter|continua|indietro/i.test(tx)){b=bs[i];break}}"
+    "if(!b&&/auth\\.openai\\.com|all-?set/.test(u)){"
+    "for(i=0;i<bs.length;i++){"
+    "if(bs[i].tagName==='BUTTON'&&bs[i].offsetParent!==null)"
+    "{b=bs[i];break}}}"
+    "if(b){try{b.click()}catch(e){}}"
+    "return 'allset'})()")
 
 
 def _open_worker(accs):
@@ -8424,8 +9483,10 @@ def _open_worker(accs):
                                         except Exception:
                                             hit = None
                                         if not hit \
-                                                and "chatgpt.com" \
-                                                in (pg0.url or ""):
+                                                and re.search(
+                                                    r"chatgpt\.com|"
+                                                    r"auth\.openai\.com",
+                                                    pg0.url or ""):
                                             try:
                                                 hit = pg0.evaluate(
                                                     _REG_DONE_JS)
@@ -8605,6 +9666,7 @@ class H(BaseHTTPRequestHandler):
                 "shop_sku": s.get("shop_sku") or "156",
                 "ios_auto_open": s.get("ios_auto_open", False),
                 "ios_auto_sec": s.get("ios_auto_sec", False),
+                "ios_reg_conc": s.get("ios_reg_conc") or 3,
                 "ios_web_how": s.get("ios_web_how") or "open",
                 "join_auto_oauth": s.get("join_auto_oauth", True),
                 "leave_autoclose": s.get("leave_autoclose", False),
@@ -8786,6 +9848,10 @@ class H(BaseHTTPRequestHandler):
             return self._json(gpusher.status())
         if self.path == "/api/pusher":
             return self._json(gpusher.status())
+        if self.path in ("/api/pusher/remote-pools",
+                         "/api/g/pusher/remote-pools"):
+            pl, err = gpusher.remote_pools()
+            return self._json({"pools": pl, "err": err})
         if self.path == "/api/autopipe":
             return self._json(_auto_status())
         if self.path == "/api/g/open/status":
@@ -8964,16 +10030,61 @@ class H(BaseHTTPRequestHandler):
             q = urllib.parse.parse_qs(
                 urllib.parse.urlparse(self.path).query)
             ids = set((q.get("ids") or [""])[0].split(",")) - {""}
-            items = [
-                (a.get("cred_file") or _cred_name(a["cred"]),
-                 a["cred"])
-                for a in _load_accounts()
-                if a.get("cred")
-                and (not ids or a["id"] in ids)]
-            if not items:
+            fmt = (q.get("fmt") or ["cpa"])[0]
+            accs0 = [a for a in _load_accounts()
+                     if a.get("cred")
+                     and (not ids or a["id"] in ids)]
+            if not accs0:
                 return self._json(
                     {"error": "没有可导出的凭证 (先跑🔗OAuth授权)"},
                     404)
+            if fmt == "sub2":
+                # sub2api-data v1 单文件: accounts + 关联代理(导入自动建)
+                pmap = {p["id"]: p for p in _load_proxies()}
+                daccs, pxmap = [], {}
+                for a in accs0:
+                    it = _sub2_data_account(a, a["cred"])
+                    p = _acct_proxy(a, a["cred"], pmap)
+                    if p and p.get("host"):
+                        key = _sub2_proxy_key(p)
+                        if key not in pxmap:
+                            pxmap[key] = {
+                                "proxy_key": key,
+                                "name": "%s:%s" % (p["host"],
+                                                   p["port"]),
+                                "protocol": key.split("|")[0],
+                                "host": p["host"],
+                                "port": int(p["port"]),
+                                "username":
+                                    p.get("username") or "",
+                                "password":
+                                    p.get("password") or "",
+                                "status": "active"}
+                        it["proxy_key"] = key
+                    daccs.append(it)
+                payload = {
+                    "type": "sub2api-data", "version": 1,
+                    "exported_at": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "proxies": list(pxmap.values()),
+                    "accounts": daccs}
+                data = json.dumps(payload, ensure_ascii=False,
+                                  indent=2).encode()
+                self.send_response(200)
+                self.send_header("content-type",
+                                 "application/json")
+                self.send_header(
+                    "content-disposition",
+                    'attachment; filename="sub2-creds-%d-%s.json"'
+                    % (len(daccs), time.strftime("%m%d-%H%M")))
+                self.send_header("content-length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
+            items = [
+                (a.get("cred_file") or _cred_name(a["cred"]),
+                 a["cred"])
+                for a in accs0]
             st = _settings()
             if len(items) == 1:
                 # 单个号直接给 JSON 文件, 不打 zip
@@ -9004,6 +10115,43 @@ class H(BaseHTTPRequestHandler):
                 "content-disposition",
                 'attachment; filename="cpa-creds-%s.zip"'
                 % time.strftime("%m%d-%H%M"))
+            self.send_header("content-length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        if self.path.startswith("/api/accounts/export"):
+            # 账号文本导出:
+            #   acct(默认) 每行 邮箱----密码----2FA密钥
+            #   mail       每行 邮箱----接码链接
+            q = urllib.parse.parse_qs(
+                urllib.parse.urlparse(self.path).query)
+            ids = set((q.get("ids") or [""])[0].split(",")) - {""}
+            fmt = (q.get("fmt") or ["acct"])[0]
+            accs0 = [a for a in _load_accounts()
+                     if not ids or a["id"] in ids]
+            if not accs0:
+                return self._json({"error": "没有可导出的账号"},
+                                  404)
+            if fmt == "mail":
+                lines = ["%s----%s" % (
+                            a["email"],
+                            (a.get("mail_url") or "").strip())
+                         for a in accs0]
+            else:
+                lines = ["%s----%s----%s" % (
+                            a["email"],
+                            (a.get("password") or "").strip(),
+                            (a.get("totp") or "").strip())
+                         for a in accs0]
+            data = ("\n".join(lines) + "\n").encode()
+            self.send_response(200)
+            self.send_header("content-type",
+                             "text/plain; charset=utf-8")
+            self.send_header(
+                "content-disposition",
+                'attachment; filename="%s-%d-%s.txt"'
+                % ("mails" if fmt == "mail" else "accounts",
+                   len(accs0), time.strftime("%m%d-%H%M")))
             self.send_header("content-length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
@@ -9101,6 +10249,20 @@ class H(BaseHTTPRequestHandler):
             if len(todo) > 500:
                 return self._json({"error": "单次最多测 500 条"}, 400)
             up = _upstream()
+            if up:
+                # 链式代理前置检查: 上级不通时测什么都是死,
+                # 别把全池 alive 标成 False
+                try:
+                    _s = _dial_via_upstream(
+                        up, todo[0]["host"],
+                        int(todo[0]["port"]), 6)
+                    _s.close()
+                except Exception as e:
+                    return self._json({
+                        "error": "上级代理 %s:%s 不通: %s —— "
+                                 "先修链式代理, 测出来全是假死"
+                                 % (up["host"], up["port"],
+                                    str(e)[:80])})
             results = {}
 
             def _one(p):
@@ -9108,6 +10270,11 @@ class H(BaseHTTPRequestHandler):
                 results[p["id"]] = {"ok": ok, "ms": ms,
                                     "exit_ip": ip, "err": err}
                 p["alive"] = ok
+                if ok:
+                    p.pop("auth_dead", None)
+                elif err and ("认证" in err
+                              or "auth" in err.lower()):
+                    p["auth_dead"] = time.time()
                 p["latency_ms"] = ms
                 p["exit_ip"] = ip
                 p["checked_at"] = _now()
@@ -9145,6 +10312,7 @@ class H(BaseHTTPRequestHandler):
                       "cpa_ping_url", "cpa_ping_to",
                       "shop_key", "shop_sku",
                       "ios_auto_open", "ios_auto_sec",
+                      "ios_reg_conc",
                       "ios_web_how", "join_auto_oauth",
                       "leave_autoclose",
                       "sub2_url", "sub2_key"):
@@ -9361,6 +10529,23 @@ class H(BaseHTTPRequestHandler):
                     a[k] = req[k]
             _save_accounts(accs)
             return self._json({"ok": True})
+        if self.path == "/api/accounts/group":
+            """批量分组: {ids, group} —— group 空串=清除分组"""
+            req = self._body()
+            ids = set(req.get("ids") or [])
+            g = (req.get("group") or "").strip()[:40]
+            accs = _load_accounts()
+            n = 0
+            for a in accs:
+                if a["id"] in ids:
+                    if g:
+                        a["group"] = g
+                    else:
+                        a.pop("group", None)
+                    n += 1
+            if n:
+                _save_accounts(accs)
+            return self._json({"ok": n})
         if self.path == "/api/accounts/unbind":
             req = self._body()
             accs = _load_accounts()
@@ -9916,7 +11101,13 @@ class H(BaseHTTPRequestHandler):
                     {"error": "没有可用 CPA 号池 (到设置页配置)"})
             accs = _load_accounts()
             ok, failed = 0, {}
-            res = {p["name"]: {"ok": 0, "failed": {}} for p in pools}
+            disable = bool(req.get("disabled"))   # 推入即禁用
+            bind_ip = bool(req.get("bind_ip"))    # 绑账号代理IP
+            pmap = ({p["id"]: p for p in _load_proxies()}
+                    if bind_ip else {})
+            res = {p["name"]: {"ok": 0, "disabled": 0, "bound": 0,
+                               "noip": 0, "failed": {},
+                               "dis_failed": {}} for p in pools}
             for a in accs:
                 if a["id"] not in ids:
                     continue
@@ -9924,16 +11115,34 @@ class H(BaseHTTPRequestHandler):
                 if not cred:
                     failed[a["email"]] = "没有凭证 (先跑OAuth)"
                     continue
+                purl = None
+                if bind_ip:
+                    ap = _acct_proxy(a, cred, pmap)
+                    if ap:
+                        purl = _proxy_url(ap, "url")
                 fname = a.get("cred_file") or _cred_name(cred)
                 good = []
                 for p in pools:
-                    err = _cpa_push_cred(
-                        fname, cred, st=_cpa_pool_st(s, p))
+                    pst = _cpa_pool_st(s, p)
+                    err = _cpa_push_cred(fname, cred, st=pst,
+                                         purl=purl)
                     if err:
                         res[p["name"]]["failed"][a["email"]] = err
                     else:
                         res[p["name"]]["ok"] += 1
                         good.append(p["name"])
+                        if bind_ip:
+                            if purl:
+                                res[p["name"]]["bound"] += 1
+                            else:
+                                res[p["name"]]["noip"] += 1
+                        if disable:
+                            derr = _cpa_disable_cred(fname, st=pst)
+                            if derr:
+                                res[p["name"]]["dis_failed"][
+                                    a["email"]] = derr
+                            else:
+                                res[p["name"]]["disabled"] += 1
                 if good:
                     a["cpa"] = "yes"
                     a["cpa_at"] = _now()
@@ -9976,12 +11185,7 @@ class H(BaseHTTPRequestHandler):
                     continue
                 it = _sub2_item(a, cred, gids)
                 if bind:
-                    p = pmap.get(a.get("proxy_id") or "") \
-                        or pmap.get((a.get("web") or {})
-                                    .get("px") or "")
-                    if not p and cred.get("proxy_url"):
-                        p, _e = _parse_proxy_line(
-                            cred["proxy_url"])
+                    p = _acct_proxy(a, cred, pmap)
                     if not p:
                         failed[a["email"]] = \
                             "没代理可绑 (proxy_id/web.px/凭证proxy_url都没有)"
@@ -10093,6 +11297,20 @@ class H(BaseHTTPRequestHandler):
             if len(todo) > 500:
                 return self._json({"error": "单次最多测 500 条"}, 400)
             up = _gupstream()
+            if up:
+                # 链式代理前置检查: 上级不通时测什么都是死,
+                # 别把全池 alive 标成 False
+                try:
+                    _s = _dial_via_upstream(
+                        up, todo[0]["host"],
+                        int(todo[0]["port"]), 6)
+                    _s.close()
+                except Exception as e:
+                    return self._json({
+                        "error": "上级代理 %s:%s 不通: %s —— "
+                                 "先修链式代理, 测出来全是假死"
+                                 % (up["host"], up["port"],
+                                    str(e)[:80])})
             results = {}
 
             def _gone(p):
@@ -10100,6 +11318,11 @@ class H(BaseHTTPRequestHandler):
                 results[p["id"]] = {"ok": ok, "ms": ms,
                                     "exit_ip": ip, "err": err}
                 p["alive"] = ok
+                if ok:
+                    p.pop("auth_dead", None)
+                elif err and ("认证" in err
+                              or "auth" in err.lower()):
+                    p["auth_dead"] = time.time()
                 p["latency_ms"] = ms
                 p["exit_ip"] = ip
                 p["checked_at"] = _now()
@@ -10378,7 +11601,13 @@ class H(BaseHTTPRequestHandler):
                     {"error": "没有可用 CPA 号池 (到G设置页配置)"})
             accs = _load_gaccounts()
             ok, failed = 0, {}
-            res = {p["name"]: {"ok": 0, "failed": {}} for p in pools}
+            disable = bool(req.get("disabled"))   # 推入即禁用
+            bind_ip = bool(req.get("bind_ip"))    # 绑账号代理IP
+            pmap = ({p["id"]: p for p in _load_gproxies()}
+                    if bind_ip else {})
+            res = {p["name"]: {"ok": 0, "disabled": 0, "bound": 0,
+                               "noip": 0, "failed": {},
+                               "dis_failed": {}} for p in pools}
             for a in accs:
                 if a["id"] not in ids:
                     continue
@@ -10386,16 +11615,34 @@ class H(BaseHTTPRequestHandler):
                 if not cred:
                     failed[a["email"]] = "没有凭证 (先跑OAuth)"
                     continue
+                purl = None
+                if bind_ip:
+                    ap = _acct_proxy(a, cred, pmap)
+                    if ap:
+                        purl = _proxy_url(ap, "url")
                 fname = a.get("cred_file") or _gcred_name(cred)
                 good = []
                 for p in pools:
-                    err = _cpa_push_cred(
-                        fname, cred, st=_cpa_pool_st(s, p))
+                    pst = _cpa_pool_st(s, p)
+                    err = _cpa_push_cred(fname, cred, st=pst,
+                                         purl=purl)
                     if err:
                         res[p["name"]]["failed"][a["email"]] = err
                     else:
                         res[p["name"]]["ok"] += 1
                         good.append(p["name"])
+                        if bind_ip:
+                            if purl:
+                                res[p["name"]]["bound"] += 1
+                            else:
+                                res[p["name"]]["noip"] += 1
+                        if disable:
+                            derr = _cpa_disable_cred(fname, st=pst)
+                            if derr:
+                                res[p["name"]]["dis_failed"][
+                                    a["email"]] = derr
+                            else:
+                                res[p["name"]]["disabled"] += 1
                 if good:
                     a["cpa"] = "yes"
                     a["cpa_at"] = _now()

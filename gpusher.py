@@ -282,9 +282,32 @@ def _remote_status():
     return remote_call("GET", "/status")
 
 
-def _remote_queue(status_="pending", limit=200):
-    return remote_call(
-        "GET", "/queue?status=%s&limit=%d" % (status_, limit))
+def _remote_queue(status_="pending", limit=200, pool=None):
+    path = "/queue?status=%s&limit=%d" % (status_, limit)
+    if pool:
+        path += "&pool=" + quote(str(pool))
+    return remote_call("GET", path)
+
+
+def remote_pools():
+    """远程上号器支持的池列表 → ([pool...], err)。"""
+    url, pool, _ = _remote_conf()
+    if not url:
+        return [], "远程上号器地址未配置"
+    st, j, err = remote_call("GET", "/status", timeout=15)
+    if err:
+        return ([pool] if pool else []), err
+    j = j or {}
+    # 池清单以 instances[].pool 为准 (每个调度实例一池);
+    # 老版远端没有 instances 就退回 conf.pools
+    pl = [str(i.get("pool")) for i in (j.get("instances") or [])
+          if i.get("pool")]
+    if not pl:
+        pl = [str(x) for x in
+              ((j.get("conf") or {}).get("pools") or []) if x]
+    if pool and pool not in pl:
+        pl.insert(0, pool)
+    return pl or ([pool] if pool else []), None
 
 
 def _remote_control(action):
@@ -734,9 +757,9 @@ def _pending_files(accs):
     return out
 
 
-def _remote_pending_map(limit=500):
+def _remote_pending_map(limit=500, pool=None):
     """远程 pending 队列 {filename: item_id}; 出错 (None, err)。"""
-    st, j, err = _remote_queue("pending", limit)
+    st, j, err = _remote_queue("pending", limit, pool)
     if err:
         return None, err
     return {(it.get("filename") or it.get("name") or ""):
@@ -786,10 +809,11 @@ def _dedup_feed(files, pending):
     return todo, stale
 
 
-def _del_stale(stale_ids):
+def _del_stale(stale_ids, pool=None):
     """推新凭证前把同键的旧 pending 项删掉 (best-effort)。"""
+    suf = ("?pool=" + quote(str(pool))) if pool else ""
     for i in stale_ids:
-        remote_call("DELETE", "/queue/%s" % i, timeout=15)
+        remote_call("DELETE", "/queue/%s%s" % (i, suf), timeout=15)
 
 
 def _feed_remote(conf, reason="tick"):
@@ -1011,7 +1035,12 @@ def control(action, b=None):
                     "err": "上号器队列仅远程模式可用 (到上号器页切远程)"}
         ids = set(b.get("ids") or [])
         accs = _load_accs() or []
-        _, pool, _ = _remote_conf()
+        _, dpool, _ = _remote_conf()
+        pools = [str(x).strip() for x in (b.get("pools") or [])
+                 if str(x).strip()] or ([dpool] if dpool else [])
+        if not pools:
+            return {"ok": 0,
+                    "err": "远程池标识为空 (上号器页配 remote_pool)"}
         sent = _state["remote_sent"]
         files, failed = [], {}
         for a in accs:
@@ -1034,46 +1063,63 @@ def control(action, b=None):
         if not files:
             return {"ok": 0, "err": "选中账号没有可提交的凭证",
                     "failed": failed or None}
-        pending, perr = _remote_pending_map()
-        if perr:
-            return {"ok": 0, "err": "远程队列不可达: " + perr,
-                    "failed": failed or None}
-        todo, stale = _dedup_feed(files, pending)
-        todo_ids = {id(f) for f in todo}
-        for f in files:
-            if id(f) not in todo_ids:
-                failed[f["acc"]["email"]] = "已在队列 (同空间, 不重复投)"
-        if stale:
-            _del_stale(stale)
-        ok = 0
-        for i in range(0, len(todo), 500):
-            chunk = todo[i:i + 500]
-            st, j, err = remote_call(
-                "POST", "/queue",
-                {"pool": pool,
-                 "files": [{"name": f["name"], "content": f["content"]}
-                           for f in chunk]}, timeout=30)
-            if err:
-                for f in chunk:
-                    failed[f["acc"]["email"]] = err
+        res, ok_all = {}, 0
+        for pool in pools:
+            pres = res.setdefault(pool, {"ok": 0, "failed": {}})
+            pending, perr = _remote_pending_map(pool=pool)
+            if perr:
+                for f in files:
+                    pres["failed"][f["acc"]["email"]] = perr
                 continue
-            skipped = {s.get("name"): s.get("err")
-                       for s in (j or {}).get("skipped") or []}
-            now = time.time()
-            for f in chunk:
-                if f["name"] in skipped:
-                    failed[f["acc"]["email"]] = skipped[f["name"]]
+            todo, stale = _dedup_feed(files, pending)
+            todo_ids = {id(f) for f in todo}
+            for f in files:
+                if id(f) not in todo_ids:
+                    pres["failed"][f["acc"]["email"]] = \
+                        "已在队列 (同空间, 不重复投)"
+            if stale:
+                _del_stale(stale, pool)
+            for i in range(0, len(todo), 500):
+                chunk = todo[i:i + 500]
+                st, j, err = remote_call(
+                    "POST", "/queue",
+                    {"pool": pool,
+                     "files": [{"name": f["name"],
+                                "content": f["content"]}
+                               for f in chunk]}, timeout=30)
+                if err:
+                    for f in chunk:
+                        pres["failed"][f["acc"]["email"]] = err
                     continue
-                sent[_sent_key(f["acc"], f.get("ws"))] = {
-                    "file": f["name"], "ts": now}
-                f["acc"]["cred_file"] = f["name"]
-                ok += 1
-        if ok:
+                skipped = {s.get("name"): s.get("err")
+                           for s in (j or {}).get("skipped") or []}
+                now = time.time()
+                for f in chunk:
+                    if f["name"] in skipped:
+                        pres["failed"][f["acc"]["email"]] = \
+                            skipped[f["name"]]
+                        continue
+                    sent[_sent_key(f["acc"], f.get("ws"))] = {
+                        "file": f["name"], "ts": now}
+                    f["acc"]["cred_file"] = f["name"]
+                    f["acc"]["queued"] = "yes"
+                    f["acc"]["queued_at"] = _now()
+                    pdone = set(
+                        (f["acc"].get("queued_pool") or "")
+                        .split("+")) - {""}
+                    pdone.add(pool)
+                    f["acc"]["queued_pool"] = \
+                        "+".join(sorted(pdone))
+                    pres["ok"] += 1
+                    ok_all += 1
+        if ok_all:
             _save_accs(accs)
             _save()
             log_ev("", "queued_remote",
-                   f"手动投喂 {ok} 个 → {pool} (账号页选中)")
-        return {"ok": ok, "failed": failed or None}
+                   "手动投喂 %d 个 → %s (账号页选中)"
+                   % (ok_all, "+".join(pools)))
+        return {"ok": ok_all, "pools": res,
+                "failed": failed or None}
     if action == "del_queue":
         if not remote:
             return {"ok": False, "err": "仅远程模式可删队列项"}

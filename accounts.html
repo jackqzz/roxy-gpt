@@ -104,6 +104,7 @@
     <div class="toolbar-row">
       <input class="form-input" id="q" data-persist placeholder="搜索邮箱 / 代理 / 备注" style="width:200px">
       <select class="form-select" id="f-space" data-persist style="font-size:12px" title="按已加入的空间筛选"></select>
+      <select class="form-select" id="f-group" data-persist style="font-size:12px" title="按自定义分组筛选 (「分组」按钮给选中账号分组)"></select>
       <span style="flex:1"></span>
       <span class="subtitle" id="sel-hint" style="font-size:12px"></span>
       <button class="btn btn-outline btn-sm" id="view-arch" title="归档的账号在这 —— 窗口已删留记录, 可恢复/真删"><i data-ic="archive"></i>已归档 <span id="arch-n">0</span></button>
@@ -144,8 +145,31 @@
         <button class="btn btn-outline btn-sm" id="sub2-push" title="推凭证到 Sub2API —— 下拉勾选目标分组, 默认把账号代理也建/绑到 Sub2"><i data-ic="upload"></i>推Sub2 ▾</button>
         <div class="dd-menu" id="sub2-dd-menu" style="display:none"></div>
       </span>
-      <button class="btn btn-outline btn-sm" id="cpa-queue" title="选中账号的凭证提交到远程上号器队列 —— 不直接进池, 由远程调度器按容量模型自动推 (需上号器页切到远程模式)"><i data-ic="list"></i>推队列</button>
-      <button class="btn btn-outline btn-sm" id="cpa-export" title="导出选中账号的 CPA 凭证 JSON (zip 打包)"><i data-ic="download"></i>导凭证</button>
+      <span class="dd">
+        <button class="btn btn-outline btn-sm" id="cpa-queue" title="选中账号的凭证提交到远程上号器队列 —— 下拉多选目标池, 不直接进池, 由远程调度器按容量模型自动推 (需上号器页切到远程模式)"><i data-ic="list"></i>推队列 ▾</button>
+        <div class="dd-menu" id="q-dd-menu" style="display:none"></div>
+      </span>
+      <span class="dd">
+        <button class="btn btn-outline btn-sm" id="cpa-export" title="导出选中账号的凭证 —— 下拉选格式"><i data-ic="download"></i>导凭证 ▾</button>
+        <div class="dd-menu" id="exp-dd-menu" style="display:none">
+          <div class="dd-opt" data-fmt="cpa" style="cursor:pointer"><span>CPA 格式</span><span class="dd-url">每号一个 codex json, 多个打 zip</span></div>
+          <div class="dd-opt" data-fmt="sub2" style="cursor:pointer"><span>Sub2 格式</span><span class="dd-url">sub2api-data v1 单文件, 带代理可直导</span></div>
+          <div class="dd-opt" data-fmt="acct" style="cursor:pointer"><span>账号格式</span><span class="dd-url">txt 每行: 邮箱----密码----2FA密钥</span></div>
+          <div class="dd-opt" data-fmt="mail" style="cursor:pointer"><span>邮箱+接码链接</span><span class="dd-url">txt 每行: 邮箱----接码链接</span></div>
+        </div>
+      </span>
+      <span class="dd">
+        <button class="btn btn-outline btn-sm" id="mail-copy" title="批量复制选中账号到剪贴板 —— 下拉选格式"><i data-ic="copy"></i>复制 ▾</button>
+        <div class="dd-menu" id="mc-dd-menu" style="display:none">
+          <div class="dd-opt" data-mc="email" style="cursor:pointer"><span>仅邮箱</span><span class="dd-url">每行一个 email</span></div>
+          <div class="dd-opt" data-mc="mail" style="cursor:pointer"><span>邮箱+接码链接</span><span class="dd-url">email----取码链接</span></div>
+          <div class="dd-opt" data-mc="full" style="cursor:pointer"><span>邮箱+密码+2FA</span><span class="dd-url">email----密码----totp密钥</span></div>
+        </div>
+      </span>
+      <span class="dd">
+        <button class="btn btn-outline btn-sm" id="grp-btn" title="给选中账号分组 —— 下拉选已有组/新建/清除"><i data-ic="tag"></i>分组 ▾</button>
+        <div class="dd-menu" id="grp-dd-menu" style="display:none"></div>
+      </span>
       <span class="tb-sep"></span>
       <button class="btn btn-outline btn-sm" id="pusher-toggle" title="上号器: 按容量模型自动把「已生成」凭证补进 CPA 号池"><i data-ic="zap"></i>上号器 <span id="pu-run-dot" class="dot" style="display:none"></span></button>
       <span style="flex:1"></span>
@@ -268,6 +292,9 @@ function filtered() {
     !accWsNames(a).some(n => n !== patWsName));
   else if (fs === "__left__") list = list.filter(a => a.space_left);
   else if (fs) list = list.filter(a => accWsNames(a).includes(fs));
+  const fg = $("f-group").value;
+  if (fg === "__none__") list = list.filter(a => !a.group);
+  else if (fg) list = list.filter(a => a.group === fg);
   if (!q) return list;
   return list.filter(a =>
     a.email.includes(q) || (a.proxy || "").includes(q) ||
@@ -304,6 +331,15 @@ async function load() {
         `<option value="${esc(x)}" ${x === fsv ? "selected" : ""}>${esc(x)}${x === patWsName ? " (PAT)" : ""}</option>`).join("");
   if (fsv && ![...$("f-space").options].some(o => o.value === fsv && o.value))
     $("f-space").value = "";
+  // 分组筛选下拉 (账号上的 group 字段汇总; 保留当前选择)
+  const fgv = $("f-group").value;
+  const groups = [...new Set(accounts.map(a => a.group).filter(Boolean))].sort();
+  $("f-group").innerHTML = `<option value="">全部分组</option>`
+    + `<option value="__none__">未分组</option>`
+    + groups.map(x =>
+        `<option value="${esc(x)}" ${x === fgv ? "selected" : ""}>${esc(x)}</option>`).join("");
+  if (fgv && ![...$("f-group").options].some(o => o.value === fgv))
+    $("f-group").value = "";
   ui.persistReapply();   // data-persist 的待应用值 (f-space 等动态选项)
   // 加入空间母号下拉
   loadMothers();
@@ -395,6 +431,9 @@ function render() {
     const sub2 = a.sub2 === "yes"
       ? ` <span class="pill" style="background:#f0fdf4;color:#15803d;border:1px solid #bbf7d0" title="已推 Sub2API ${esc(a.sub2_at||"")} · 远端账号#${esc(a.sub2_id ?? "?")}${(a.sub2_groups||[]).length ? " · 组 " + esc(a.sub2_groups.join(",")) : ""}">sub2✓</span>`
       : "";
+    const queued = a.queued === "yes" && a.cpa !== "yes"
+      ? ` <span class="pill" style="background:#fefce8;color:#a16207;border:1px solid #fde68a" title="已推上号器队列 ${esc(a.queued_at||"")}${a.queued_pool ? " · 池 " + esc(a.queued_pool) : ""} · ${esc(a.cred_file||"")}">已推队列</span>`
+      : "";
     const acts = a.archived
       ? `<button class="btn btn-ghost btn-sm" data-act="restore" data-id="${a.id}">恢复</button>
          <button class="btn btn-ghost btn-sm" data-act="bind" data-id="${a.id}" title="手动选一条代理绑给这个号 —— 恢复后开窗用这条">${ui.icon("globe")}绑IP</button>
@@ -407,17 +446,20 @@ function render() {
     const archPill = a.archived
       ? ` <span class="pill pill-dim" title="归档于 ${esc(a.archived_at || "?")} —— 窗口已删, 代理绑定保留">${ui.icon("archive")}${esc((a.archived_at || "").slice(5, 10))}</span>`
       : "";
+    const grpPill = a.group
+      ? ` <span class="pill" style="background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe" title="自定义分组">${esc(a.group)}</span>`
+      : "";
     return `<tr>
       <td><input type="checkbox" class="ck" data-id="${a.id}" ${sel.has(a.id) ? "checked" : ""}></td>
       <td class="mono" style="color:var(--text-dim)">${idx}</td>
-      <td class="mono copyable" data-c="${esc(a.email)}" title="点击复制">${esc(a.email)}${archPill}</td>
+      <td class="mono copyable" data-c="${esc(a.email)}" title="点击复制">${esc(a.email)}${archPill}${grpPill}</td>
       <td class="mono">${pw}</td>
       <td>${px}</td>
       <td>${win}</td>
       <td>${reg}${webp}</td>
       <td>${pat}</td>
       <td>${sp}</td>
-      <td>${cpa}${sub2}</td>
+      <td>${cpa}${sub2}${queued}</td>
       <td style="max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(a.note || a.extra || "")}">${esc(a.note || a.extra || "")}</td>
       <td style="text-align:right;white-space:nowrap">${acts}</td>
     </tr>`;
@@ -553,6 +595,7 @@ $("import-close").onclick = () => $("import-box").style.display = "none";
 $("reload").onclick = load;
 $("q").oninput = () => { page = 1; render(); };
 $("f-space").onchange = () => { page = 1; render(); };
+$("f-group").onchange = () => { page = 1; render(); };
 $("pg-prev").onclick = () => { if (page > 1) { page--; render(); } };
 $("pg-next").onclick = () => {
   const pages = Math.ceil(filtered().length / SIZE);
@@ -1100,6 +1143,8 @@ function cpaMenu() {
   m.innerHTML = `<div class="dd-head">推送到号池（可多选）</div>`
     + cpaPools.map((p, i) =>
       `<label class="dd-opt"><input type="checkbox" class="pp-cb" value="${esc(p.name)}" ${i === 0 ? "checked" : ""}><span>${esc(p.name)}</span><span class="dd-url">${esc(p.url)}</span></label>`).join("")
+    + `<div class="dd-opt" style="border-top:1px solid var(--bd)"><label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="pp-bindip">绑账号IP</label><span class="dd-url">账号代理写进凭证 proxy_url, 池里消费走同一IP</span></div>`
+    + `<div class="dd-opt"><label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="pp-disable">推入即禁用</label><span class="dd-url">凭证入池后保持 disabled, 不进入调度</span></div>`
     + `<div class="dd-foot"><button class="btn btn-ghost btn-sm" id="pp-all" title="切换全选/全不选">全选</button><span style="flex:1"></span><button class="btn btn-primary btn-sm" id="pp-go">推送</button></div>`;
 }
 $("cpa-push").onclick = e => {
@@ -1186,46 +1231,190 @@ async function doCpaPush() {
   $("cpa-dd-menu").style.display = "none";
   const btn = $("cpa-push");
   const ids = [...sel];
+  const disabled = !!($("pp-disable") && $("pp-disable").checked);
+  const bind_ip = !!($("pp-bindip") && $("pp-bindip").checked);
   btn.disabled = true;
-  const r = await post("/api/accounts/cpa-push", { ids, pools });
+  const r = await post("/api/accounts/cpa-push",
+                       { ids, pools, disabled, bind_ip });
   btn.disabled = false;
   if (r.error) return toast("✗ " + r.error);
   const bits = Object.entries(r.pools || {}).map(([n, v]) =>
-    `${n}✓${v.ok}` + (Object.keys(v.failed || {}).length
-      ? `✗${Object.keys(v.failed).length}` : ""));
+    `${n}✓${v.ok}` + (v.bound ? `·绑${v.bound}` : "")
+    + (v.noip ? `·无IP${v.noip}` : "")
+    + (v.disabled ? `·禁${v.disabled}` : "")
+    + (Object.keys(v.failed || {}).length
+      ? `✗${Object.keys(v.failed).length}` : "")
+    + (Object.keys(v.dis_failed || {}).length
+      ? `·禁败${Object.keys(v.dis_failed).length}` : ""));
   const fails = r.failed
     ? " · ✗ " + Object.entries(r.failed).map(([k, v]) => k + ": " + v).join(" · ")
     : "";
   toast(`推入池 ${bits.join(" · ") || r.ok + " 个"}` + fails);
   load();
 }
-$("cpa-queue").onclick = async () => {
+// ---------- 推队列: 下拉多选远程池 ----------
+async function qMenu() {
+  const m = $("q-dd-menu");
+  m.innerHTML = `<div class="dd-opt">拉远程池列表中…</div>`;
+  const r = await fetch("/api/pusher/remote-pools")
+    .then(r => r.json()).catch(() => null);
+  const ps = (r && r.pools) || [];
+  m.innerHTML = ps.length
+    ? `<div class="dd-head">推送到远程池（可多选）</div>`
+      + ps.map((p, i) =>
+        `<label class="dd-opt"><input type="checkbox" class="qp-cb" value="${esc(p)}" ${i === 0 ? "checked" : ""}><span>池 ${esc(p)}</span><span class="dd-url">远程上号器调度</span></label>`).join("")
+      + `<div class="dd-foot"><button class="btn btn-ghost btn-sm" id="qp-all">全选</button><span style="flex:1"></span><button class="btn btn-primary btn-sm" id="qp-go">推送</button></div>`
+    : `<div class="dd-opt">${esc((r && r.err) || "没拉到远程池 —— 检查上号器远程配置/模式")}</div>`;
+}
+$("cpa-queue").onclick = e => {
+  e.stopPropagation();
+  const m = $("q-dd-menu");
+  if (m.style.display !== "none") { m.style.display = "none"; return; }
+  qMenu();
+  m.style.display = "block";
+};
+document.addEventListener("click", e => {
+  const m = $("q-dd-menu");
+  if (m && m.style.display !== "none" && !e.target.closest(".dd"))
+    m.style.display = "none";
+});
+$("q-dd-menu").addEventListener("click", e => {
+  if (e.target.closest("#qp-all")) {
+    const cbs = [...$("q-dd-menu").querySelectorAll(".qp-cb")];
+    const all = cbs.length && cbs.every(c => c.checked);
+    cbs.forEach(c => c.checked = !all);
+    return;
+  }
+  if (e.target.closest("#qp-go")) doQueuePush();
+});
+async function doQueuePush() {
   if (!sel.size) return toast("先勾选账号");
+  const pools = [...$("q-dd-menu").querySelectorAll(".qp-cb:checked")]
+    .map(c => c.value);
+  if (!pools.length) return toast("先勾目标远程池");
+  $("q-dd-menu").style.display = "none";
   const btn = $("cpa-queue"); btn.disabled = true;
   const r = await post("/api/pusher/control",
-                       { action: "enqueue_sel", ids: [...sel] });
+    { action: "enqueue_sel", ids: [...sel], pools });
   btn.disabled = false;
   if (r.err) return toast("✗ " + r.err);
+  const bits = Object.entries(r.pools || {}).map(([n, v]) =>
+    `${n}✓${v.ok}` + (Object.keys(v.failed || {}).length
+      ? `✗${Object.keys(v.failed).length}` : ""));
   const fails = r.failed
     ? " · ✗ " + Object.entries(r.failed).map(([k, v]) => k + ": " + v).join(" · ")
     : "";
-  toast(`推队列 ✓${r.ok}` + fails);
+  toast(`推队列 ${bits.join(" · ") || r.ok + " 个"}` + fails);
   load();
+}
+$("cpa-export").onclick = e => {
+  e.stopPropagation();
+  const m = $("exp-dd-menu");
+  m.style.display = m.style.display === "none" ? "block" : "none";
 };
-$("cpa-export").onclick = async () => {
-  if (!sel.size) return toast("先勾选有凭证的账号");
-  const r = await fetch("/api/accounts/cred-export?ids=" + [...sel].join(","));
+document.addEventListener("click", e => {
+  const m = $("exp-dd-menu");
+  if (m && m.style.display !== "none" && !e.target.closest(".dd"))
+    m.style.display = "none";
+});
+$("exp-dd-menu").addEventListener("click", e => {
+  const opt = e.target.closest("[data-fmt]");
+  if (opt) doCredExport(opt.dataset.fmt);
+});
+async function doCredExport(fmt) {
+  $("exp-dd-menu").style.display = "none";
+  if (!sel.size) return toast("先勾选要导出的账号");
+  const r = await fetch(
+    (fmt === "acct"
+      ? "/api/accounts/export?ids="
+      : fmt === "mail"
+      ? "/api/accounts/export?fmt=mail&ids="
+      : "/api/accounts/cred-export?fmt=" + fmt + "&ids=")
+    + [...sel].join(","));
   if (!r.ok) {
     const j = await r.json().catch(() => null);
     return toast("✗ " + ((j && j.error) || `导出失败 ${r.status}`));
   }
   const blob = await r.blob();
   const cd = r.headers.get("content-disposition") || "";
-  const name = (cd.match(/filename="([^"]+)"/) || [])[1] || "cpa-creds.zip";
+  const name = (cd.match(/filename="([^"]+)"/) || [])[1]
+    || (fmt === "sub2" ? "sub2-creds.json"
+       : fmt === "acct" ? "accounts.txt" : "cpa-creds.zip");
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob); a.download = name; a.click();
   URL.revokeObjectURL(a.href);
   toast("✓ 凭证包已下载");
+}
+// ---------- 批量复制 ----------
+$("mail-copy").onclick = e => {
+  e.stopPropagation();
+  const m = $("mc-dd-menu");
+  m.style.display = m.style.display === "none" ? "block" : "none";
+};
+document.addEventListener("click", e => {
+  const m = $("mc-dd-menu");
+  if (m && m.style.display !== "none" && !e.target.closest(".dd"))
+    m.style.display = "none";
+});
+$("mc-dd-menu").addEventListener("click", e => {
+  const opt = e.target.closest("[data-mc]");
+  if (opt) doMailCopy(opt.dataset.mc);
+});
+// ---------- 分组 ----------
+$("grp-btn").onclick = e => {
+  e.stopPropagation();
+  if (!sel.size) return toast("先勾选账号");
+  const m = $("grp-dd-menu");
+  if (m.style.display !== "none") { m.style.display = "none"; return; }
+  const groups = [...new Set(accounts.map(a => a.group).filter(Boolean))].sort();
+  m.innerHTML =
+    groups.map(g =>
+      `<div class="dd-opt" data-grp="${esc(g)}" style="cursor:pointer"><span>${esc(g)}</span><span class="dd-url">分入此组</span></div>`).join("")
+    + `<div class="dd-opt" data-grp="__new__" style="cursor:pointer"><span>＋ 新建分组…</span><span class="dd-url">输入组名</span></div>`
+    + `<div class="dd-opt" data-grp="" style="cursor:pointer"><span>清除分组</span><span class="dd-url">移出所在组</span></div>`;
+  m.style.display = "block";
+};
+document.addEventListener("click", e => {
+  const m = $("grp-dd-menu");
+  if (m && m.style.display !== "none" && !e.target.closest(".dd"))
+    m.style.display = "none";
+});
+$("grp-dd-menu").addEventListener("click", async e => {
+  const opt = e.target.closest("[data-grp]");
+  if (!opt) return;
+  $("grp-dd-menu").style.display = "none";
+  let g = opt.dataset.grp;
+  if (g === "__new__") {
+    g = (prompt("分组名:") || "").trim();
+    if (!g) return;
+  }
+  const r = await post("/api/accounts/group", { ids: [...sel], group: g });
+  if (r.error) return toast("✗ " + r.error);
+  toast(g ? `已分入「${g}」×${r.ok}` : `已清除分组 ×${r.ok}`);
+  load();
+});
+async function doMailCopy(fmt) {
+  $("mc-dd-menu").style.display = "none";
+  if (!sel.size) return toast("先勾选账号");
+  const rows = accounts.filter(a => sel.has(a.id)).map(a => {
+    if (fmt === "email") return a.email;
+    if (fmt === "mail")
+      return a.mail_url ? a.email + "----" + a.mail_url : a.email;
+    return [a.email, a.password || "", a.totp || ""].join("----");
+  });
+  if (!rows.length) return toast("选中里没有账号");
+  const text = rows.join("\n");
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (e) {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand("copy");
+    ta.remove();
+  }
+  toast(`✓ 已复制 ${rows.length} 行`);
 };
 $("oauth-cb-go").onclick = async () => {
   const url = $("oauth-cb").value.trim();
